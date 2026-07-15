@@ -1158,6 +1158,15 @@ class LabelingWidget(LabelDialog):
             icon="ultralytics",
         )
 
+        # Run Monitor action
+        run_monitor = action(
+            self.tr("Run Monitor"),
+            self.open_run_monitor,
+            shortcuts.get("run_monitor", "Ctrl+Shift+R"),
+            "run",
+            self.tr("Open Run Monitor for training script execution and monitoring"),
+        )
+
         zoom = QtWidgets.QWidgetAction(self)
         zoom.setDefaultWidget(self.zoom_widget)
         self.zoom_widget.setWhatsThis(
@@ -2010,6 +2019,7 @@ class LabelingWidget(LabelDialog):
             export=self.menu(self.tr("Export")),
             tool=self.menu(self.tr("Tool")),
             train=self.menu(self.tr("Train")),
+            run=self.menu(self.tr("Run")),
             help=self.menu(self.tr("Help")),
             recent_files=QtWidgets.QMenu(self.tr("Open Recent")),
         )
@@ -2043,6 +2053,7 @@ class LabelingWidget(LabelDialog):
             ),
         )
         utils.add_actions(self.menus.train, (ultralytics_train,))
+        utils.add_actions(self.menus.run, (run_monitor,))
         utils.add_actions(
             self.menus.tool,
             (
@@ -3311,6 +3322,21 @@ class LabelingWidget(LabelDialog):
             self.vqa_window.setAttribute(
                 Qt.WidgetAttribute.WA_DeleteOnClose, False
             )
+        self.vqa_window.show()
+        self.vqa_window.raise_()
+        self.vqa_window.activateWindow()
+
+    def open_run_monitor(self):
+        """Open Run Monitor window for training script execution and monitoring"""
+        from anylabeling.views.run_monitor import RunMonitorWindow
+
+        # Singleton pattern: reuse window if exists
+        if not hasattr(self, '_run_monitor_window') or self._run_monitor_window is None:
+            self._run_monitor_window = RunMonitorWindow(parent=self)
+
+        self._run_monitor_window.show()
+        self._run_monitor_window.raise_()
+        self._run_monitor_window.activateWindow()
         if self.vqa_window.isVisible():
             self.vqa_window.raise_()
             self.vqa_window.activateWindow()
