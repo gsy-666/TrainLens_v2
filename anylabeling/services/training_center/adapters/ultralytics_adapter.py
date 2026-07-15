@@ -1,0 +1,156 @@
+"""Training Center - Ultralytics Adapter
+
+Wraps the existing Ultralytics TrainingManager without modifying it.
+Maps Ultralytics-specific events to unified TrainingEvents.
+"""
+
+import time
+from typing import Callable, Dict, Any, Tuple, List
+
+from .base import TrainingAdapter
+from ..models import TrainingJob
+from ..event_protocol import (
+    TrainingEvent,
+    create_process_started_event,
+    create_console_output_event,
+    create_completed_event,
+    create_failed_event,
+    create_stopped_event,
+)
+
+
+class UltralyticsAdapter(TrainingAdapter):
+    """Adapter for Ultralytics TrainingManager
+
+    Uses composition to wrap existing TrainingManager.
+    Does NOT modify TrainingManager internal implementation.
+    """
+
+    def __init__(self):
+        """Initialize adapter with existing TrainingManager singleton"""
+        from anylabeling.services.auto_training.ultralytics.trainer import (
+            get_training_manager
+        )
+
+        self.manager = get_training_manager()
+        self._callbacks: List[Callable] = []
+        self._current_job_id: str = None
+        self._original_callbacks = self.manager.callbacks.copy()
+
+        # Register our event mapper
+        self.manager.callbacks.append(self._on_training_event)
+
+    def can_start(self) -> Tuple[bool, str]:
+        """Check if Ultralytics training can start"""
+        if self.manager.is_training:
+            return False, "Ultralytics training already in progress"
+        return True, ""
+
+    def start(self, job: TrainingJob, config: Dict[str, Any]) -> Tuple[bool, str]:
+        """Start Ultralytics training
+
+        Args:
+            job: TrainingJob with metadata
+            config: train_args dict expected by TrainingManager.start_training()
+
+        Returns:
+            (success, message)
+        """
+        if not isinstance(config, dict):
+            return False, "Config must be a dict of train_args"
+
+        self._current_job_id = job.job_id
+
+        success, message = self.manager.start_training(config)
+        return success, message
+
+    def stop(self) -> bool:
+        """Stop Ultralytics training"""
+        return self.manager.stop_training()
+
+    def is_running(self) -> bool:
+        """Check if Ultralytics training is running"""
+        return self.manager.is_training
+
+    def subscribe(self, callback: Callable) -> None:
+        """Subscribe to unified training events"""
+        if callback not in self._callbacks:
+            self._callbacks.append(callback)
+
+    def unsubscribe(self, callback: Callable) -> None:
+        """Unsubscribe from training events"""
+        if callback in self._callbacks:
+            self._callbacks.remove(callback)
+
+    def _on_training_event(self, event_type: str, data: dict):
+        """Map Ultralytics events to unified TrainingEvents
+
+        Ultralytics event types:
+        - training_started: {"total_epochs": int}
+        - training_log: {"message": str}
+        - training_completed: {"results": str}
+        - training_error: {"error": str}
+        - training_stopped: {}
+        """
+        if not self._current_job_id:
+            return
+
+        timestamp = time.time()
+        unified_event = None
+
+        if event_type == "training_started":
+            unified_event = create_process_started_event(
+                job_id=self._current_job_id,
+                timestamp=timestamp,
+                source="ultralytics",
+                total_epochs=data.get("total_epochs"),
+            )
+
+        elif event_type == "training_log":
+            unified_event = create_console_output_event(
+                job_id=self._current_job_id,
+                timestamp=timestamp,
+                message=data.get("message", ""),
+                stream="stdout",
+                source="ultralytics",
+            )
+
+        elif event_type == "training_completed":
+            unified_event = create_completed_event(
+                job_id=self._current_job_id,
+                timestamp=timestamp,
+                source="ultralytics",
+                results=data.get("results"),
+            )
+
+        elif event_type == "training_error":
+            unified_event = create_failed_event(
+                job_id=self._current_job_id,
+                timestamp=timestamp,
+                error=data.get("error", "Unknown error"),
+                source="ultralytics",
+            )
+
+        elif event_type == "training_stopped":
+            unified_event = create_stopped_event(
+                job_id=self._current_job_id,
+                timestamp=timestamp,
+                source="ultralytics",
+            )
+
+        if unified_event:
+            self._emit_event(unified_event)
+
+    def _emit_event(self, event: TrainingEvent):
+        """Emit unified event to all subscribers"""
+        for callback in self._callbacks[:]:  # Copy to avoid modification during iteration
+            try:
+                callback(event)
+            except Exception:
+                # Silently ignore callback exceptions to prevent breaking other callbacks
+                pass
+
+    def __del__(self):
+        """Cleanup: restore original callbacks"""
+        if hasattr(self, 'manager') and hasattr(self, '_original_callbacks'):
+            self.manager.callbacks = self._original_callbacks

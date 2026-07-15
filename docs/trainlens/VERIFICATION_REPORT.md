@@ -24,10 +24,11 @@ This report documents the verification process for the Run Monitor implementatio
 ### Files Modified
 
 **Single File Modified**: `anylabeling/views/labeling/label_widget.py`
-- Lines added: 26
+- Lines added: 21
 - Lines deleted: 0
 - Changes: Surgical modification to add Run Monitor menu integration
 - Verification: ✅ Confirmed lazy import pattern, no hardcoded paths, no trailing whitespace
+- Bug fix: Removed accidental VQA window code duplication from line 3340-3344
 
 **Missing Package File Fixed**:
 - Created: `anylabeling/views/run_monitor/widgets/__init__.py`
@@ -182,7 +183,7 @@ class WorkspaceScannerThread(QThread):
 
 | File | Lines Added | Lines Deleted | Purpose |
 |------|-------------|---------------|---------|
-| `anylabeling/views/labeling/label_widget.py` | 26 | 0 | Add Run menu integration |
+| `anylabeling/views/labeling/label_widget.py` | 21 | 0 | Add Run menu integration |
 | `anylabeling/services/run_monitor/script_detector.py` | 7 | 6 | Fix filename matching logic and confidence scores |
 | `tests/trainlens/test_script_detector.py` | 6 | 4 | Update test with realistic content |
 | `anylabeling/views/run_monitor/run_monitor_window.py` | ~70 | ~35 | Add thread-based scanning |
