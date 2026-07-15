@@ -63,7 +63,7 @@ def create_job_created_event(
     job_id: str,
     timestamp: float,
     mode: str,
-    source: str,
+    source: Optional[str] = None,
     **kwargs
 ) -> TrainingEvent:
     """Create job_created event"""
@@ -165,5 +165,90 @@ def create_stopped_event(
         event_type=TrainingEventType.STOPPED,
         timestamp=timestamp,
         payload=kwargs,
+        source=source,
+    )
+
+
+def create_preparing_event(
+    job_id: str,
+    timestamp: float,
+    source: Optional[str] = None,
+    **kwargs
+) -> TrainingEvent:
+    """Create preparing event"""
+    return TrainingEvent(
+        schema_version=1,
+        job_id=job_id,
+        event_type=TrainingEventType.PREPARING,
+        timestamp=timestamp,
+        payload=kwargs,
+        source=source,
+    )
+
+
+def create_resource_sample_event(
+    job_id: str,
+    timestamp: float,
+    cpu_percent: Optional[float] = None,
+    memory_mb: Optional[float] = None,
+    gpu_percent: Optional[float] = None,
+    vram_mb: Optional[float] = None,
+    source: Optional[str] = None,
+    **kwargs
+) -> TrainingEvent:
+    """Create resource_sample event"""
+    payload = {**kwargs}
+    if cpu_percent is not None:
+        payload["cpu_percent"] = cpu_percent
+    if memory_mb is not None:
+        payload["memory_mb"] = memory_mb
+    if gpu_percent is not None:
+        payload["gpu_percent"] = gpu_percent
+    if vram_mb is not None:
+        payload["vram_mb"] = vram_mb
+
+    return TrainingEvent(
+        schema_version=1,
+        job_id=job_id,
+        event_type=TrainingEventType.RESOURCE_SAMPLE,
+        timestamp=timestamp,
+        payload=payload,
+        source=source,
+    )
+
+
+def create_epoch_metrics_event(
+    job_id: str,
+    timestamp: float,
+    epoch: int,
+    metrics: Dict[str, Any],
+    source: Optional[str] = None,
+    **kwargs
+) -> TrainingEvent:
+    """Create epoch_metrics event"""
+    return TrainingEvent(
+        schema_version=1,
+        job_id=job_id,
+        event_type=TrainingEventType.EPOCH_METRICS,
+        timestamp=timestamp,
+        payload={"epoch": epoch, "metrics": metrics, **kwargs},
+        source=source,
+    )
+
+
+def create_checkpoint_saved_event(
+    job_id: str,
+    timestamp: float,
+    checkpoint_path: str,
+    source: Optional[str] = None,
+    **kwargs
+) -> TrainingEvent:
+    """Create checkpoint_saved event"""
+    return TrainingEvent(
+        schema_version=1,
+        job_id=job_id,
+        event_type=TrainingEventType.CHECKPOINT_SAVED,
+        timestamp=timestamp,
+        payload={"checkpoint_path": checkpoint_path, **kwargs},
         source=source,
     )

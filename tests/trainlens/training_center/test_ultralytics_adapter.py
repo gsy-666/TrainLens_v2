@@ -35,7 +35,7 @@ def mock_training_manager():
 def adapter(mock_training_manager):
     """Create UltralyticsAdapter with mocked TrainingManager"""
     with patch(
-        'anylabeling.services.training_center.adapters.ultralytics_adapter.get_training_manager',
+        'anylabeling.services.auto_training.ultralytics.trainer.get_training_manager',
         return_value=mock_training_manager
     ):
         adapter = UltralyticsAdapter()

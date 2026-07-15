@@ -45,7 +45,7 @@ def mock_process_manager():
 def adapter(mock_process_manager):
     """Create CustomScriptAdapter with mocked ProcessManager"""
     with patch(
-        'anylabeling.services.training_center.adapters.custom_script_adapter.ProcessManager',
+        'anylabeling.services.run_monitor.process_manager.ProcessManager',
         return_value=mock_process_manager
     ):
         adapter = CustomScriptAdapter()
@@ -102,7 +102,7 @@ class TestCustomScriptAdapterInterface:
             'arguments': ['--epochs', '100']
         }
 
-        with patch('anylabeling.services.training_center.adapters.custom_script_adapter.Run') as MockRun:
+        with patch('anylabeling.services.run_monitor.models.Run') as MockRun:
             success, message = adapter.start(sample_job, config)
 
         assert success is True
@@ -129,7 +129,7 @@ class TestCustomScriptAdapterInterface:
         """start works without arguments field"""
         config = {'script_path': '/tmp/train.py'}
 
-        with patch('anylabeling.services.training_center.adapters.custom_script_adapter.Run'):
+        with patch('anylabeling.services.run_monitor.models.Run'):
             success, message = adapter.start(sample_job, config)
 
         assert success is True
@@ -139,7 +139,7 @@ class TestCustomScriptAdapterInterface:
         config = {'script_path': '/tmp/train.py'}
         mock_process_manager.start.return_value = False
 
-        with patch('anylabeling.services.training_center.adapters.custom_script_adapter.Run'):
+        with patch('anylabeling.services.run_monitor.models.Run'):
             success, message = adapter.start(sample_job, config)
 
         assert success is False
@@ -331,7 +331,7 @@ class TestRunObjectCreation:
             'arguments': ['--epochs', '100', '--batch-size', '32']
         }
 
-        with patch('anylabeling.services.training_center.adapters.custom_script_adapter.Run') as MockRun:
+        with patch('anylabeling.services.run_monitor.models.Run') as MockRun:
             adapter.start(sample_job, config)
 
         MockRun.assert_called_once()
@@ -349,10 +349,8 @@ class TestRunObjectCreation:
         sample_job.workspace = None
         sample_job.python_executable = None
 
-        with patch('anylabeling.services.training_center.adapters.custom_script_adapter.Run') as MockRun:
-            with patch('anylabeling.services.training_center.adapters.custom_script_adapter.Path') as MockPath:
-                MockPath.cwd.return_value = Path('/default/workspace')
-                adapter.start(sample_job, config)
+        with patch('anylabeling.services.run_monitor.models.Run') as MockRun:
+            adapter.start(sample_job, config)
 
         call_kwargs = MockRun.call_args[1]
         assert call_kwargs['arguments'] == []
