@@ -47,6 +47,16 @@ from anylabeling.services.run_monitor.event_protocol import (
     create_process_failed_event,
 )
 
+# Training Center integration
+from anylabeling.services.training_center.models import (
+    TrainingJob,
+    TrainingMode,
+    TrainingStatus,
+)
+from anylabeling.services.training_center.job_manager import get_job_manager
+from anylabeling.services.training_center.history import get_history_store, JobHistoryRecord
+from anylabeling.services.training_center.event_protocol import TrainingEvent, TrainingEventType
+
 
 class RunMonitorWidget(QWidget):
     """Reusable Run Monitor widget
@@ -65,12 +75,15 @@ class RunMonitorWidget(QWidget):
         # State
         self.workspace: Optional[Workspace] = None
         self.current_run: Optional[Run] = None
+        self.current_job: Optional[TrainingJob] = None  # Unified training job
         self.storage: Optional[RunStorage] = None
         self.scanner_thread: Optional[WorkspaceScannerThread] = None
 
         # Services
         self.process_manager = ProcessManager()
         self.resource_monitor = ResourceMonitor()
+        self.job_manager = get_job_manager()
+        self.history_store = get_history_store()
 
         # Callbacks
         self.on_run_start: Optional[Callable[[Run], None]] = None
@@ -83,6 +96,9 @@ class RunMonitorWidget(QWidget):
         self.process_manager.stdout_ready.connect(self._on_stdout)
         self.process_manager.stderr_ready.connect(self._on_stderr)
         self.resource_monitor.resource_sample.connect(self._on_resource_sample)
+
+        # Subscribe to Training Center events
+        self.job_manager.subscribe_events(self._on_training_event)
 
         # Initialize UI
         self._init_ui()
@@ -371,7 +387,7 @@ class RunMonitorWidget(QWidget):
             self.start_btn.setEnabled(True)
 
     def _on_start_training(self):
-        """Handle start training"""
+        """Handle start training - integrated with JobManager"""
         if not self.workspace:
             return
 
@@ -390,9 +406,31 @@ class RunMonitorWidget(QWidget):
         args_text = self.args_edit.text().strip()
         arguments = args_text.split() if args_text else []
 
-        run_id = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        # Create unified TrainingJob
+        job_id = f"custom_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        self.current_job = TrainingJob(
+            job_id=job_id,
+            mode=TrainingMode.CUSTOM_SCRIPT,
+            status=TrainingStatus.IDLE,
+            created_at=datetime.now(),
+            started_at=None,
+            ended_at=None,
+            workspace=self.workspace.path,
+            output_directory=None,
+            display_name=f"Custom: {selected_script.path.name}",
+            framework=selected_script.framework or "custom",
+            python_executable=selected_env.python_path,
+            command=[str(selected_script.path)] + arguments,
+            metadata={
+                "script_path": str(selected_script.path),
+                "arguments": arguments,
+            },
+            error_message=None,
+        )
+
+        # Create legacy Run for backward compatibility
         self.current_run = Run(
-            run_id=run_id,
+            run_id=job_id,
             workspace_path=self.workspace.path,
             script_path=selected_script.path,
             python_path=selected_env.python_path,
@@ -401,7 +439,7 @@ class RunMonitorWidget(QWidget):
         )
 
         self.console_output.clear()
-        self.console_output.appendPlainText(f"[{run_id}] Starting training...")
+        self.console_output.appendPlainText(f"[{job_id}] Starting training via JobManager...")
         self.console_output.appendPlainText(
             f"Script: {selected_script.path.relative_to(self.workspace.path)}"
         )
@@ -410,10 +448,11 @@ class RunMonitorWidget(QWidget):
             self.console_output.appendPlainText(f"Arguments: {' '.join(arguments)}")
         self.console_output.appendPlainText("")
 
+        # Save to RunStorage (legacy)
         if self.storage:
             self.storage.save_run(self.current_run)
             event = create_run_created_event(
-                run_id=run_id,
+                run_id=job_id,
                 timestamp=time.time(),
                 script=str(selected_script.path),
                 python=str(selected_env.python_path),
@@ -421,11 +460,44 @@ class RunMonitorWidget(QWidget):
             )
             self.storage.save_event(event)
 
-        success = self.process_manager.start(self.current_run)
+        # Save to HistoryStore (unified)
+        history_record = JobHistoryRecord(
+            job_id=job_id,
+            mode=TrainingMode.CUSTOM_SCRIPT.value,
+            status=TrainingStatus.IDLE.value,
+            created_at=self.current_job.created_at.isoformat(),
+            workspace=str(self.workspace.path),
+            display_name=self.current_job.display_name,
+            framework=self.current_job.framework,
+            python_executable=str(selected_env.python_path),
+            command=[str(selected_script.path)] + arguments,
+            metadata=self.current_job.metadata,
+        )
+        self.history_store.append_job(history_record)
+
+        # Request start via JobManager
+        from anylabeling.services.training_center.adapters.custom_script_adapter import CustomScriptAdapter
+
+        adapter = CustomScriptAdapter()
+
+        config = {
+            'script_path': str(selected_script.path),
+            'arguments': arguments,
+        }
+
+        success, message = self.job_manager.request_start(
+            job=self.current_job,
+            adapter=adapter,
+            config=config
+        )
+
         if not success:
-            QMessageBox.critical(self, "Error", "Failed to start training process")
+            QMessageBox.critical(self, "Error", f"Failed to start training: {message}")
             self.current_run = None
+            self.current_job = None
             return
+
+        self.console_output.appendPlainText(f"[System] {message}")
 
         self._update_status(RunStatus.RUNNING)
         self.start_btn.setEnabled(False)
@@ -440,8 +512,9 @@ class RunMonitorWidget(QWidget):
             self.on_run_start(self.current_run)
 
     def _on_stop_training(self):
-        """Handle stop training"""
-        if not self.process_manager.is_running():
+        """Handle stop training - integrated with JobManager"""
+        current_job = self.job_manager.get_current_job()
+        if not current_job or not current_job.status.is_active():
             return
 
         reply = QMessageBox.question(
@@ -452,9 +525,16 @@ class RunMonitorWidget(QWidget):
         )
 
         if reply == QMessageBox.StandardButton.Yes:
-            self.console_output.appendPlainText("\n[System] Stopping training...")
-            self.process_manager.stop()
-            self._update_status(RunStatus.STOPPING)
+            self.console_output.appendPlainText("\n[System] Stopping training via JobManager...")
+
+            # Request stop via JobManager
+            success = self.job_manager.request_stop()
+
+            if success:
+                self.console_output.appendPlainText("[System] Stop signal sent")
+                self._update_status(RunStatus.STOPPING)
+            else:
+                self.console_output.appendPlainText("[System] Stop failed")
 
             # Callback
             if self.on_run_stop:
@@ -482,6 +562,7 @@ class RunMonitorWidget(QWidget):
 
         self.resource_monitor.stop_monitoring()
 
+        # Save to RunStorage (legacy)
         if self.current_run and self.storage:
             duration = 0.0
             if self.current_run.start_time and self.current_run.end_time:
@@ -505,6 +586,16 @@ class RunMonitorWidget(QWidget):
                 )
             self.storage.save_event(event)
             self.storage.save_run(self.current_run)
+
+        # Update unified job via JobManager
+        if self.current_job:
+            if exit_code == 0:
+                self.job_manager.complete_job(self.current_job.job_id)
+            else:
+                self.job_manager.fail_job(
+                    self.current_job.job_id,
+                    error=f"Process exited with code {exit_code}"
+                )
 
         if exit_code == 0:
             self._update_status(RunStatus.COMPLETED)
@@ -601,7 +692,47 @@ class RunMonitorWidget(QWidget):
 
     def is_running(self) -> bool:
         """Check if training is currently running"""
-        return self.process_manager.is_running()
+        current_job = self.job_manager.get_current_job()
+        return current_job is not None and current_job.status.is_active()
+
+    def _on_training_event(self, event: TrainingEvent):
+        """Handle unified training events from JobManager
+
+        Maps TrainingEvent to UI updates and HistoryStore writes.
+        """
+        if not self.current_job or event.job_id != self.current_job.job_id:
+            return
+
+        # Update HistoryStore based on event type
+        if event.event_type == TrainingEventType.PROCESS_STARTED:
+            self.history_store.update_job(
+                event.job_id,
+                status=TrainingStatus.RUNNING.value,
+                started_at=datetime.fromtimestamp(event.timestamp).isoformat(),
+            )
+
+        elif event.event_type == TrainingEventType.COMPLETED:
+            self.history_store.finalize_job(
+                event.job_id,
+                status=TrainingStatus.COMPLETED,
+                ended_at=datetime.fromtimestamp(event.timestamp),
+            )
+
+        elif event.event_type == TrainingEventType.FAILED:
+            error_msg = event.payload.get("error", "Unknown error")
+            self.history_store.finalize_job(
+                event.job_id,
+                status=TrainingStatus.FAILED,
+                ended_at=datetime.fromtimestamp(event.timestamp),
+                error_message=error_msg,
+            )
+
+        elif event.event_type == TrainingEventType.STOPPED:
+            self.history_store.finalize_job(
+                event.job_id,
+                status=TrainingStatus.STOPPED,
+                ended_at=datetime.fromtimestamp(event.timestamp),
+            )
 
     def cleanup(self):
         """Clean up resources (call before destroying widget)"""
@@ -611,5 +742,7 @@ class RunMonitorWidget(QWidget):
 
         self.resource_monitor.stop_monitoring()
 
-        if self.process_manager.is_running():
-            self.process_manager.stop()
+        # Unsubscribe from JobManager events
+        self.job_manager.unsubscribe_events(self._on_training_event)
+
+        # Don't force stop - let JobManager handle graceful shutdown
