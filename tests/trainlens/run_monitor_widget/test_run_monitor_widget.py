@@ -105,14 +105,15 @@ class TestRunMonitorWidgetCallbacks:
         widget.workspace.detected_environments = []
 
         # Simulate successful start
-        with patch.object(widget.process_manager, 'start', return_value=True):
-            widget.script_combo.addItem("train.py", Mock(spec=DetectedScript, path=Path("/tmp/workspace/train.py"), framework="test"))
-            widget.python_combo.addItem("Python 3.12", Mock(spec=PythonEnvironment, python_path=Path("/usr/bin/python3")))
-            widget.script_combo.setEnabled(True)
-            widget.python_combo.setEnabled(True)
-            widget.start_btn.setEnabled(True)
+        with patch('anylabeling.services.run_monitor.process_manager.ProcessManager.start', return_value=True):
+            with patch('anylabeling.services.training_center.job_manager.JobManager.request_start', return_value=(True, "Started")):
+                widget.script_combo.addItem("train.py", Mock(spec=DetectedScript, path=Path("/tmp/workspace/train.py"), framework="test"))
+                widget.python_combo.addItem("Python 3.12", Mock(spec=PythonEnvironment, python_path=Path("/usr/bin/python3")))
+                widget.script_combo.setEnabled(True)
+                widget.python_combo.setEnabled(True)
+                widget.start_btn.setEnabled(True)
 
-            widget._on_start_training()
+                widget._on_start_training()
 
         assert callback.called
         assert callback.call_count == 1
@@ -136,11 +137,27 @@ class TestRunMonitorWidgetState:
     """Test widget state management"""
 
     def test_is_running_reflects_process_manager_state(self, widget):
-        """is_running() reflects ProcessManager state"""
-        with patch.object(widget.process_manager, 'is_running', return_value=False):
+        """is_running() reflects JobManager state"""
+        # Mock JobManager to return no active job
+        with patch.object(widget.job_manager, 'get_current_job', return_value=None):
             assert widget.is_running() is False
 
-        with patch.object(widget.process_manager, 'is_running', return_value=True):
+        # Mock JobManager to return active job
+        from anylabeling.services.training_center.models import TrainingJob, TrainingStatus
+        from datetime import datetime
+        active_job = TrainingJob(
+            job_id="test-001",
+            mode=Mock(),
+            status=TrainingStatus.RUNNING,
+            created_at=datetime.now(),
+            workspace=Path("/tmp"),
+            display_name="Test",
+            framework="test",
+            python_executable=None,
+            command=None,
+            metadata={}
+        )
+        with patch.object(widget.job_manager, 'get_current_job', return_value=active_job):
             assert widget.is_running() is True
 
     def test_workspace_initially_none(self, widget):
@@ -173,12 +190,11 @@ class TestRunMonitorWidgetCleanup:
         assert mock_stop.called
 
     def test_cleanup_stops_process_manager(self, widget):
-        """cleanup stops process manager if running"""
-        with patch.object(widget.process_manager, 'is_running', return_value=True):
-            with patch.object(widget.process_manager, 'stop') as mock_stop:
-                widget.cleanup()
+        """cleanup unsubscribes from JobManager"""
+        with patch.object(widget.job_manager, 'unsubscribe_events') as mock_unsub:
+            widget.cleanup()
 
-            assert mock_stop.called
+        assert mock_unsub.called
 
     def test_cleanup_is_idempotent(self, widget):
         """cleanup can be called multiple times safely"""
