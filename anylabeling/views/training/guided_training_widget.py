@@ -6,6 +6,7 @@ import platform
 import re
 import shutil
 import subprocess
+from pathlib import Path
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QIcon, QPixmap
@@ -58,6 +59,10 @@ from anylabeling.services.auto_training.ultralytics.validators import (
     validate_data_file,
     validate_task_requirements,
 )
+from anylabeling.services.training_center.job_manager import get_job_manager
+from anylabeling.services.training_center.models import TrainingJob, TrainingMode, TrainingStatus
+from anylabeling.services.training_center.adapters.ultralytics_adapter import UltralyticsAdapter
+from anylabeling.services.training_center.event_protocol import TrainingEventType
 
 
 class GuidedTrainingWidget(QWidget):
@@ -97,6 +102,11 @@ class GuidedTrainingWidget(QWidget):
         self.training_manager.callbacks = [
             self.event_redirector.emit_training_event
         ]
+
+        # Integrated JobManager for mutual exclusion with Run Monitor
+        self.job_manager = get_job_manager()
+        self.job_manager.subscribe_events(self._on_training_event_from_job)
+        self.job_manager.subscribe_status(self._on_job_status_change)
 
         # Export related attributes
         self.export_log_redirector = ExportLogRedirector()
@@ -1656,6 +1666,29 @@ class GuidedTrainingWidget(QWidget):
             text = clean_ansi_codes(text)
             self.log_display.append(text.strip())
 
+    def _on_training_event_from_job(self, event):
+        """Handle unified training events from JobManager."""
+        if event.event_type == TrainingEventType.CONSOLE_OUTPUT:
+            log_message = event.payload.get("message", "")
+            if log_message:
+                self.append_training_log(log_message)
+
+    def _on_job_status_change(self, job):
+        """Handle job status changes from JobManager."""
+        if job.status == TrainingStatus.RUNNING:
+            self.training_status = "training"
+            self.start_training_button.setVisible(False)
+            self.stop_training_button.setVisible(True)
+            self.export_button.setVisible(False)
+            self.previous_button.setVisible(False)
+        elif job.status.is_terminal():
+            self.start_training_button.setVisible(True)
+            self.start_training_button.setEnabled(True)
+            self.stop_training_button.setVisible(False)
+            self.previous_button.setVisible(True)
+            if job.status != TrainingStatus.FAILED:
+                self.export_button.setVisible(True)
+
     def init_training_status(self, parent_layout):
         status_group = QGroupBox(self.tr("Training Status"))
         status_layout = QVBoxLayout(status_group)
@@ -1842,7 +1875,7 @@ class GuidedTrainingWidget(QWidget):
         )
 
         if reply == QMessageBox.StandardButton.Yes:
-            success = self.training_manager.stop_training()
+            success = self.job_manager.request_stop()
             if success:
                 self.append_training_log(self.tr("Stopping training..."))
             else:
@@ -1945,13 +1978,41 @@ class GuidedTrainingWidget(QWidget):
         try:
             self.append_training_log(self.tr("Preparing training..."))
             train_args = self.get_training_args(config)
-            success, message = self.training_manager.start_training(train_args)
+
+            # Route through JobManager for mutual exclusion
+            job_id = f"guided_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            self.current_job = TrainingJob(
+                job_id=job_id,
+                mode=TrainingMode.GUIDED_ULTRALYTICS,
+                status=TrainingStatus.IDLE,
+                created_at=datetime.datetime.now(),
+                started_at=None,
+                ended_at=None,
+                workspace=project_path,
+                output_directory=Path(self.current_project_path),
+                display_name=f"Guided: {name}",
+                framework="ultralytics",
+                command=[],
+                metadata={"train_args": train_args},
+                error_message=None,
+            )
+
+            adapter = UltralyticsAdapter()
+            success, message = self.job_manager.request_start(
+                job=self.current_job,
+                adapter=adapter,
+                config=train_args,
+            )
+
             if not success:
                 self.append_training_log(
                     f"Failed to start training: {message}"
                 )
                 QMessageBox.critical(self, self.tr("Training Error"), message)
+                self.current_job = None
                 return
+
+            self.append_training_log(self.tr(f"Training started: {message}"))
 
         except Exception as e:
             error_msg = f"Failed to start training: {str(e)}"
