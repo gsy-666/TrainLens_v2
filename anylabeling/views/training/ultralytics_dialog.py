@@ -26,7 +26,13 @@ from anylabeling.services.auto_training.ultralytics.style import *
 class UltralyticsDialog(QDialog):
     """Thin wrapper providing QDialog interface for GuidedTrainingWidget"""
 
-    def __init__(self, parent=None):
+    def __init__(
+        self,
+        parent=None,
+        job_manager=None,
+        ultralytics_adapter=None,
+        history_store=None
+    ):
         super().__init__(parent)
 
         # Window setup
@@ -40,8 +46,13 @@ class UltralyticsDialog(QDialog):
         self.resize(*DEFAULT_WINDOW_SIZE)
         self.setMinimumSize(*DEFAULT_WINDOW_SIZE)
 
-        # Create the training widget
-        self.training_widget = GuidedTrainingWidget(parent=parent)
+        # Create the training widget with dependency injection
+        self.training_widget = GuidedTrainingWidget(
+            parent=parent,
+            job_manager=job_manager,
+            ultralytics_adapter=ultralytics_adapter,
+            history_store=history_store
+        )
 
         # Layout with no margins
         layout = QVBoxLayout(self)

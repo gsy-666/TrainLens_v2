@@ -33,6 +33,7 @@ from anylabeling.views.labeling.logger import logger
 from anylabeling.views.labeling.utils.qt import new_icon
 from anylabeling.views.labeling.utils.theme import get_theme
 from anylabeling.views.training.widgets.ultralytics_widgets import *
+from anylabeling.views.training.guided_training_widget_events import handle_unified_training_event
 from anylabeling.services.auto_training.ultralytics._io import *
 from anylabeling.services.auto_training.ultralytics.config import *
 from anylabeling.services.auto_training.ultralytics.exporter import (
@@ -60,8 +61,27 @@ from anylabeling.services.auto_training.ultralytics.validators import (
 
 
 class GuidedTrainingWidget(QWidget):
-    def __init__(self, parent=None, image_list=None, output_dir=None, supported_shape=None):
+    def __init__(
+        self,
+        parent=None,
+        image_list=None,
+        output_dir=None,
+        supported_shape=None,
+        job_manager=None,
+        ultralytics_adapter=None,
+        history_store=None
+    ):
         super().__init__(parent)
+
+        # Dependency injection - use provided or get singletons
+        from anylabeling.services.training_center.job_manager import get_job_manager
+        from anylabeling.services.training_center.adapters.ultralytics_adapter import UltralyticsAdapter
+        from anylabeling.services.training_center.history import get_history_store
+
+        self.job_manager = job_manager if job_manager is not None else get_job_manager()
+        self.ultralytics_adapter = ultralytics_adapter if ultralytics_adapter is not None else UltralyticsAdapter()
+        self.history_store = history_store if history_store is not None else get_history_store()
+        self._current_job_id = None
 
         # Accept parameters directly or from parent
         if parent is not None and hasattr(parent, 'image_list'):
@@ -83,7 +103,7 @@ class GuidedTrainingWidget(QWidget):
         self.task_type_buttons = {}
         self.names = []
 
-        # Training related attributes
+        # Training related attributes - keep for backward compatibility
         self.log_redirector = TrainingLogRedirector()
         self.log_redirector.log_signal.connect(
             self.append_training_log, Qt.ConnectionType.QueuedConnection
@@ -96,6 +116,9 @@ class GuidedTrainingWidget(QWidget):
         self.training_manager.callbacks = [
             self.event_redirector.emit_training_event
         ]
+
+        # Subscribe to unified training events from JobManager
+        self.job_manager.subscribe_events(self._on_unified_training_event)
 
         # Export related attributes
         self.export_log_redirector = ExportLogRedirector()
@@ -195,7 +218,7 @@ class GuidedTrainingWidget(QWidget):
     def request_stop(self) -> None:
         """Request to stop the current training"""
         if self.training_status == "training":
-            success = self.training_manager.stop_training()
+            success = self.job_manager.request_stop()
             if success:
                 self.append_training_log(self.tr("Stopping training..."))
             else:
@@ -203,6 +226,19 @@ class GuidedTrainingWidget(QWidget):
 
     def shutdown(self) -> None:
         """Shutdown widget and cleanup resources (idempotent)"""
+        # Unsubscribe from job manager events
+        try:
+            self.job_manager.unsubscribe_events(self._on_unified_training_event)
+        except Exception:
+            pass
+
+        # Only stop training if it belongs to guided mode
+        current_job = self.job_manager.get_current_job()
+        if current_job and current_job.job_id == self._current_job_id:
+            from anylabeling.services.training_center.models import TrainingMode
+            if current_job.mode == TrainingMode.GUIDED_ULTRALYTICS:
+                self.job_manager.request_stop()
+
         # Save logs if needed
         if self.training_status in ["completed", "error", "stop"]:
             self.save_training_logs_to_file()
@@ -1566,6 +1602,10 @@ class GuidedTrainingWidget(QWidget):
                 image_label.setToolTip("")
                 self.image_paths[i] = None
 
+    def _on_unified_training_event(self, event):
+        """Handle unified TrainingEvent from JobManager"""
+        handle_unified_training_event(self, event)
+
     def on_training_event(self, event_type, data):
         if event_type == "training_started":
             self.training_status = "training"
@@ -1816,8 +1856,10 @@ class GuidedTrainingWidget(QWidget):
         )
 
         if reply == QMessageBox.StandardButton.Yes:
-            success = self.training_manager.stop_training()
+            success = self.job_manager.request_stop()
             if success:
+                if hasattr(self, 'stop_training_button'):
+                    self.stop_training_button.setEnabled(False)
                 self.append_training_log(self.tr("Stopping training..."))
             else:
                 self.append_training_log(self.tr("Cancel to stop training"))
@@ -1911,6 +1953,9 @@ class GuidedTrainingWidget(QWidget):
             raise
 
     def start_training_from_train_tab(self):
+        import time
+        from anylabeling.services.training_center.models import TrainingJob, TrainingMode, TrainingStatus
+
         config = self.get_current_config()
         project_path = config["basic"]["project"]
         name = config["basic"]["name"]
@@ -1919,18 +1964,45 @@ class GuidedTrainingWidget(QWidget):
         try:
             self.append_training_log(self.tr("Preparing training..."))
             train_args = self.get_training_args(config)
-            success, message = self.training_manager.start_training(train_args)
+
+            # Create TrainingJob with GUIDED_ULTRALYTICS mode
+            job_id = f"guided_{int(time.time() * 1000)}"
+            self._current_job_id = job_id
+
+            job = TrainingJob(
+                job_id=job_id,
+                mode=TrainingMode.GUIDED_ULTRALYTICS,
+                status=TrainingStatus.IDLE,
+                display_name=f"{self.selected_task_type} - {name}",
+                framework="ultralytics",
+                metadata={
+                    "task": self.selected_task_type,
+                    "model": train_args.get("model", ""),
+                    "project": project_path,
+                    "name": name,
+                }
+            )
+
+            # Request start through JobManager
+            success, message = self.job_manager.request_start(
+                job=job,
+                adapter=self.ultralytics_adapter,
+                config=train_args
+            )
+
             if not success:
                 self.append_training_log(
                     f"Failed to start training: {message}"
                 )
                 QMessageBox.critical(self, self.tr("Training Error"), message)
+                self._current_job_id = None
                 return
 
         except Exception as e:
             error_msg = f"Failed to start training: {str(e)}"
             self.append_training_log(f"ERROR: {error_msg}")
             QMessageBox.critical(self, self.tr("Training Error"), error_msg)
+            self._current_job_id = None
 
     def init_training_actions(self, parent_layout):
         actions_layout = QHBoxLayout()
