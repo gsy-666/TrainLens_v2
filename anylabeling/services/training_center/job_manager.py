@@ -228,6 +228,7 @@ class JobManager:
             self._current_adapter.unsubscribe(self._on_adapter_event)
 
         self._current_adapter = None
+        self._current_job = None
 
     def _on_adapter_event(self, event: TrainingEvent):
         """Forward adapter events to subscribers"""

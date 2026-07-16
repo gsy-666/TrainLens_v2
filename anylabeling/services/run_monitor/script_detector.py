@@ -16,8 +16,10 @@ class ScriptDetector:
     # Filename patterns that suggest training scripts
     TRAINING_FILENAMES = {
         "train.py": 0.4,
-        "main.py": 0.2,
+        "main.py": 0.3,
         "run.py": 0.3,
+        "fit.py": 0.4,
+        "trainer.py": 0.4,
         "run_train.py": 0.4,
         "train_model.py": 0.4,
     }
@@ -134,13 +136,22 @@ class ScriptDetector:
                 reasons.append("has_cli_framework")
                 break
 
-        # Threshold for detection
+        # Threshold for detection with ML framework signals
         if confidence >= 0.5:
             return DetectedScript(
                 path=script_path,
-                framework=detected_framework,
+                framework=detected_framework or "unknown",
                 confidence=min(confidence, 1.0),
                 reasons=reasons,
+            )
+
+        # Fallback: common entry filenames are always runnable even without framework signals
+        if filename_match:
+            return DetectedScript(
+                path=script_path,
+                framework="generic_python",
+                confidence=min(confidence, 1.0),
+                reasons=reasons + ["common_entry_filename_fallback"],
             )
 
         return None

@@ -32,6 +32,9 @@ class ProcessManager(QObject):
         self._run: Optional[Run] = None
         self._stdout_thread: Optional[QThread] = None
         self._stderr_thread: Optional[QThread] = None
+        self._stdout_reader: Optional['OutputReader'] = None
+        self._stderr_reader: Optional['OutputReader'] = None
+        self._finished_streams: set = set()  # Track which streams have finished
 
     def start(self, run: Run) -> bool:
         """
@@ -86,6 +89,9 @@ class ProcessManager(QObject):
             run.pid = self._process.pid
             run.start_time = datetime.now()
             run.status = RunStatus.RUNNING
+
+            # Reset finished streams tracker
+            self._finished_streams.clear()
 
             # Start output readers in threads
             self._start_output_readers()
@@ -182,26 +188,33 @@ class ProcessManager(QObject):
         """Start threads to read stdout and stderr"""
         # Read stdout in thread
         self._stdout_thread = QThread()
-        stdout_reader = OutputReader(self._process.stdout, "stdout")
-        stdout_reader.moveToThread(self._stdout_thread)
-        stdout_reader.line_ready.connect(self.stdout_ready)
-        stdout_reader.finished.connect(self._on_output_finished)
-        self._stdout_thread.started.connect(stdout_reader.run)
+        self._stdout_reader = OutputReader(self._process.stdout, "stdout")
+        self._stdout_reader.moveToThread(self._stdout_thread)
+        self._stdout_reader.line_ready.connect(self.stdout_ready)
+        self._stdout_reader.finished.connect(lambda: self._on_output_finished("stdout"))
+        self._stdout_thread.started.connect(self._stdout_reader.run)
         self._stdout_thread.start()
 
         # Read stderr in thread
         self._stderr_thread = QThread()
-        stderr_reader = OutputReader(self._process.stderr, "stderr")
-        stderr_reader.moveToThread(self._stderr_thread)
-        stderr_reader.line_ready.connect(self.stderr_ready)
-        stderr_reader.finished.connect(self._on_output_finished)
-        self._stderr_thread.started.connect(stderr_reader.run)
+        self._stderr_reader = OutputReader(self._process.stderr, "stderr")
+        self._stderr_reader.moveToThread(self._stderr_thread)
+        self._stderr_reader.line_ready.connect(self.stderr_ready)
+        self._stderr_reader.finished.connect(lambda: self._on_output_finished("stderr"))
+        self._stderr_thread.started.connect(self._stderr_reader.run)
         self._stderr_thread.start()
 
-    def _on_output_finished(self):
-        """Called when output reader finishes"""
-        # Check if process has finished
-        if self._process and self._process.poll() is not None:
+    def _on_output_finished(self, stream_name: str):
+        """Called when output reader finishes
+
+        Args:
+            stream_name: Name of stream that finished ("stdout" or "stderr")
+        """
+        # Track which stream finished
+        self._finished_streams.add(stream_name)
+
+        # Only emit process_finished when BOTH streams are done AND process has exited
+        if len(self._finished_streams) >= 2 and self._process and self._process.poll() is not None:
             exit_code = self._process.returncode
             pid = self._process.pid
 
@@ -232,6 +245,8 @@ class ProcessManager(QObject):
             self._stderr_thread.wait()
             self._stderr_thread = None
 
+        self._stdout_reader = None
+        self._stderr_reader = None
         self._process = None
 
 
