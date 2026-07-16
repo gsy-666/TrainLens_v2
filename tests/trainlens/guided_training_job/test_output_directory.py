@@ -159,7 +159,7 @@ class TestSaveDirWriteBack:
             parent=None, image_list=[], output_dir=temp_dir, supported_shape=[]
         )
         widget.names = []
-        widget.current_project_path = None
+        widget.current_project_path = os.path.join(temp_dir, 'dummy_project')
         widget.training_status = "idle"
         # Mock UI attributes needed by on_training_event
         widget.status_label = MagicMock()
@@ -566,3 +566,124 @@ class TestAdapterForwardsSaveDir:
         assert len(received) == 1
         assert received[0].event_type == TrainingEventType.COMPLETED
         assert received[0].payload.get("save_dir") == "/fake/runs/exp"
+
+
+# ---------------------------------------------------------------------------
+# 11. STOPPED event UI state: buttons, status text, progress preserved
+# ---------------------------------------------------------------------------
+
+
+class TestStoppedEventUIState:
+
+    def _make_ready_widget(self, qapp, temp_dir):
+        from anylabeling.views.training.guided_training_widget import (
+            GuidedTrainingWidget,
+        )
+        widget = GuidedTrainingWidget(
+            parent=None, image_list=[], output_dir=temp_dir, supported_shape=[]
+        )
+        widget.names = []
+        widget.current_project_path = os.path.join(temp_dir, 'dummy_project')
+        widget.training_status = "idle"
+        widget.status_label = MagicMock()
+        widget.progress_bar = MagicMock()
+        widget.log_display = MagicMock()
+        widget.start_training_button = MagicMock()
+        widget.stop_training_button = MagicMock()
+        widget.export_button = MagicMock()
+        widget.previous_button = MagicMock()
+        widget.progress_timer = MagicMock()
+        widget.image_timer = MagicMock()
+        widget.image_labels = []
+        widget.total_epochs = 10
+        widget.current_epochs = 5
+        return widget
+
+    def test_stopped_status_text_no_longer_unknown(self, qapp, temp_dir):
+        """After STOPPED, status text must be 'Training stopped' not 'Unknown status'."""
+        from anylabeling.services.auto_training.ultralytics.config import (
+            TRAINING_STATUS_TEXTS,
+            TRAINING_STATUS_COLORS,
+        )
+
+        assert "stop" in TRAINING_STATUS_TEXTS, (
+            "TRAINING_STATUS_TEXTS missing 'stop' key"
+        )
+        assert "stop" in TRAINING_STATUS_COLORS, (
+            "TRAINING_STATUS_COLORS missing 'stop' key"
+        )
+        assert TRAINING_STATUS_TEXTS.get("stop") != "Unknown status"
+
+    def test_stopped_shows_start_button(self, qapp, temp_dir):
+        """After STOPPED, Start button must be visible and enabled."""
+        widget = self._make_ready_widget(qapp, temp_dir)
+        widget.training_status = "training"
+
+        widget.on_training_event("training_stopped", {})
+
+        # Verify setVisible(True) called on start button
+        visible_calls = widget.start_training_button.setVisible.call_args_list
+        enabled_calls = widget.start_training_button.setEnabled.call_args_list
+
+        assert any(
+            call == ((True,),) for call in visible_calls
+        ), f"Start button setVisible(True) not called, got {visible_calls}"
+        assert any(
+            call == ((True,),) for call in enabled_calls
+        ), f"Start button setEnabled(True) not called, got {enabled_calls}"
+
+        widget.shutdown()
+
+    def test_stopped_hides_stop_button(self, qapp, temp_dir):
+        """After STOPPED, Stop button must be hidden."""
+        widget = self._make_ready_widget(qapp, temp_dir)
+        widget.training_status = "training"
+
+        widget.on_training_event("training_stopped", {})
+
+        visible_calls = widget.stop_training_button.setVisible.call_args_list
+        assert any(
+            call == ((False,),) for call in visible_calls
+        ), f"Stop button setVisible(False) not called, got {visible_calls}"
+
+        widget.shutdown()
+
+    def test_stopped_preserves_progress(self, qapp, temp_dir):
+        """After STOPPED, progress value is not reset to zero."""
+        widget = self._make_ready_widget(qapp, temp_dir)
+        widget.training_status = "training"
+        # Set progress to simulate mid-training
+        widget.progress_bar.value.return_value = 50
+
+        widget.on_training_event("training_stopped", {})
+
+        # progress_bar.setValue(0) should NOT have been called
+        set_value_calls = widget.progress_bar.setValue.call_args_list
+        zero_calls = [c for c in set_value_calls if c == ((0,),)]
+        assert len(zero_calls) == 0, "Progress was reset to 0 after STOPPED"
+
+        widget.shutdown()
+
+    def test_stopped_sets_status_to_stop(self, qapp, temp_dir):
+        """After STOPPED, training_status must be 'stop'."""
+        widget = self._make_ready_widget(qapp, temp_dir)
+        widget.training_status = "training"
+
+        widget.on_training_event("training_stopped", {})
+
+        assert widget.training_status == "stop", (
+            f"Expected 'stop', got '{widget.training_status}'"
+        )
+        widget.shutdown()
+
+    def test_stopped_stops_timers(self, qapp, temp_dir):
+        """After STOPPED, progress and image timers are stopped."""
+        widget = self._make_ready_widget(qapp, temp_dir)
+        widget.training_status = "training"
+
+        widget.on_training_event("training_stopped", {})
+
+        widget.progress_timer.stop.assert_called_once()
+        widget.image_timer.stop.assert_called_once()
+
+        widget.shutdown()

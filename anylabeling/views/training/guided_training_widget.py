@@ -1633,7 +1633,8 @@ class GuidedTrainingWidget(QWidget):
             if real_save_dir and os.path.isdir(real_save_dir):
                 self.current_project_path = real_save_dir
             self.update_training_status_display()
-            self.start_training_button.setVisible(False)
+            self.start_training_button.setVisible(True)
+            self.start_training_button.setEnabled(True)
             self.previous_button.setVisible(True)
             self.stop_training_button.setVisible(False)
             self.export_button.setVisible(False)

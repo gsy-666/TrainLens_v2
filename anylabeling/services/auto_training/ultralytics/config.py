@@ -110,12 +110,14 @@ TRAINING_STATUS_COLORS = {
     "training": "#6f42c1",
     "completed": "#28a745",
     "error": "#ffc107",
+    "stop": "#fd7e14",
 }
 TRAINING_STATUS_TEXTS = {
     "idle": "Ready to train",
     "training": "Training in progress",
     "completed": "Training completed",
     "error": "Training error",
+    "stop": "Training stopped",
 }
 
 
