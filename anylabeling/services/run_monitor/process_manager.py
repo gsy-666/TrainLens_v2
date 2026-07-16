@@ -35,6 +35,7 @@ class ProcessManager(QObject):
         self._stdout_reader: Optional['OutputReader'] = None
         self._stderr_reader: Optional['OutputReader'] = None
         self._finished_streams: set = set()  # Track which streams have finished
+        self._stop_requested: bool = False  # Track if user requested stop
 
     def start(self, run: Run) -> bool:
         """
@@ -90,8 +91,9 @@ class ProcessManager(QObject):
             run.start_time = datetime.now()
             run.status = RunStatus.RUNNING
 
-            # Reset finished streams tracker
+            # Reset state for new run
             self._finished_streams.clear()
+            self._stop_requested = False
 
             # Start output readers in threads
             self._start_output_readers()
@@ -128,10 +130,18 @@ class ProcessManager(QObject):
         if self._process is None:
             return False
 
+        # Idempotent: don't stop twice
+        if self._stop_requested:
+            return False
+
+        self._stop_requested = True
+
         if self._run:
             self._run.status = RunStatus.STOPPING
 
         try:
+            pid = self._process.pid
+
             if platform.system() == "Windows":
                 # Windows: use taskkill to kill process tree
                 subprocess.run(
@@ -153,12 +163,38 @@ class ProcessManager(QObject):
                     # Process already terminated
                     pass
 
-            self._process.wait(timeout=10)
+            # Start a timer to check if process finished and emit signal if needed
+            # This handles the case where force-kill closes pipes before OutputReaders finish
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(100, lambda: self._check_forced_completion(pid))
+
             return True
 
         except Exception as e:
             self.stderr_ready.emit(f"Error stopping process: {e}")
             return False
+
+    def _check_forced_completion(self, pid: int):
+        """Check if process exited but streams haven't finished, and force emit if needed"""
+        # If process has exited but streams haven't both finished, force emit
+        if self._process and self._process.poll() is not None:
+            if len(self._finished_streams) < 2:
+                exit_code = self._process.returncode
+
+                if self._run:
+                    self._run.end_time = datetime.now()
+                    self._run.exit_code = exit_code
+                    if self._run.status == RunStatus.STOPPING:
+                        self._run.status = RunStatus.STOPPED
+                    else:
+                        self._run.status = RunStatus.FAILED
+
+                self.process_finished.emit(pid, exit_code)
+                self._cleanup()
+            # If still not finished, check again
+            elif self._process:
+                from PyQt6.QtCore import QTimer
+                QTimer.singleShot(100, lambda: self._check_forced_completion(pid))
 
     def is_running(self) -> bool:
         """Check if process is running"""

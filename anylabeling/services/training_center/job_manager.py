@@ -101,12 +101,17 @@ class JobManager:
         """Request to stop the current training job
 
         Returns:
-            True if stop signal sent successfully
+            True if stop signal sent successfully, False if already stopping or no job
         """
         with self._state_lock:
             if self._current_job is None:
                 return False
 
+            # If already STOPPING, don't call adapter.stop again (idempotent)
+            if self._current_job.status == TrainingStatus.STOPPING:
+                return False
+
+            # Only PREPARING or RUNNING can transition to STOPPING
             if not self._current_job.status.is_active():
                 return False
 

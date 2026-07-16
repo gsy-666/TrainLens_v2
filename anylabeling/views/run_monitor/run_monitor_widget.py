@@ -80,7 +80,6 @@ class RunMonitorWidget(QWidget):
         self.scanner_thread: Optional[WorkspaceScannerThread] = None
 
         # Services
-        self.process_manager = ProcessManager()
         self.resource_monitor = ResourceMonitor()
         self.job_manager = get_job_manager()
         self.history_store = get_history_store()
@@ -90,11 +89,7 @@ class RunMonitorWidget(QWidget):
         self.on_run_stop: Optional[Callable[[], None]] = None
         self.on_run_complete: Optional[Callable[[int], None]] = None
 
-        # Connect signals
-        self.process_manager.process_started.connect(self._on_process_started)
-        self.process_manager.process_finished.connect(self._on_process_finished)
-        self.process_manager.stdout_ready.connect(self._on_stdout)
-        self.process_manager.stderr_ready.connect(self._on_stderr)
+        # Connect resource monitor
         self.resource_monitor.resource_sample.connect(self._on_resource_sample)
 
         # Subscribe to Training Center events
@@ -527,113 +522,22 @@ class RunMonitorWidget(QWidget):
         if reply == QMessageBox.StandardButton.Yes:
             self.console_output.appendPlainText("\n[System] Stopping training via JobManager...")
 
+            # Disable stop button immediately to prevent double-click
+            self.stop_btn.setEnabled(False)
+            self._update_status(RunStatus.STOPPING)
+
             # Request stop via JobManager
             success = self.job_manager.request_stop()
 
             if success:
                 self.console_output.appendPlainText("[System] Stop signal sent")
-                self._update_status(RunStatus.STOPPING)
             else:
-                self.console_output.appendPlainText("[System] Stop failed")
+                self.console_output.appendPlainText("[System] Stop request failed or already stopping")
+                # Keep button disabled - will be re-enabled on terminal state
 
             # Callback
             if self.on_run_stop:
                 self.on_run_stop()
-
-    def _on_process_started(self, pid: int):
-        """Handle process started"""
-        self.console_output.appendPlainText(f"[System] Process started (PID: {pid})")
-
-        if self.current_run and self.storage:
-            event = create_process_started_event(
-                run_id=self.current_run.run_id,
-                timestamp=time.time(),
-                pid=pid,
-            )
-            self.storage.save_event(event)
-
-        self.resource_monitor.start_monitoring(pid, interval_ms=1000)
-
-    def _on_process_finished(self, pid: int, exit_code: int):
-        """Handle process finished"""
-        self.console_output.appendPlainText(
-            f"\n[System] Process finished (PID: {pid}, exit code: {exit_code})"
-        )
-
-        self.resource_monitor.stop_monitoring()
-
-        # Save to RunStorage (legacy)
-        if self.current_run and self.storage:
-            duration = 0.0
-            if self.current_run.start_time and self.current_run.end_time:
-                duration = (
-                    self.current_run.end_time - self.current_run.start_time
-                ).total_seconds()
-
-            if exit_code == 0:
-                event = create_process_completed_event(
-                    run_id=self.current_run.run_id,
-                    timestamp=time.time(),
-                    exit_code=exit_code,
-                    duration=duration,
-                )
-            else:
-                event = create_process_failed_event(
-                    run_id=self.current_run.run_id,
-                    timestamp=time.time(),
-                    exit_code=exit_code,
-                    error=f"Process exited with code {exit_code}",
-                )
-            self.storage.save_event(event)
-            self.storage.save_run(self.current_run)
-
-        # Update unified job via JobManager
-        if self.current_job:
-            if exit_code == 0:
-                self.job_manager.complete_job(self.current_job.job_id)
-            else:
-                self.job_manager.fail_job(
-                    self.current_job.job_id,
-                    error=f"Process exited with code {exit_code}"
-                )
-
-        if exit_code == 0:
-            self._update_status(RunStatus.COMPLETED)
-        else:
-            self._update_status(RunStatus.FAILED)
-
-        self.stop_btn.setEnabled(False)
-        self.start_btn.setEnabled(True)
-        self.script_combo.setEnabled(True)
-        self.python_combo.setEnabled(True)
-        self.args_edit.setEnabled(True)
-        self.open_workspace_btn.setEnabled(True)
-
-        # Callback
-        if self.on_run_complete:
-            self.on_run_complete(exit_code)
-
-    def _on_stdout(self, line: str):
-        """Handle stdout"""
-        event = EventProtocol.parse_line(line)
-        if event:
-            self.console_output.appendPlainText(f"[Event] {event.event}")
-            if self.storage and self.current_run:
-                self.storage.save_event(event)
-        else:
-            timestamp = datetime.now().strftime("%H:%M:%S")
-            self.console_output.appendPlainText(f"[{timestamp}] {line}")
-
-        if self.storage and self.current_run:
-            self.storage.save_console_line(self.current_run.run_id, line)
-
-    def _on_stderr(self, line: str):
-        """Handle stderr"""
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        self.console_output.appendPlainText(f"[{timestamp}] ERROR: {line}")
-
-        if self.storage and self.current_run:
-            self.storage.save_console_line(self.current_run.run_id, f"ERROR: {line}")
 
     def _on_resource_sample(self, sample: dict):
         """Handle resource sample"""
@@ -705,21 +609,63 @@ class RunMonitorWidget(QWidget):
 
         # Update HistoryStore based on event type
         if event.event_type == TrainingEventType.PROCESS_STARTED:
+            pid = event.payload.get('pid', 0)
+            self.console_output.appendPlainText(f"[System] Process started (PID: {pid})")
+
+            # Start resource monitoring
+            if pid:
+                self.resource_monitor.start_monitoring(pid, interval_ms=1000)
+
             self.history_store.update_job(
                 event.job_id,
                 status=TrainingStatus.RUNNING.value,
                 started_at=datetime.fromtimestamp(event.timestamp).isoformat(),
             )
 
+        elif event.event_type == TrainingEventType.CONSOLE_OUTPUT:
+            # Display console output
+            stream = event.payload.get('stream', 'stdout')
+            message = event.payload.get('message', '')
+
+            if stream == 'stderr':
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                self.console_output.appendPlainText(f"[{timestamp}] ERROR: {message}")
+            else:
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                self.console_output.appendPlainText(f"[{timestamp}] {message}")
+
         elif event.event_type == TrainingEventType.COMPLETED:
+            exit_code = event.payload.get('exit_code', 0)
+            self.console_output.appendPlainText(
+                f"\n[System] Process completed (exit code: {exit_code})"
+            )
+
+            self.resource_monitor.stop_monitoring()
+            self._update_status(RunStatus.COMPLETED)
+            self._reset_ui_after_completion()
+
             self.history_store.finalize_job(
                 event.job_id,
                 status=TrainingStatus.COMPLETED,
                 ended_at=datetime.fromtimestamp(event.timestamp),
             )
 
+            # Callback
+            if self.on_run_complete:
+                self.on_run_complete(exit_code)
+
         elif event.event_type == TrainingEventType.FAILED:
             error_msg = event.payload.get("error", "Unknown error")
+            exit_code = event.payload.get('exit_code', 1)
+            self.console_output.appendPlainText(
+                f"\n[System] Process failed (exit code: {exit_code})"
+            )
+            self.console_output.appendPlainText(f"[System] Error: {error_msg}")
+
+            self.resource_monitor.stop_monitoring()
+            self._update_status(RunStatus.FAILED)
+            self._reset_ui_after_completion()
+
             self.history_store.finalize_job(
                 event.job_id,
                 status=TrainingStatus.FAILED,
@@ -727,12 +673,39 @@ class RunMonitorWidget(QWidget):
                 error_message=error_msg,
             )
 
+            # Callback
+            if self.on_run_complete:
+                self.on_run_complete(exit_code)
+
         elif event.event_type == TrainingEventType.STOPPED:
+            self.console_output.appendPlainText(f"\n[System] Process stopped by user")
+
+            self.resource_monitor.stop_monitoring()
+            self._update_status(RunStatus.STOPPED)
+            self._reset_ui_after_completion()
+
             self.history_store.finalize_job(
                 event.job_id,
                 status=TrainingStatus.STOPPED,
                 ended_at=datetime.fromtimestamp(event.timestamp),
             )
+
+            # Callback
+            if self.on_run_complete:
+                self.on_run_complete(0)
+
+    def _reset_ui_after_completion(self):
+        """Reset UI controls after job completion"""
+        self.stop_btn.setEnabled(False)
+        self.start_btn.setEnabled(True)
+        self.script_combo.setEnabled(True)
+        self.python_combo.setEnabled(True)
+        self.args_edit.setEnabled(True)
+        self.open_workspace_btn.setEnabled(True)
+
+        # Reset resources display
+        self.resources_label.setText("No active run")
+        self.resources_label.setStyleSheet("color: gray;")
 
     def cleanup(self):
         """Clean up resources (call before destroying widget)"""

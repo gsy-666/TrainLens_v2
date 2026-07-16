@@ -164,13 +164,22 @@ class CustomScriptAdapter(TrainingAdapter):
         self._emit_event(event)
 
     def _on_process_finished(self, pid: int, exit_code: int):
-        """Map ProcessManager process_finished to completed/failed event"""
+        """Map ProcessManager process_finished to completed/failed/stopped event"""
         if not self._current_job_id:
             return
 
         timestamp = time.time()
 
-        if exit_code == 0:
+        # Check if user requested stop
+        if self.manager._stop_requested:
+            # User stopped the process - emit STOPPED regardless of exit code
+            event = create_stopped_event(
+                job_id=self._current_job_id,
+                timestamp=timestamp,
+                source="custom_script",
+            )
+        elif exit_code == 0:
+            # Normal completion
             event = create_completed_event(
                 job_id=self._current_job_id,
                 timestamp=timestamp,
@@ -178,6 +187,7 @@ class CustomScriptAdapter(TrainingAdapter):
                 exit_code=exit_code,
             )
         else:
+            # Process failed with non-zero exit
             event = create_failed_event(
                 job_id=self._current_job_id,
                 timestamp=timestamp,
