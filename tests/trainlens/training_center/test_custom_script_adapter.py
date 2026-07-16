@@ -5,6 +5,7 @@ Verifies event mapping from ProcessManager to unified protocol.
 
 import pytest
 import time
+import sys
 from unittest.mock import Mock, MagicMock, patch
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +28,7 @@ def mock_process_manager():
     manager.is_running = Mock(return_value=False)
     manager.start = Mock(return_value=True)
     manager.stop = Mock(return_value=True)
+    manager._stop_requested = False  # Initialize flag for terminal state detection
 
     # Mock PyQt6 signals
     manager.process_started = Mock()
@@ -95,10 +97,16 @@ class TestCustomScriptAdapterInterface:
         assert can_start is False
         assert "already in progress" in reason.lower()
 
-    def test_start_with_valid_config(self, adapter, sample_job, mock_process_manager):
+    def test_start_with_valid_config(self, adapter, sample_job, mock_process_manager, tmp_path):
         """start creates Run and delegates to ProcessManager"""
+        # Create real temp files for validation
+        script_file = tmp_path / "train.py"
+        script_file.write_text("print('training')")
+        sample_job.workspace = tmp_path
+        sample_job.python_executable = Path(sys.executable)
+
         config = {
-            'script_path': '/tmp/train.py',
+            'script_path': str(script_file),
             'arguments': ['--epochs', '100']
         }
 
@@ -125,18 +133,30 @@ class TestCustomScriptAdapterInterface:
         assert success is False
         assert "must be a dict" in message.lower()
 
-    def test_start_with_optional_arguments(self, adapter, sample_job, mock_process_manager):
+    def test_start_with_optional_arguments(self, adapter, sample_job, mock_process_manager, tmp_path):
         """start works without arguments field"""
-        config = {'script_path': '/tmp/train.py'}
+        # Create real temp files for validation
+        script_file = tmp_path / "train.py"
+        script_file.write_text("print('training')")
+        sample_job.workspace = tmp_path
+        sample_job.python_executable = Path(sys.executable)
+
+        config = {'script_path': str(script_file)}
 
         with patch('anylabeling.services.run_monitor.models.Run'):
             success, message = adapter.start(sample_job, config)
 
         assert success is True
 
-    def test_start_failure_from_process_manager(self, adapter, sample_job, mock_process_manager):
+    def test_start_failure_from_process_manager(self, adapter, sample_job, mock_process_manager, tmp_path):
         """start returns failure when ProcessManager.start fails"""
-        config = {'script_path': '/tmp/train.py'}
+        # Create real temp files for validation
+        script_file = tmp_path / "train.py"
+        script_file.write_text("print('training')")
+        sample_job.workspace = tmp_path
+        sample_job.python_executable = Path(sys.executable)
+
+        config = {'script_path': str(script_file)}
         mock_process_manager.start.return_value = False
 
         with patch('anylabeling.services.run_monitor.models.Run'):
@@ -324,10 +344,16 @@ class TestAdapterComposition:
 class TestRunObjectCreation:
     """Test Run object creation for ProcessManager"""
 
-    def test_run_creation_with_full_config(self, adapter, sample_job):
+    def test_run_creation_with_full_config(self, adapter, sample_job, tmp_path):
         """Run object created with all fields"""
+        # Create real temp files for validation
+        script_file = tmp_path / "train.py"
+        script_file.write_text("print('training')")
+        sample_job.workspace = tmp_path
+        sample_job.python_executable = Path(sys.executable)
+
         config = {
-            'script_path': '/tmp/train.py',
+            'script_path': str(script_file),
             'arguments': ['--epochs', '100', '--batch-size', '32']
         }
 
@@ -338,16 +364,20 @@ class TestRunObjectCreation:
         call_kwargs = MockRun.call_args[1]
 
         assert call_kwargs['run_id'] == sample_job.job_id
-        assert call_kwargs['workspace_path'] == sample_job.workspace
-        assert call_kwargs['script_path'] == Path('/tmp/train.py')
-        assert call_kwargs['python_path'] == sample_job.python_executable
+        assert call_kwargs['workspace_path'] == tmp_path
+        assert call_kwargs['script_path'] == script_file
+        assert call_kwargs['python_path'] == Path(sys.executable)
         assert call_kwargs['arguments'] == ['--epochs', '100', '--batch-size', '32']
 
-    def test_run_creation_with_minimal_config(self, adapter, sample_job):
+    def test_run_creation_with_minimal_config(self, adapter, sample_job, tmp_path):
         """Run object created with minimal fields"""
-        config = {'script_path': '/tmp/train.py'}
-        sample_job.workspace = None
-        sample_job.python_executable = None
+        # Create real temp files for validation
+        script_file = tmp_path / "train.py"
+        script_file.write_text("print('training')")
+
+        config = {'script_path': str(script_file)}
+        sample_job.workspace = tmp_path
+        sample_job.python_executable = Path(sys.executable)
 
         with patch('anylabeling.services.run_monitor.models.Run') as MockRun:
             adapter.start(sample_job, config)

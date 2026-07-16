@@ -37,9 +37,9 @@ class TestRunMonitorWidgetCreation:
         """Widget can be created"""
         assert widget is not None
 
-    def test_widget_has_process_manager(self, widget):
-        """Widget initializes ProcessManager"""
-        assert widget.process_manager is not None
+    def test_widget_has_job_manager(self, widget):
+        """Widget initializes JobManager"""
+        assert widget.job_manager is not None
 
     def test_widget_has_resource_monitor(self, widget):
         """Widget initializes ResourceMonitor"""
@@ -121,13 +121,38 @@ class TestRunMonitorWidgetCallbacks:
         assert isinstance(run, Run)
 
     def test_on_run_complete_callback_invoked_on_finish(self, widget):
-        """on_run_complete callback is invoked when process finishes"""
+        """on_run_complete callback is invoked when training completes"""
+        from anylabeling.services.training_center.event_protocol import (
+            TrainingEvent, TrainingEventType
+        )
+        from anylabeling.services.training_center.models import TrainingJob, TrainingMode
+        from datetime import datetime
+        import time
+
         callback = Mock()
         widget.on_run_complete = callback
 
-        widget.current_run = Mock(spec=Run, run_id="test-run-001")
+        # Set up current job
+        widget.current_job = TrainingJob(
+            job_id="test-run-001",
+            mode=TrainingMode.CUSTOM_SCRIPT,
+            workspace=None,
+            display_name="Test",
+            framework="custom"
+        )
 
-        widget._on_process_finished(pid=1234, exit_code=0)
+        # Mock history_store.finalize_job to avoid KeyError
+        with patch.object(widget.history_store, 'finalize_job'):
+            # Simulate COMPLETED event
+            event = TrainingEvent(
+                schema_version=1,
+                job_id="test-run-001",
+                event_type=TrainingEventType.COMPLETED,
+                timestamp=time.time(),
+                payload={'exit_code': 0},
+                source='test'
+            )
+            widget._on_training_event(event)
 
         assert callback.called
         assert callback.call_args[0][0] == 0
@@ -206,18 +231,66 @@ class TestRunMonitorWidgetConsoleOutput:
     """Test console output handling"""
 
     def test_stdout_appends_to_console(self, widget):
-        """stdout is appended to console output"""
+        """stdout is appended to console output via CONSOLE_OUTPUT event"""
+        from anylabeling.services.training_center.event_protocol import (
+            TrainingEvent, TrainingEventType
+        )
+        from anylabeling.services.training_center.models import TrainingJob, TrainingMode
+        import time
+
         initial_text = widget.console_output.toPlainText()
 
-        widget._on_stdout("test output line")
+        # Set up current job
+        widget.current_job = TrainingJob(
+            job_id="test-001",
+            mode=TrainingMode.CUSTOM_SCRIPT,
+            workspace=None,
+            display_name="Test",
+            framework="custom"
+        )
+
+        # Simulate CONSOLE_OUTPUT event
+        event = TrainingEvent(
+            schema_version=1,
+            job_id="test-001",
+            event_type=TrainingEventType.CONSOLE_OUTPUT,
+            timestamp=time.time(),
+            payload={'message': 'test output line', 'stream': 'stdout'},
+            source='test'
+        )
+        widget._on_training_event(event)
 
         final_text = widget.console_output.toPlainText()
         assert "test output line" in final_text
         assert len(final_text) > len(initial_text)
 
     def test_stderr_appends_to_console_with_error_prefix(self, widget):
-        """stderr is appended with ERROR prefix"""
-        widget._on_stderr("test error line")
+        """stderr is appended with ERROR prefix via CONSOLE_OUTPUT event"""
+        from anylabeling.services.training_center.event_protocol import (
+            TrainingEvent, TrainingEventType
+        )
+        from anylabeling.services.training_center.models import TrainingJob, TrainingMode
+        import time
+
+        # Set up current job
+        widget.current_job = TrainingJob(
+            job_id="test-001",
+            mode=TrainingMode.CUSTOM_SCRIPT,
+            workspace=None,
+            display_name="Test",
+            framework="custom"
+        )
+
+        # Simulate CONSOLE_OUTPUT event with stderr
+        event = TrainingEvent(
+            schema_version=1,
+            job_id="test-001",
+            event_type=TrainingEventType.CONSOLE_OUTPUT,
+            timestamp=time.time(),
+            payload={'message': 'test error line', 'stream': 'stderr'},
+            source='test'
+        )
+        widget._on_training_event(event)
 
         final_text = widget.console_output.toPlainText()
         assert "ERROR: test error line" in final_text

@@ -137,9 +137,15 @@ class TestMutualExclusion:
     ):
         """New job can start after previous completes"""
         job_manager.request_start(sample_job, mock_adapter, {})
+
+        # Capture job before completion
+        job_ref = job_manager.get_current_job()
+
         job_manager.complete_job(sample_job.job_id)
 
-        assert job_manager.get_current_job().status == TrainingStatus.COMPLETED
+        # After completion, current_job is cleared
+        assert job_manager.get_current_job() is None
+        assert job_ref.status == TrainingStatus.COMPLETED
 
         job2 = TrainingJob(
             job_id="test-job-003",
@@ -186,11 +192,16 @@ class TestStateTransitions:
         """Failed start transitions to FAILED"""
         mock_adapter.start.return_value = (False, "Failed to start")
 
-        job_manager.request_start(sample_job, mock_adapter, {})
+        # Capture job reference before start (it will be set to PREPARING first)
+        success, msg = job_manager.request_start(sample_job, mock_adapter, {})
 
-        current = job_manager.get_current_job()
-        assert current.status == TrainingStatus.FAILED
-        assert current.error_message == "Failed to start"
+        # After failed start, current_job is cleared
+        assert success is False
+        assert msg == "Failed to start"
+        # Job was set to FAILED before cleanup
+        assert sample_job.status == TrainingStatus.FAILED
+        assert sample_job.error_message == "Failed to start"
+        assert job_manager.get_current_job() is None
 
     def test_stop_transitions_to_stopping(
         self, job_manager, mock_adapter, sample_job
@@ -211,11 +222,16 @@ class TestStateTransitions:
         """complete_job transitions to COMPLETED"""
         job_manager.request_start(sample_job, mock_adapter, {})
 
+        # Capture job before terminal event
+        job_ref = job_manager.get_current_job()
+
         job_manager.complete_job(sample_job.job_id)
 
-        current = job_manager.get_current_job()
-        assert current.status == TrainingStatus.COMPLETED
-        assert current.status.is_terminal()
+        # After terminal event, current_job is cleared
+        assert job_manager.get_current_job() is None
+        # But the job reference we captured has correct status
+        assert job_ref.status == TrainingStatus.COMPLETED
+        assert job_ref.status.is_terminal()
 
     def test_fail_job_transitions_to_failed(
         self, job_manager, mock_adapter, sample_job
@@ -223,12 +239,17 @@ class TestStateTransitions:
         """fail_job transitions to FAILED"""
         job_manager.request_start(sample_job, mock_adapter, {})
 
+        # Capture job before terminal event
+        job_ref = job_manager.get_current_job()
+
         job_manager.fail_job(sample_job.job_id, "Test error")
 
-        current = job_manager.get_current_job()
-        assert current.status == TrainingStatus.FAILED
-        assert current.error_message == "Test error"
-        assert current.status.is_terminal()
+        # After terminal event, current_job is cleared
+        assert job_manager.get_current_job() is None
+        # But the job reference we captured has correct status
+        assert job_ref.status == TrainingStatus.FAILED
+        assert job_ref.error_message == "Test error"
+        assert job_ref.status.is_terminal()
 
     def test_stop_job_transitions_to_stopped(
         self, job_manager, mock_adapter, sample_job
@@ -236,11 +257,16 @@ class TestStateTransitions:
         """stop_job transitions to STOPPED"""
         job_manager.request_start(sample_job, mock_adapter, {})
 
+        # Capture job before terminal event
+        job_ref = job_manager.get_current_job()
+
         job_manager.stop_job(sample_job.job_id)
 
-        current = job_manager.get_current_job()
-        assert current.status == TrainingStatus.STOPPED
-        assert current.status.is_terminal()
+        # After terminal event, current_job is cleared
+        assert job_manager.get_current_job() is None
+        # But the job reference we captured has correct status
+        assert job_ref.status == TrainingStatus.STOPPED
+        assert job_ref.status.is_terminal()
 
 
 class TestIdempotency:
@@ -252,14 +278,19 @@ class TestIdempotency:
         """Calling complete_job twice has no effect"""
         job_manager.request_start(sample_job, mock_adapter, {})
 
-        job_manager.complete_job(sample_job.job_id)
-        first_status = job_manager.get_current_job().status
+        # Capture job before first completion
+        job_ref = job_manager.get_current_job()
 
         job_manager.complete_job(sample_job.job_id)
-        second_status = job_manager.get_current_job().status
+        first_status = job_ref.status
+
+        # Second call should be no-op (job already cleared)
+        job_manager.complete_job(sample_job.job_id)
+        second_status = job_ref.status
 
         assert first_status == TrainingStatus.COMPLETED
         assert second_status == TrainingStatus.COMPLETED
+        assert job_manager.get_current_job() is None
 
     def test_fail_job_after_completed_ignored(
         self, job_manager, mock_adapter, sample_job
@@ -267,11 +298,16 @@ class TestIdempotency:
         """fail_job after complete_job is ignored"""
         job_manager.request_start(sample_job, mock_adapter, {})
 
-        job_manager.complete_job(sample_job.job_id)
-        assert job_manager.get_current_job().status == TrainingStatus.COMPLETED
+        # Capture job before completion
+        job_ref = job_manager.get_current_job()
 
+        job_manager.complete_job(sample_job.job_id)
+        assert job_ref.status == TrainingStatus.COMPLETED
+
+        # Try to fail after completion - should be ignored
         job_manager.fail_job(sample_job.job_id, "Late error")
-        assert job_manager.get_current_job().status == TrainingStatus.COMPLETED
+        assert job_ref.status == TrainingStatus.COMPLETED
+        assert job_manager.get_current_job() is None
 
     def test_stop_job_after_failed_ignored(
         self, job_manager, mock_adapter, sample_job
@@ -279,11 +315,16 @@ class TestIdempotency:
         """stop_job after fail_job is ignored"""
         job_manager.request_start(sample_job, mock_adapter, {})
 
-        job_manager.fail_job(sample_job.job_id, "Error occurred")
-        assert job_manager.get_current_job().status == TrainingStatus.FAILED
+        # Capture job before failure
+        job_ref = job_manager.get_current_job()
 
+        job_manager.fail_job(sample_job.job_id, "Error occurred")
+        assert job_ref.status == TrainingStatus.FAILED
+
+        # Try to stop after failure - should be ignored
         job_manager.stop_job(sample_job.job_id)
-        assert job_manager.get_current_job().status == TrainingStatus.FAILED
+        assert job_ref.status == TrainingStatus.FAILED
+        assert job_manager.get_current_job() is None
 
 
 class TestJobIDValidation:

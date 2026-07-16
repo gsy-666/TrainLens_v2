@@ -40,14 +40,29 @@ def qapp():
 def job_manager():
     """Create JobManager and ensure cleanup after test"""
     jm = JobManager()
-    yield jm
-    # Force cleanup after test
-    if jm.get_current_job() is not None:
+
+    # Force cleanup any previous state before test
+    if jm._current_adapter:
         try:
-            jm.request_stop()
+            jm._current_adapter.stop()
+        except:
+            pass
+        jm._current_adapter.unsubscribe(jm._on_adapter_event)
+    jm._current_adapter = None
+    jm._current_job = None
+
+    yield jm
+
+    # Force cleanup after test
+    if jm._current_adapter:
+        try:
+            jm._current_adapter.stop()
             time.sleep(0.5)
         except:
             pass
+        jm._current_adapter.unsubscribe(jm._on_adapter_event)
+    jm._current_adapter = None
+    jm._current_job = None
 
 
 @pytest.fixture
