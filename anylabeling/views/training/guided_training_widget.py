@@ -10,22 +10,23 @@ import subprocess
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtWidgets import (
-    QVBoxLayout,
-    QHBoxLayout,
-    QTabWidget,
-    QWidget,
-    QPushButton,
-    QLabel,
-    QMessageBox,
-    QScrollArea,
-    QGroupBox,
+    QApplication,
+    QDialog,
     QFileDialog,
     QFormLayout,
     QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QMessageBox,
     QProgressBar,
-    QTextEdit,
-    QApplication,
+    QPushButton,
+    QScrollArea,
     QSizePolicy,
+    QTabWidget,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
 )
 
 from anylabeling.config import get_config
