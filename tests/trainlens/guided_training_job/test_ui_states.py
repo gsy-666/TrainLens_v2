@@ -102,8 +102,9 @@ class TestGuidedTrainingUIStates:
         widget._on_unified_training_event(event)
 
         assert widget.training_status == "training"
-        assert not widget.start_training_button.isVisible()
-        assert widget.stop_training_button.isVisible()
+        # Use isHidden() instead of isVisible() - widget parent chain not shown in test
+        assert widget.start_training_button.isHidden()  # start hidden
+        assert not widget.stop_training_button.isHidden()  # stop not hidden (visible)
         assert widget.stop_training_button.isEnabled()
 
     def test_console_output_appends_once(self, qapp, mock_dependencies):
@@ -184,8 +185,9 @@ class TestGuidedTrainingUIStates:
         widget._on_unified_training_event(event)
 
         assert widget.training_status == "completed"
-        assert not widget.stop_training_button.isVisible()
-        assert widget.export_button.isVisible()
+        # Use isHidden() instead of isVisible() - widget parent chain not shown in test
+        assert widget.stop_training_button.isHidden()  # stop hidden
+        assert not widget.export_button.isHidden()  # export not hidden (visible)
         assert widget._current_job_id is None  # Job cleared after terminal state
 
     def test_failed_state_shows_error(self, qapp, mock_dependencies):
