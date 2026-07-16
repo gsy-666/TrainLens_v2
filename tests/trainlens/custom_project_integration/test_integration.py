@@ -58,24 +58,30 @@ class TestCustomProjectIntegration:
         can_start, reason = adapter.can_start()
         assert can_start is True
 
-    def test_adapter_config_validation(self):
+    def test_adapter_config_validation(self, tmp_path):
         """Adapter validates config correctly"""
+        import sys
         adapter = CustomScriptAdapter()
+
+        # Create a real test script
+        test_script = tmp_path / "train.py"
+        test_script.write_text("print('test')")
+
         job = TrainingJob(
             job_id="test-001",
             mode=TrainingMode.CUSTOM_SCRIPT,
             status=TrainingStatus.IDLE,
             created_at=datetime.now(),
-            workspace=Path("/tmp"),
+            workspace=tmp_path,
             display_name="Test",
             framework="custom",
-            python_executable=Path("/usr/bin/python3"),
+            python_executable=Path(sys.executable),
             command=["train.py"],
             metadata={},
         )
 
         # Valid config
-        valid_config = {'script_path': '/tmp/train.py'}
+        valid_config = {'script_path': str(test_script)}
         with patch('anylabeling.services.run_monitor.process_manager.ProcessManager.start', return_value=True):
             success, _ = adapter.start(job, valid_config)
         assert success is True
