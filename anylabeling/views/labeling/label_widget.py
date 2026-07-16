@@ -3330,18 +3330,20 @@ class LabelingWidget(LabelDialog):
         """Open Run Monitor window for training script execution and monitoring"""
         from anylabeling.views.run_monitor import RunMonitorWindow
 
-        # Singleton pattern: reuse window if exists
-        if not hasattr(self, '_run_monitor_window') or self._run_monitor_window is None:
-            self._run_monitor_window = RunMonitorWindow(parent=self)
-
-        self._run_monitor_window.show()
-        self._run_monitor_window.raise_()
-        self._run_monitor_window.activateWindow()
-        if self.vqa_window.isVisible():
-            self.vqa_window.raise_()
-            self.vqa_window.activateWindow()
+        # Singleton pattern: reuse window if exists and valid
+        if not hasattr(self, 'run_monitor_window') or self.run_monitor_window is None:
+            self.run_monitor_window = RunMonitorWindow(parent=self)
         else:
-            self.vqa_window.show()
+            # Check if window was destroyed (C++ object deleted)
+            try:
+                self.run_monitor_window.isVisible()
+            except RuntimeError:
+                # Window was destroyed, recreate it
+                self.run_monitor_window = RunMonitorWindow(parent=self)
+
+        self.run_monitor_window.show()
+        self.run_monitor_window.raise_()
+        self.run_monitor_window.activateWindow()
 
     def open_paddleocr(self):
         if not hasattr(self, "ppocr_window") or self.ppocr_window is None:
