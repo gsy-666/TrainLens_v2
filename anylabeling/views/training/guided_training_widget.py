@@ -124,11 +124,11 @@ class GuidedTrainingWidget(QWidget):
             self.project_readonly = (
                 app_config.get("training", {})
                 .get("ultralytics", {})
-                .get("project_readonly", True)
+                .get("project_readonly", False)
             )
         except Exception:
             # Fallback for tests or when config is unavailable
-            self.project_readonly = True
+            self.project_readonly = False
 
         self.init_ui()
         self.setStyleSheet(get_ultralytics_dialog_style())
@@ -458,10 +458,12 @@ class GuidedTrainingWidget(QWidget):
             return
 
         self.ensure_config_tab_initialized()
-        project = os.path.join(
-            get_default_project_dir(), self.selected_task_type.lower()
-        )
-        self.config_widgets["project"].setText(project)
+        current_project = self.config_widgets["project"].text().strip()
+        if not current_project:
+            current_project = os.path.join(
+                get_default_project_dir(), self.selected_task_type.lower()
+            )
+            self.config_widgets["project"].setText(current_project)
         self.config_widgets["project"].setReadOnly(self.project_readonly)
 
         self.go_to_specific_tab(1)
@@ -1583,6 +1585,10 @@ class GuidedTrainingWidget(QWidget):
             self.append_training_log(self.tr("Training is about to start..."))
         elif event_type == "training_completed":
             self.training_status = "completed"
+            # Use real save_dir from training worker if available
+            real_save_dir = data.get("save_dir", "")
+            if real_save_dir and os.path.isdir(real_save_dir):
+                self.current_project_path = real_save_dir
             self.update_training_status_display()
             self.stop_training_button.setVisible(False)
             self.start_training_button.setVisible(False)
@@ -1597,6 +1603,9 @@ class GuidedTrainingWidget(QWidget):
             )
         elif event_type == "training_error":
             self.training_status = "error"
+            real_save_dir = data.get("save_dir", "")
+            if real_save_dir and os.path.isdir(real_save_dir):
+                self.current_project_path = real_save_dir
             self.update_training_status_display()
             self.start_training_button.setVisible(False)
             self.previous_button.setVisible(True)
@@ -1608,6 +1617,9 @@ class GuidedTrainingWidget(QWidget):
             self.append_training_log(f"ERROR: {error_msg}")
         elif event_type == "training_stopped":
             self.training_status = "stop"
+            real_save_dir = data.get("save_dir", "")
+            if real_save_dir and os.path.isdir(real_save_dir):
+                self.current_project_path = real_save_dir
             self.update_training_status_display()
             self.start_training_button.setVisible(False)
             self.previous_button.setVisible(True)

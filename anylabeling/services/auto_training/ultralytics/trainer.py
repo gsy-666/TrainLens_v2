@@ -112,7 +112,14 @@ class TrainingManager:
                                     self.training_process
                                 )
                             self.is_training = False
-                            self.notify_callbacks("training_stopped", {})
+                            expected_dir = os.path.join(
+                                train_args.get("project", ""),
+                                train_args.get("name", ""),
+                            )
+                            self.notify_callbacks(
+                                "training_stopped",
+                                {"save_dir": expected_dir},
+                            )
                             return
 
                         output = self.training_process.stdout.readline()
@@ -136,16 +143,24 @@ class TrainingManager:
                     if terminal_event_seen:
                         return
 
+                    expected_dir = os.path.join(
+                        train_args.get("project", ""),
+                        train_args.get("name", ""),
+                    )
                     if return_code == 0:
                         self.notify_callbacks(
                             "training_completed",
-                            {"results": "Training completed successfully"},
+                            {
+                                "results": "Training completed successfully",
+                                "save_dir": expected_dir,
+                            },
                         )
                     else:
                         self.notify_callbacks(
                             "training_error",
                             {
-                                "error": f"Training process exited with code {return_code}"
+                                "error": f"Training process exited with code {return_code}",
+                                "save_dir": expected_dir,
                             },
                         )
 
@@ -393,7 +408,8 @@ def run_training_worker_command(args):
         model = YOLO(train_args.pop("model"))
         train_args["verbose"] = False
         train_args["show"] = False
-        model.train(**train_args)
+        result = model.train(**train_args)
+        save_dir = str(result.save_dir) if hasattr(result, "save_dir") else ""
     except Exception as e:
         log_stream.flush()
         emit_training_worker_event(
@@ -410,6 +426,7 @@ def run_training_worker_command(args):
     emit_training_worker_event(
         "training_completed",
         results="Training completed successfully",
+        save_dir=save_dir,
         output_stream=old_stdout,
     )
 

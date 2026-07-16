@@ -121,6 +121,7 @@ class UltralyticsAdapter(TrainingAdapter):
                 timestamp=timestamp,
                 source="ultralytics",
                 results=data.get("results"),
+                save_dir=data.get("save_dir", ""),
             )
 
         elif event_type == "training_error":
@@ -129,6 +130,7 @@ class UltralyticsAdapter(TrainingAdapter):
                 timestamp=timestamp,
                 error=data.get("error", "Unknown error"),
                 source="ultralytics",
+                save_dir=data.get("save_dir", ""),
             )
 
         elif event_type == "training_stopped":
@@ -136,6 +138,7 @@ class UltralyticsAdapter(TrainingAdapter):
                 job_id=self._current_job_id,
                 timestamp=timestamp,
                 source="ultralytics",
+                save_dir=data.get("save_dir", ""),
             )
 
         if unified_event:
