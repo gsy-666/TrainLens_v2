@@ -283,3 +283,98 @@ class TestAdapterComposition:
         """Adapter preserves original callback list"""
         assert hasattr(adapter, '_original_callbacks')
         assert isinstance(adapter._original_callbacks, list)
+
+
+class TestCallbackNoLeak:
+    """Verify callback list does not grow unboundedly."""
+
+    def test_shutdown_removes_callback(self, mock_training_manager):
+        """shutdown() removes the adapter's callback from manager.callbacks."""
+        initial_count = len(mock_training_manager.callbacks)
+
+        with patch(
+            'anylabeling.services.auto_training.ultralytics.trainer.get_training_manager',
+            return_value=mock_training_manager
+        ):
+            adapter = UltralyticsAdapter()
+            assert len(mock_training_manager.callbacks) == initial_count + 1
+            adapter.shutdown()
+
+        assert len(mock_training_manager.callbacks) == initial_count
+
+    def test_shutdown_is_idempotent(self, mock_training_manager):
+        """Multiple shutdown calls are safe."""
+        with patch(
+            'anylabeling.services.auto_training.ultralytics.trainer.get_training_manager',
+            return_value=mock_training_manager
+        ):
+            adapter = UltralyticsAdapter()
+            adapter.shutdown()
+            adapter.shutdown()
+            adapter.shutdown()
+        # No crash = pass
+
+    def test_three_create_destroy_no_growth(self, mock_training_manager):
+        """Create and shutdown 3 adapters — callback count returns to baseline."""
+        initial = len(mock_training_manager.callbacks)
+
+        for _ in range(3):
+            with patch(
+                'anylabeling.services.auto_training.ultralytics.trainer.get_training_manager',
+                return_value=mock_training_manager
+            ):
+                adapter = UltralyticsAdapter()
+                adapter.shutdown()
+
+        assert len(mock_training_manager.callbacks) == initial
+
+    def test_stale_adapter_does_not_emit(self, mock_training_manager, sample_job):
+        """After shutdown, stale adapter's events are not delivered."""
+        with patch(
+            'anylabeling.services.auto_training.ultralytics.trainer.get_training_manager',
+            return_value=mock_training_manager
+        ):
+            events = []
+            adapter = UltralyticsAdapter()
+            adapter.subscribe(lambda e: events.append(e))
+            adapter.shutdown()
+
+            # After shutdown, callback was removed from manager.callbacks
+            # So firing manager callbacks won't reach the adapter
+            for cb in mock_training_manager.callbacks:
+                cb("training_completed", {"save_dir": "/tmp"})
+
+            # No events should be emitted by the shut-down adapter
+            assert len(events) == 0
+
+    def test_completed_event_not_duplicated(self, mock_training_manager, sample_job):
+        """One training_completed produces exactly one unified event."""
+        with patch(
+            'anylabeling.services.auto_training.ultralytics.trainer.get_training_manager',
+            return_value=mock_training_manager
+        ):
+            adapter = UltralyticsAdapter()
+            adapter._current_job_id = sample_job.job_id
+
+            events = []
+            adapter.subscribe(lambda e: events.append(e))
+
+            adapter._on_training_event("training_completed", {"save_dir": "/tmp/test"})
+            assert len(events) == 1
+            assert events[0].event_type == TrainingEventType.COMPLETED
+
+            adapter.shutdown()
+
+    def test_original_callbacks_preserved(self, mock_training_manager):
+        """Existing callbacks are NOT removed by adapter shutdown."""
+        original_count = len(mock_training_manager.callbacks)
+
+        with patch(
+            'anylabeling.services.auto_training.ultralytics.trainer.get_training_manager',
+            return_value=mock_training_manager
+        ):
+            adapter = UltralyticsAdapter()
+            adapter.shutdown()
+
+        # Original callbacks must still be there
+        assert len(mock_training_manager.callbacks) == original_count

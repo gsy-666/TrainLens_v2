@@ -240,6 +240,12 @@ class JobManager:
         """Cleanup after job reaches terminal state"""
         if self._current_adapter:
             self._current_adapter.unsubscribe(self._on_adapter_event)
+            # Explicit shutdown: remove adapter callback from underlying manager
+            if hasattr(self._current_adapter, 'shutdown'):
+                try:
+                    self._current_adapter.shutdown()
+                except Exception:
+                    pass
 
         self._current_adapter = None
         self._current_job = None
