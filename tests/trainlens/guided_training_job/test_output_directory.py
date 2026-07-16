@@ -4,6 +4,7 @@ import os
 import json
 import tempfile
 import shutil
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -315,6 +316,228 @@ class TestDefaultBehaviorPreserved:
 # ---------------------------------------------------------------------------
 # 7. Adapter forwards save_dir in unified events
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 8. JobManager writes save_dir to job.output_directory
+# ---------------------------------------------------------------------------
+
+
+class TestJobManagerOutputDir:
+
+    def test_complete_job_sets_output_directory(self, temp_dir):
+        from anylabeling.services.training_center.job_manager import (
+            JobManager,
+        )
+        from anylabeling.services.training_center.models import (
+            TrainingJob, TrainingMode, TrainingStatus,
+        )
+        from anylabeling.services.training_center.event_protocol import (
+            TrainingEvent, TrainingEventType,
+        )
+
+        mgr = JobManager()
+        job = TrainingJob(
+            job_id="test-job",
+            mode=TrainingMode.GUIDED_ULTRALYTICS,
+            status=TrainingStatus.RUNNING,
+        )
+        mgr._current_job = job
+        mgr._current_adapter = MagicMock()
+
+        save_dir = os.path.join(temp_dir, "runs", "real_exp")
+        mgr.complete_job("test-job", ended_at=123456.0, metadata={
+            "results": "ok", "save_dir": save_dir,
+        })
+
+        assert job.output_directory == Path(save_dir), (
+            f"Expected {save_dir}, got {job.output_directory}"
+        )
+
+    def test_fail_job_sets_output_directory(self, temp_dir):
+        from anylabeling.services.training_center.job_manager import (
+            JobManager,
+        )
+        from anylabeling.services.training_center.models import (
+            TrainingJob, TrainingMode, TrainingStatus,
+        )
+
+        mgr = JobManager()
+        job = TrainingJob(
+            job_id="test-job",
+            mode=TrainingMode.GUIDED_ULTRALYTICS,
+            status=TrainingStatus.RUNNING,
+        )
+        mgr._current_job = job
+        mgr._current_adapter = MagicMock()
+
+        save_dir = os.path.join(temp_dir, "runs", "fail_exp")
+        mgr.fail_job("test-job", error="bad", ended_at=123456.0, metadata={
+            "save_dir": save_dir,
+        })
+
+        assert job.output_directory == Path(save_dir)
+
+    def test_stop_job_sets_output_directory(self, temp_dir):
+        from anylabeling.services.training_center.job_manager import (
+            JobManager,
+        )
+        from anylabeling.services.training_center.models import (
+            TrainingJob, TrainingMode, TrainingStatus,
+        )
+
+        mgr = JobManager()
+        job = TrainingJob(
+            job_id="test-job",
+            mode=TrainingMode.GUIDED_ULTRALYTICS,
+            status=TrainingStatus.RUNNING,
+        )
+        mgr._current_job = job
+        mgr._current_adapter = MagicMock()
+
+        save_dir = os.path.join(temp_dir, "runs", "stop_exp")
+        mgr.stop_job("test-job", ended_at=123456.0, metadata={
+            "save_dir": save_dir,
+        })
+
+        assert job.output_directory == Path(save_dir)
+
+    def test_no_save_dir_does_not_overwrite(self, temp_dir):
+        from anylabeling.services.training_center.job_manager import (
+            JobManager,
+        )
+        from anylabeling.services.training_center.models import (
+            TrainingJob, TrainingMode, TrainingStatus,
+        )
+        from pathlib import Path
+
+        mgr = JobManager()
+        original_dir = Path(os.path.join(temp_dir, "original"))
+        job = TrainingJob(
+            job_id="test-job",
+            mode=TrainingMode.GUIDED_ULTRALYTICS,
+            status=TrainingStatus.RUNNING,
+            output_directory=original_dir,
+        )
+        mgr._current_job = job
+        mgr._current_adapter = MagicMock()
+
+        mgr.complete_job("test-job", ended_at=123456.0, metadata={
+            "results": "ok",
+            # No save_dir
+        })
+
+        assert job.output_directory == original_dir
+
+
+# ---------------------------------------------------------------------------
+# 9. HistoryStore records output_directory
+# ---------------------------------------------------------------------------
+
+
+class TestHistoryStoreOutputDir:
+
+    def test_history_finalize_stores_output_dir(self, temp_dir):
+        from anylabeling.services.training_center.history import (
+            HistoryStore, JobHistoryRecord,
+        )
+        from anylabeling.services.training_center.models import (
+            TrainingStatus,
+        )
+        from datetime import datetime
+
+        store = HistoryStore(
+            history_dir=str(temp_dir),
+        )
+
+        record = JobHistoryRecord(
+            job_id="test-job",
+            mode="guided_ultralytics",
+            status=TrainingStatus.RUNNING.value,
+            created_at=datetime.now().isoformat(),
+            display_name="test",
+        )
+        store.append_job(record)
+
+        save_dir = os.path.join(temp_dir, "runs", "real_exp")
+        store.finalize_job(
+            "test-job",
+            status=TrainingStatus.COMPLETED,
+            ended_at=datetime.now(),
+            output_directory=save_dir,
+        )
+
+        updated = store.get_job("test-job")
+        assert updated.output_directory == save_dir, (
+            f"Expected {save_dir}, got {updated.output_directory}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 10. Project Browse button
+# ---------------------------------------------------------------------------
+
+
+class TestProjectBrowseButton:
+
+    def test_browse_project_dir_exists(self, qapp, temp_dir):
+        from anylabeling.views.training.guided_training_widget import (
+            GuidedTrainingWidget,
+        )
+        widget = GuidedTrainingWidget(
+            parent=None, image_list=[], output_dir=temp_dir, supported_shape=[]
+        )
+        widget.names = []
+        widget.ensure_config_tab_initialized()
+
+        assert hasattr(widget, 'browse_project_dir'), (
+            "browse_project_dir method missing"
+        )
+        assert callable(widget.browse_project_dir)
+
+        widget.shutdown()
+
+    def test_browse_cancel_preserves_original_value(self, qapp, temp_dir):
+        from anylabeling.views.training.guided_training_widget import (
+            GuidedTrainingWidget,
+        )
+        widget = GuidedTrainingWidget(
+            parent=None, image_list=[], output_dir=temp_dir, supported_shape=[]
+        )
+        widget.names = []
+        widget.ensure_config_tab_initialized()
+
+        original = os.path.join(temp_dir, "my_project")
+        widget.config_widgets["project"].setText(original)
+
+        with patch(
+            "anylabeling.views.training.guided_training_widget.QFileDialog.getExistingDirectory",
+            return_value="",
+        ):
+            widget.browse_project_dir()
+            assert widget.config_widgets["project"].text() == original
+
+        widget.shutdown()
+
+    def test_browse_select_updates_project(self, qapp, temp_dir):
+        from anylabeling.views.training.guided_training_widget import (
+            GuidedTrainingWidget,
+        )
+        widget = GuidedTrainingWidget(
+            parent=None, image_list=[], output_dir=temp_dir, supported_shape=[]
+        )
+        widget.names = []
+        widget.ensure_config_tab_initialized()
+
+        new_dir = os.path.join(temp_dir, "selected_project")
+        os.makedirs(new_dir, exist_ok=True)
+
+        with patch(
+            "anylabeling.views.training.guided_training_widget.QFileDialog.getExistingDirectory",
+            return_value=new_dir,
+        ):
+            widget.browse_project_dir()
+            assert widget.config_widgets["project"].text() == new_dir
+
+        widget.shutdown()
 
 
 class TestAdapterForwardsSaveDir:

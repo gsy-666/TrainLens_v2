@@ -648,6 +648,7 @@ class RunMonitorWidget(QWidget):
                 event.job_id,
                 status=TrainingStatus.COMPLETED,
                 ended_at=datetime.fromtimestamp(event.timestamp),
+                output_directory=event.payload.get('save_dir', ''),
             )
 
             # Callback
@@ -671,6 +672,7 @@ class RunMonitorWidget(QWidget):
                 status=TrainingStatus.FAILED,
                 ended_at=datetime.fromtimestamp(event.timestamp),
                 error_message=error_msg,
+                output_directory=event.payload.get('save_dir', ''),
             )
 
             # Callback
@@ -688,6 +690,7 @@ class RunMonitorWidget(QWidget):
                 event.job_id,
                 status=TrainingStatus.STOPPED,
                 ended_at=datetime.fromtimestamp(event.timestamp),
+                output_directory=event.payload.get('save_dir', ''),
             )
 
             # Callback

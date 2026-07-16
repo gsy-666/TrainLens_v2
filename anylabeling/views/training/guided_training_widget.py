@@ -509,6 +509,13 @@ class GuidedTrainingWidget(QWidget):
         if file_path:
             self.config_widgets["model"].setText(file_path)
 
+    def browse_project_dir(self):
+        dir_path = QFileDialog.getExistingDirectory(
+            self, self.tr("Select Project Directory"), ""
+        )
+        if dir_path:
+            self.config_widgets["project"].setText(dir_path)
+
     def browse_data_file(self):
         if self.selected_task_type == "Classify":
             dir_path = QFileDialog.getExistingDirectory(
@@ -600,6 +607,7 @@ class GuidedTrainingWidget(QWidget):
         )
         layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
 
+        project_layout = QHBoxLayout()
         self.config_widgets["project"] = CustomLineEdit()
         selected_task_type = (
             self.selected_task_type.lower()
@@ -610,7 +618,11 @@ class GuidedTrainingWidget(QWidget):
             get_default_project_dir(), selected_task_type
         )
         self.config_widgets["project"].setText(text_project)
-        layout.addRow("Project:", self.config_widgets["project"])
+        project_browse_btn = SecondaryButton("Browse")
+        project_browse_btn.clicked.connect(self.browse_project_dir)
+        project_layout.addWidget(self.config_widgets["project"])
+        project_layout.addWidget(project_browse_btn)
+        layout.addRow("Project:", project_layout)
 
         self.config_widgets["name"] = CustomLineEdit()
         self.config_widgets["name"].setText("exp")

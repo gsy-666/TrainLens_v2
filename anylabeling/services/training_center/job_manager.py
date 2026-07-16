@@ -142,6 +142,9 @@ class JobManager:
 
             if 'metadata' in kwargs:
                 self._current_job.metadata.update(kwargs['metadata'])
+                save_dir = kwargs['metadata'].get('save_dir', '')
+                if save_dir:
+                    self._current_job.output_directory = Path(save_dir)
 
             self._notify_status_change(self._current_job)
             self._cleanup_job()
@@ -167,6 +170,9 @@ class JobManager:
 
             if 'metadata' in kwargs:
                 self._current_job.metadata.update(kwargs['metadata'])
+                save_dir = kwargs['metadata'].get('save_dir', '')
+                if save_dir:
+                    self._current_job.output_directory = Path(save_dir)
 
             self._notify_status_change(self._current_job)
             self._cleanup_job()
@@ -190,6 +196,9 @@ class JobManager:
 
             if 'metadata' in kwargs:
                 self._current_job.metadata.update(kwargs['metadata'])
+                save_dir = kwargs['metadata'].get('save_dir', '')
+                if save_dir:
+                    self._current_job.output_directory = Path(save_dir)
 
             self._notify_status_change(self._current_job)
             self._cleanup_job()

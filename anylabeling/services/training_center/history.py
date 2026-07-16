@@ -226,6 +226,11 @@ class HistoryStore:
             if error_message:
                 record.error_message = error_message
 
+            # Write back real output directory
+            output_directory = metrics.pop('output_directory', None)
+            if output_directory:
+                record.output_directory = str(output_directory)
+
             # Calculate duration
             if record.started_at and record.ended_at:
                 start = datetime.fromisoformat(record.started_at)
