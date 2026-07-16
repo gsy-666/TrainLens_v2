@@ -1970,6 +1970,20 @@ class GuidedTrainingWidget(QWidget):
             raise
 
     def start_training_from_train_tab(self):
+        # ── Early mutual exclusion check ──
+        # Must happen BEFORE expensive data preparation (dataset creation, etc.)
+        current = self.job_manager.get_current_job()
+        if current is not None and current.status.is_active():
+            QMessageBox.critical(
+                self, self.tr("Training Busy"),
+                self.tr(
+                    f"Another training job is already running:\n"
+                    f"{current.display_name}\n\n"
+                    f"Please stop it or wait for it to finish before starting a new one."
+                ),
+            )
+            return
+
         config = self.get_current_config()
         project_path = config["basic"]["project"]
         name = config["basic"]["name"]

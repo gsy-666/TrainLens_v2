@@ -3257,17 +3257,15 @@ class LabelingWidget(LabelDialog):
 
     # Trainer
     def start_training(self, mode):
+        """Open unified TrainingCenterWindow (non-modal).
+
+        Kept for backward-compatible toolbar action binding.
+        """
         if mode == "ultralytics":
-            dialog = UltralyticsDialog(self)
+            from anylabeling.views.training.training_center_window import open_training_center
+            open_training_center(parent=self, tab="guided")
         else:
             return
-
-        try:
-            _ = dialog.exec()
-        except Exception as e:
-            self.error_message(
-                "Start Error", f"Failed to start training dialog: {str(e)}"
-            )
 
     # Tools
     def overview(self):
@@ -3327,23 +3325,9 @@ class LabelingWidget(LabelDialog):
         self.vqa_window.activateWindow()
 
     def open_run_monitor(self):
-        """Open Run Monitor window for training script execution and monitoring"""
-        from anylabeling.views.run_monitor import RunMonitorWindow
-
-        # Singleton pattern: reuse window if exists and valid
-        if not hasattr(self, 'run_monitor_window') or self.run_monitor_window is None:
-            self.run_monitor_window = RunMonitorWindow(parent=self)
-        else:
-            # Check if window was destroyed (C++ object deleted)
-            try:
-                self.run_monitor_window.isVisible()
-            except RuntimeError:
-                # Window was destroyed, recreate it
-                self.run_monitor_window = RunMonitorWindow(parent=self)
-
-        self.run_monitor_window.show()
-        self.run_monitor_window.raise_()
-        self.run_monitor_window.activateWindow()
+        """Open Run Monitor via unified TrainingCenterWindow (non-modal)."""
+        from anylabeling.views.training.training_center_window import open_training_center
+        open_training_center(parent=self, tab="custom")
 
     def open_paddleocr(self):
         if not hasattr(self, "ppocr_window") or self.ppocr_window is None:

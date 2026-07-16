@@ -386,6 +386,17 @@ class RunMonitorWidget(QWidget):
         if not self.workspace:
             return
 
+        # ── Early mutual exclusion check ──
+        current = self.job_manager.get_current_job()
+        if current is not None and current.status.is_active():
+            QMessageBox.critical(
+                self, "Training Busy",
+                f"Another training job is already running:\n"
+                f"{current.display_name}\n\n"
+                f"Please stop it or wait for it to finish before starting a new one."
+            )
+            return
+
         script_idx = self.script_combo.currentIndex()
         python_idx = self.python_combo.currentIndex()
 
