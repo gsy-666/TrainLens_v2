@@ -53,7 +53,7 @@ class TestRunMonitorWidgetCreation:
         assert widget.envs_label is not None
         assert widget.status_label is not None
         assert widget.script_combo is not None
-        assert widget.python_combo is not None
+        assert widget.python_path_edit is not None
         assert widget.args_edit is not None
         assert widget.console_output is not None
         assert widget.resources_label is not None
@@ -108,9 +108,8 @@ class TestRunMonitorWidgetCallbacks:
         with patch('anylabeling.services.run_monitor.process_manager.ProcessManager.start', return_value=True):
             with patch('anylabeling.services.training_center.job_manager.JobManager.request_start', return_value=(True, "Started")):
                 widget.script_combo.addItem("train.py", Mock(spec=DetectedScript, path=Path("/tmp/workspace/train.py"), framework="test"))
-                widget.python_combo.addItem("Python 3.12", Mock(spec=PythonEnvironment, python_path=Path("/usr/bin/python3")))
+                widget.python_path_edit.setText("/usr/bin/python3")
                 widget.script_combo.setEnabled(True)
-                widget.python_combo.setEnabled(True)
                 widget.start_btn.setEnabled(True)
 
                 widget._on_start_training()

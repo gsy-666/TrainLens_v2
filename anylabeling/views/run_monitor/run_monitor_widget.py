@@ -5,12 +5,13 @@ Preserves all functionality: workspace scanning, script detection, environment d
 configuration, start/stop, console output, and resource monitoring.
 """
 
+import hashlib
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Callable
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -25,6 +26,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QGroupBox,
     QFormLayout,
+    QTextEdit,
 )
 
 from anylabeling.services.run_monitor import (
@@ -56,6 +58,22 @@ from anylabeling.services.training_center.models import (
 from anylabeling.services.training_center.job_manager import get_job_manager
 from anylabeling.services.training_center.event_protocol import TrainingEvent, TrainingEventType
 
+# Environment Wizard
+from anylabeling.services.training_center.environment import (
+    EnvironmentInfo,
+    EnvironmentStatus,
+    EnvironmentWorker,
+    find_project_python,
+)
+
+
+_ENV_BINDING_PREFIX = "trainlens/env_binding/"
+
+def _make_binding_key(project_dir: str) -> str:
+    """Create a QSettings key from a normalized project path."""
+    norm = str(Path(project_dir).resolve()).lower().replace("\\", "/")
+    return _ENV_BINDING_PREFIX + hashlib.sha256(norm.encode()).hexdigest()[:16]
+
 
 class RunMonitorWidget(QWidget):
     """Reusable Run Monitor widget
@@ -81,6 +99,13 @@ class RunMonitorWidget(QWidget):
         # Services
         self.resource_monitor = ResourceMonitor()
         self.job_manager = get_job_manager()
+
+        # Environment wizard state
+        self._env_info: Optional[EnvironmentInfo] = None
+        self._env_worker: Optional[EnvironmentWorker] = None
+        self._env_thread: Optional[QThread] = None
+        self._env_generation: int = 0
+        self._env_task_running: bool = False
 
         # Callbacks
         self.on_run_start: Optional[Callable[[Run], None]] = None
@@ -175,7 +200,7 @@ class RunMonitorWidget(QWidget):
         return widget
 
     def _create_right_panel(self) -> QWidget:
-        """Create right panel with configuration and status"""
+        """Create right panel with configuration, environment, and status"""
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -191,7 +216,7 @@ class RunMonitorWidget(QWidget):
         status_layout.addStretch()
         layout.addWidget(status_group)
 
-        # Configuration
+        # Run Configuration
         config_group = QGroupBox("Run Configuration")
         config_layout = QFormLayout(config_group)
 
@@ -199,16 +224,16 @@ class RunMonitorWidget(QWidget):
         self.script_combo.setEnabled(False)
         config_layout.addRow("Script:", self.script_combo)
 
-        self.python_combo = QComboBox()
-        self.python_combo.setEnabled(False)
-        config_layout.addRow("Python:", self.python_combo)
-
         self.args_edit = QLineEdit()
         self.args_edit.setPlaceholderText("Additional arguments...")
         self.args_edit.setEnabled(False)
         config_layout.addRow("Arguments:", self.args_edit)
 
         layout.addWidget(config_group)
+
+        # Environment section
+        env_group = self._create_environment_section()
+        layout.addWidget(env_group)
 
         # Resources
         resources_group = QGroupBox("Resources")
@@ -233,6 +258,69 @@ class RunMonitorWidget(QWidget):
         layout.addStretch()
 
         return widget
+
+    def _create_environment_section(self) -> QGroupBox:
+        """Create the environment wizard section."""
+        group = QGroupBox("Environment")
+        layout = QVBoxLayout(group)
+
+        # Python executable row
+        py_row = QHBoxLayout()
+        py_row.addWidget(QLabel("Python Executable:"))
+        self.python_path_edit = QLineEdit()
+        self.python_path_edit.setPlaceholderText("Select a project first...")
+        self.python_path_edit.setReadOnly(True)
+        self.python_path_edit.editingFinished.connect(self._on_python_path_edited)
+        py_row.addWidget(self.python_path_edit, stretch=1)
+        self.python_browse_btn = QPushButton("Browse")
+        self.python_browse_btn.clicked.connect(self._on_browse_python)
+        py_row.addWidget(self.python_browse_btn)
+        layout.addLayout(py_row)
+
+        # Status display
+        self.env_status_label = QLabel("Not checked")
+        self.env_status_label.setStyleSheet("color: gray;")
+        layout.addWidget(self.env_status_label)
+
+        # Environment summary
+        self.env_summary_label = QLabel("")
+        self.env_summary_label.setStyleSheet("font-family: monospace; font-size: 9pt;")
+        self.env_summary_label.setWordWrap(True)
+        layout.addWidget(self.env_summary_label)
+
+        # Buttons row
+        btn_row = QHBoxLayout()
+        self.env_detect_btn = QPushButton("Detect")
+        self.env_detect_btn.clicked.connect(self._on_detect_environment)
+        self.env_detect_btn.setEnabled(False)
+        btn_row.addWidget(self.env_detect_btn)
+
+        self.env_create_venv_btn = QPushButton("Create .venv")
+        self.env_create_venv_btn.clicked.connect(self._on_create_venv)
+        self.env_create_venv_btn.setEnabled(False)
+        btn_row.addWidget(self.env_create_venv_btn)
+
+        self.env_install_req_btn = QPushButton("Install Requirements")
+        self.env_install_req_btn.clicked.connect(self._on_install_requirements)
+        self.env_install_req_btn.setEnabled(False)
+        btn_row.addWidget(self.env_install_req_btn)
+
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+        # Environment log
+        self.env_log = QTextEdit()
+        self.env_log.setReadOnly(True)
+        self.env_log.setMaximumHeight(120)
+        self.env_log.setStyleSheet("font-family: Consolas, monospace; font-size: 8pt;")
+        self.env_log.setPlaceholderText("Environment operation log...")
+        layout.addWidget(self.env_log)
+
+        self.env_clear_log_btn = QPushButton("Clear")
+        self.env_clear_log_btn.clicked.connect(lambda: self.env_log.clear())
+        layout.addWidget(self.env_clear_log_btn)
+
+        return group
 
     def _create_console_panel(self) -> QGroupBox:
         """Create console output panel"""
@@ -345,7 +433,7 @@ class RunMonitorWidget(QWidget):
                 rel_path = script.path.relative_to(self.workspace.path)
                 framework = script.framework or "unknown"
                 scripts_text.append(
-                    f"✓ {rel_path} ({framework}, confidence: {script.confidence:.2f})"
+                    f"{rel_path} ({framework}, confidence: {script.confidence:.2f})"
                 )
                 self.script_combo.addItem(str(rel_path), script)
 
@@ -356,28 +444,331 @@ class RunMonitorWidget(QWidget):
             self.scripts_label.setText("No training scripts detected")
             self.scripts_label.setStyleSheet("color: orange;")
 
-        # Update environments
+        # Update environments display (left panel)
         if self.workspace.detected_environments:
             envs_text = []
-            self.python_combo.clear()
             for env in self.workspace.detected_environments:
                 env_type = env.env_type
                 version = env.version
-                envs_text.append(f"• {env_type} (Python {version})")
-                display_text = f"{env_type} - Python {version}"
-                self.python_combo.addItem(display_text, env)
-
+                envs_text.append(f"{env_type} (Python {version})")
             self.envs_label.setText("\n".join(envs_text))
             self.envs_label.setStyleSheet("color: black;")
-            self.python_combo.setEnabled(True)
         else:
             self.envs_label.setText("No Python environments detected")
             self.envs_label.setStyleSheet("color: orange;")
 
-        # Enable controls if both available
-        if self.workspace.detected_scripts and self.workspace.detected_environments:
+        # Auto-discover project Python
+        self._auto_discover_python()
+
+        # Enable controls if scripts available
+        if self.workspace.detected_scripts:
             self.args_edit.setEnabled(True)
-            self.start_btn.setEnabled(True)
+            self._update_start_button()
+
+    # ── Environment Wizard methods ──────────────────────────────────────
+
+    def _auto_discover_python(self):
+        """Auto-discover project Python after workspace selection."""
+        if not self.workspace:
+            return
+
+        project_dir = self.workspace.path
+
+        # Check saved binding first
+        saved = self._load_python_binding(project_dir)
+        if saved and Path(saved).exists():
+            self._set_python_path(saved)
+            self._on_detect_environment()
+            return
+
+        # Try to find project venv
+        found = find_project_python(project_dir)
+        if found:
+            self._set_python_path(str(found))
+            self._save_python_binding(project_dir, str(found))
+            self._on_detect_environment()
+        else:
+            self._set_python_path("")
+            self._set_env_status(EnvironmentStatus.NOT_FOUND, "No environment found")
+            self._update_env_buttons()
+
+    def _on_browse_python(self):
+        """Browse for a Python executable."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Python Executable",
+            filter="Python (python.exe python3 python);;All Files (*)"
+        )
+        if path:
+            self._set_python_path(path)
+            if self.workspace:
+                self._save_python_binding(self.workspace.path, path)
+            self._on_detect_environment()
+
+    def _on_python_path_edited(self):
+        """Handle manual Python path edit."""
+        path = self.python_path_edit.text().strip()
+        if path and Path(path).exists():
+            if self.workspace:
+                self._save_python_binding(self.workspace.path, path)
+            self._on_detect_environment()
+
+    def _on_detect_environment(self):
+        """Start environment detection in background thread."""
+        python_path = self.python_path_edit.text().strip()
+        if not python_path:
+            return
+
+        self._env_generation += 1
+        gen = self._env_generation
+        self._set_env_status(EnvironmentStatus.CHECKING, "Detecting...")
+        self._set_env_controls_enabled(False)
+
+        worker = EnvironmentWorker()
+        self._env_worker = worker
+        thread = QThread(self)
+        self._env_thread = thread
+        worker.moveToThread(thread)
+
+        worker.detection_done.connect(lambda info: self._on_detection_done(info, gen))
+        worker.status_changed.connect(self._set_env_status_text)
+
+        thread.started.connect(worker.run)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(lambda: setattr(self, '_env_thread', None))
+
+        worker.request_detect(python_path, str(self.workspace.path) if self.workspace else "", gen)
+        thread.start()
+
+    def _on_detection_done(self, info: EnvironmentInfo, generation: int):
+        """Handle detection result."""
+        if generation != self._env_generation:
+            return  # Stale result
+
+        self._env_info = info
+        self._display_env_info(info)
+        self._cleanup_env_thread()
+        self._set_env_controls_enabled(True)
+        self._update_env_buttons()
+        self._update_start_button()
+
+    def _on_create_venv(self):
+        """Create .venv in project directory."""
+        if not self.workspace:
+            return
+
+        self._env_generation += 1
+        gen = self._env_generation
+        self._set_env_status(EnvironmentStatus.CREATING, "Creating .venv ...")
+        self._env_log_clear()
+        self._set_env_controls_enabled(False)
+
+        worker = EnvironmentWorker()
+        self._env_worker = worker
+        thread = QThread(self)
+        self._env_thread = thread
+        worker.moveToThread(thread)
+
+        worker.venv_created.connect(lambda ok, path, msg: self._on_venv_created(ok, path, msg, gen))
+        worker.log_message.connect(self._env_log_append)
+        worker.status_changed.connect(self._set_env_status_text)
+
+        thread.started.connect(worker.run)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(lambda: setattr(self, '_env_thread', None))
+
+        worker.request_create_venv(str(self.workspace.path), gen)
+        thread.start()
+
+    def _on_venv_created(self, success: bool, venv_path: str, message: str, generation: int):
+        """Handle venv creation result."""
+        if generation != self._env_generation:
+            return
+
+        self._env_log_append(message)
+        self._cleanup_env_thread()
+        self._set_env_controls_enabled(True)
+
+        if success and venv_path:
+            self._set_python_path(venv_path)
+            if self.workspace:
+                self._save_python_binding(self.workspace.path, venv_path)
+            self._on_detect_environment()
+        else:
+            self._set_env_status(EnvironmentStatus.ERROR, message)
+            self._update_env_buttons()
+            self._update_start_button()
+
+    def _on_install_requirements(self):
+        """Install requirements.txt."""
+        python_path = self.python_path_edit.text().strip()
+        if not python_path:
+            return
+        if not self.workspace:
+            return
+
+        req_path = self.workspace.path / "requirements.txt"
+        if not req_path.exists():
+            return
+
+        self._env_generation += 1
+        gen = self._env_generation
+        self._set_env_status(EnvironmentStatus.INSTALLING, "Installing requirements...")
+        self._env_log_clear()
+        self._set_env_controls_enabled(False)
+
+        worker = EnvironmentWorker()
+        self._env_worker = worker
+        thread = QThread(self)
+        self._env_thread = thread
+        worker.moveToThread(thread)
+
+        worker.requirements_done.connect(lambda ok, msg: self._on_requirements_done(ok, msg, gen))
+        worker.log_message.connect(self._env_log_append)
+        worker.status_changed.connect(self._set_env_status_text)
+
+        thread.started.connect(worker.run)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(lambda: setattr(self, '_env_thread', None))
+
+        worker.request_install_requirements(python_path, str(req_path), gen)
+        thread.start()
+
+    def _on_requirements_done(self, success: bool, message: str, generation: int):
+        """Handle requirements installation result."""
+        if generation != self._env_generation:
+            return
+
+        self._env_log_append(message)
+        self._cleanup_env_thread()
+        self._set_env_controls_enabled(True)
+
+        if success:
+            # Re-detect environment after install
+            self._on_detect_environment()
+        else:
+            self._set_env_status(EnvironmentStatus.ERROR, message)
+            self._update_env_buttons()
+            self._update_start_button()
+
+    def _cleanup_env_thread(self):
+        """Safely clean up environment thread."""
+        if self._env_thread and self._env_thread.isRunning():
+            self._env_thread.quit()
+            self._env_thread.wait(3000)
+        self._env_thread = None
+        self._env_worker = None
+
+    # ── Environment UI helpers ──────────────────────────────────────────
+
+    def _set_python_path(self, path: str):
+        """Set Python path in the text field."""
+        self.python_path_edit.setText(path)
+
+    def _set_env_status(self, status: EnvironmentStatus, message: str = ""):
+        """Set environment status display."""
+        self._set_env_status_text(status.value)
+        color = {"ready": "green", "warning": "orange", "error": "red",
+                 "not_found": "red", "checking": "blue", "creating": "blue",
+                 "installing": "blue", "not_checked": "gray"}.get(status.value, "gray")
+        display = message or status.value.replace("_", " ").title()
+        self.env_status_label.setText(display)
+        self.env_status_label.setStyleSheet(f"font-weight: bold; color: {color};")
+
+    def _set_env_status_text(self, status_value: str):
+        """Update status label from status string."""
+        color_map = {"ready": "green", "warning": "orange", "error": "red",
+                     "not_found": "red", "checking": "blue", "creating": "blue",
+                     "installing": "blue", "not_checked": "gray"}
+        color = color_map.get(status_value, "gray")
+        self.env_status_label.setText(status_value.replace("_", " ").title())
+        self.env_status_label.setStyleSheet(f"font-weight: bold; color: {color};")
+
+    def _display_env_info(self, info: EnvironmentInfo):
+        """Display environment detection results."""
+        self._set_env_status(info.status, info.error_message or info.warning_message)
+        self.env_summary_label.setText(info.summary)
+
+    def _update_env_buttons(self):
+        """Update environment button states."""
+        has_project = self.workspace is not None
+        has_python = bool(self.python_path_edit.text().strip())
+        has_venv = has_project and (self.workspace.path / ".venv").exists()
+        has_req = has_project and (self.workspace.path / "requirements.txt").exists()
+        task_running = self._env_thread is not None and self._env_thread.isRunning()
+        training_running = (
+            self.current_job is not None
+            and self.current_job.status.is_active()
+        ) if self.current_job else False
+
+        self.env_detect_btn.setEnabled(has_python and not task_running)
+        self.env_create_venv_btn.setEnabled(
+            has_project and not has_venv and not task_running and not training_running
+        )
+        self.env_install_req_btn.setEnabled(
+            has_python and has_req and not task_running and not training_running
+        )
+        self.python_browse_btn.setEnabled(not task_running and not training_running)
+
+    def _set_env_controls_enabled(self, enabled: bool):
+        """Enable/disable environment controls."""
+        self._update_env_buttons()
+
+    def _env_log_append(self, message: str):
+        """Append a message to the environment log."""
+        self.env_log.append(message.rstrip())
+        # Limit log lines
+        if self.env_log.document().blockCount() > 200:
+            cursor = self.env_log.textCursor()
+            cursor.movePosition(cursor.MoveOperation.Start)
+            cursor.movePosition(cursor.MoveOperation.Down, cursor.MoveMode.KeepAnchor, 50)
+            cursor.removeSelectedText()
+
+    def _env_log_clear(self):
+        """Clear environment log."""
+        self.env_log.clear()
+
+    def _update_start_button(self):
+        """Update Start button enabled state based on environment and scripts."""
+        has_script = self.script_combo.count() > 0
+        python_path = self.python_path_edit.text().strip()
+        has_python = bool(python_path) and Path(python_path).exists()
+
+        if not has_script:
+            self.start_btn.setEnabled(False)
+            return
+
+        if self._env_info is None:
+            # Not checked yet — allow but warn
+            self.start_btn.setEnabled(has_python)
+            return
+
+        if self._env_info.status in (EnvironmentStatus.ERROR,):
+            self.start_btn.setEnabled(False)
+        else:
+            self.start_btn.setEnabled(has_python)
+
+    # ── Project-python binding persistence ──────────────────────────────
+
+    def _save_python_binding(self, project_dir: Path, python_path: str):
+        """Save project-to-python binding via QSettings."""
+        try:
+            from PyQt6 import QtCore
+            settings = QtCore.QSettings("anylabeling", "anylabeling")
+            key = _make_binding_key(str(project_dir))
+            settings.setValue(key, python_path)
+        except Exception:
+            pass
+
+    def _load_python_binding(self, project_dir: Path) -> Optional[str]:
+        """Load saved python binding for a project."""
+        try:
+            from PyQt6 import QtCore
+            settings = QtCore.QSettings("anylabeling", "anylabeling")
+            key = _make_binding_key(str(project_dir))
+            val = settings.value(key)
+            return val if val else None
+        except Exception:
+            return None
 
     def _on_start_training(self):
         """Handle start training - integrated with JobManager"""
@@ -396,16 +787,41 @@ class RunMonitorWidget(QWidget):
             return
 
         script_idx = self.script_combo.currentIndex()
-        python_idx = self.python_combo.currentIndex()
+        if script_idx < 0:
+            QMessageBox.warning(self, "Warning", "Please select a training script")
+            return
 
-        if script_idx < 0 or python_idx < 0:
-            QMessageBox.warning(
-                self, "Warning", "Please select script and Python environment"
+        python_path_str = self.python_path_edit.text().strip()
+        if not python_path_str:
+            QMessageBox.warning(self, "Warning", "Please select a Python environment")
+            return
+
+        python_path = Path(python_path_str)
+        if not python_path.exists():
+            QMessageBox.critical(
+                self, "Error",
+                f"Python executable not found:\n{python_path}"
             )
             return
 
+        # Quick validation
+        import subprocess
+        try:
+            result = subprocess.run(
+                [str(python_path), "--version"],
+                capture_output=True, timeout=10,
+            )
+            if result.returncode != 0:
+                QMessageBox.critical(
+                    self, "Error",
+                    f"Python does not execute:\n{python_path}\n\n{result.stderr}"
+                )
+                return
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Cannot run Python:\n{python_path}\n\n{e}")
+            return
+
         selected_script: DetectedScript = self.script_combo.itemData(script_idx)
-        selected_env: PythonEnvironment = self.python_combo.itemData(python_idx)
 
         args_text = self.args_edit.text().strip()
         arguments = args_text.split() if args_text else []
@@ -423,7 +839,7 @@ class RunMonitorWidget(QWidget):
             output_directory=None,
             display_name=f"Custom: {selected_script.path.name}",
             framework=selected_script.framework or "custom",
-            python_executable=selected_env.python_path,
+            python_executable=python_path,
             command=[str(selected_script.path)] + arguments,
             metadata={
                 "script_path": str(selected_script.path),
@@ -437,7 +853,7 @@ class RunMonitorWidget(QWidget):
             run_id=job_id,
             workspace_path=self.workspace.path,
             script_path=selected_script.path,
-            python_path=selected_env.python_path,
+            python_path=python_path,
             arguments=arguments,
             framework=selected_script.framework,
         )
@@ -447,7 +863,7 @@ class RunMonitorWidget(QWidget):
         self.console_output.appendPlainText(
             f"Script: {selected_script.path.relative_to(self.workspace.path)}"
         )
-        self.console_output.appendPlainText(f"Python: {selected_env.python_path}")
+        self.console_output.appendPlainText(f"Python: {python_path}")
         if arguments:
             self.console_output.appendPlainText(f"Arguments: {' '.join(arguments)}")
         self.console_output.appendPlainText("")
@@ -459,7 +875,7 @@ class RunMonitorWidget(QWidget):
                 run_id=job_id,
                 timestamp=time.time(),
                 script=str(selected_script.path),
-                python=str(selected_env.python_path),
+                python=str(python_path),
                 framework=selected_script.framework,
             )
             self.storage.save_event(event)
@@ -492,9 +908,9 @@ class RunMonitorWidget(QWidget):
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.script_combo.setEnabled(False)
-        self.python_combo.setEnabled(False)
         self.args_edit.setEnabled(False)
         self.open_workspace_btn.setEnabled(False)
+        self._set_env_controls_enabled(False)
 
         # Callback
         if self.on_run_start:
@@ -666,11 +1082,11 @@ class RunMonitorWidget(QWidget):
     def _reset_ui_after_completion(self):
         """Reset UI controls after job completion"""
         self.stop_btn.setEnabled(False)
-        self.start_btn.setEnabled(True)
+        self._update_start_button()
         self.script_combo.setEnabled(True)
-        self.python_combo.setEnabled(True)
         self.args_edit.setEnabled(True)
         self.open_workspace_btn.setEnabled(True)
+        self._update_env_buttons()
 
         # Reset resources display
         self.resources_label.setText("No active run")
@@ -678,6 +1094,7 @@ class RunMonitorWidget(QWidget):
 
     def cleanup(self):
         """Clean up resources (call before destroying widget)"""
+        self._cleanup_env_thread()
         if self.scanner_thread and self.scanner_thread.isRunning():
             self.scanner_thread.cancel()
             self.scanner_thread.wait()
