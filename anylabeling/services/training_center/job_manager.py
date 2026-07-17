@@ -299,18 +299,26 @@ class JobManager:
         return True
 
     def _cleanup_job(self):
-        """Cleanup after job reaches terminal state"""
+        """Cleanup after job reaches terminal state.
+
+        Caller MUST hold _state_lock. Adapter shutdown is deferred
+        outside the lock to avoid blocking other threads.
+        """
+        adapter_to_shutdown = None
         if self._current_adapter:
             self._current_adapter.unsubscribe(self._on_adapter_event)
-            # Explicit shutdown: remove adapter callback from underlying manager
             if hasattr(self._current_adapter, 'shutdown'):
-                try:
-                    self._current_adapter.shutdown()
-                except Exception:
-                    pass
+                adapter_to_shutdown = self._current_adapter
 
         self._current_adapter = None
         self._current_job = None
+
+        # Shutdown adapter outside lock to avoid blocking
+        if adapter_to_shutdown is not None:
+            try:
+                adapter_to_shutdown.shutdown()
+            except Exception:
+                pass
 
     def _on_adapter_event(self, event: TrainingEvent):
         """Forward adapter events to subscribers"""

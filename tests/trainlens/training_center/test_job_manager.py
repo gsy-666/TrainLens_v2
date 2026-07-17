@@ -699,3 +699,126 @@ class TestTwoPhaseReserve:
         job_manager.complete_job(sample_job.job_id)
         assert job_ref.status == TrainingStatus.COMPLETED
         assert job_manager.get_current_job() is None
+
+    def test_adapter_stop_not_called_during_preparing_stop(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """request_stop during PREPARING does NOT call adapter.stop() — nothing to stop."""
+        job_manager.reserve_job(sample_job, mock_adapter)
+
+        result = job_manager.request_stop()
+
+        assert result is True
+        assert mock_adapter.stop.called is False
+        assert sample_job.status == TrainingStatus.STOPPED
+        assert job_manager.get_current_job() is None
+
+    def test_adapter_start_not_called_after_preparing_stop(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """start_reserved_job after PREPARING was stopped → rejected."""
+        job_manager.reserve_job(sample_job, mock_adapter)
+        job_manager.request_stop()  # STOPPED + cleanup
+
+        mock_adapter.start.return_value = (True, "Should not reach")
+        ok, msg = job_manager.start_reserved_job(sample_job.job_id, {})
+
+        assert ok is False
+        assert mock_adapter.start.called is False
+
+    def test_fail_reserved_after_stop_ignored(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """fail_reserved_job after PREPARING was stopped → silently ignored (no overwrite to FAILED)."""
+        job_manager.reserve_job(sample_job, mock_adapter)
+        job_manager.request_stop()  # STOPPED + cleanup
+
+        job_manager.fail_reserved_job(sample_job.job_id, "late prep error")
+        # Status remains STOPPED (not overwritten to FAILED)
+        assert sample_job.status == TrainingStatus.STOPPED
+
+    def test_adapter_shutdown_called_once_on_cleanup(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """adapter.shutdown() is called exactly once during cleanup."""
+        mock_adapter.shutdown = Mock()
+        job_manager.reserve_job(sample_job, mock_adapter)
+        job_manager.fail_reserved_job(sample_job.job_id, "test error")
+
+        assert mock_adapter.shutdown.call_count == 1
+
+    def test_adapter_shutdown_called_once_on_stop_preparing(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """adapter.shutdown() called once when stopping during PREPARING."""
+        mock_adapter.shutdown = Mock()
+        job_manager.reserve_job(sample_job, mock_adapter)
+        job_manager.request_stop()
+
+        assert mock_adapter.shutdown.call_count == 1
+
+    def test_adapter_shutdown_called_once_on_full_lifecycle(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """adapter.shutdown() called exactly once in full reserve → start → complete lifecycle."""
+        mock_adapter.shutdown = Mock()
+        mock_adapter.start.return_value = (True, "Started")
+
+        job_manager.reserve_job(sample_job, mock_adapter)
+        job_manager.start_reserved_job(sample_job.job_id, {})
+        job_manager.complete_job(sample_job.job_id)
+
+        assert mock_adapter.shutdown.call_count == 1
+
+    def test_status_never_reaches_running_after_fail_reserved(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """After fail_reserved_job, status is FAILED and never becomes RUNNING."""
+        job_manager.reserve_job(sample_job, mock_adapter)
+        job_manager.fail_reserved_job(sample_job.job_id, "data error")
+
+        assert sample_job.status == TrainingStatus.FAILED
+        # start_reserved_job should be rejected
+        mock_adapter.start.return_value = (True, "Too late")
+        ok, _ = job_manager.start_reserved_job(sample_job.job_id, {})
+        assert ok is False
+
+    def test_stop_preparing_releases_slot_for_next_job(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """After PREPARING → STOPPED, a new job can reserve immediately."""
+        job_manager.reserve_job(sample_job, mock_adapter)
+        assert job_manager.get_current_job() is not None
+
+        job_manager.request_stop()
+        assert job_manager.get_current_job() is None
+
+        # New job can now reserve
+        job2 = TrainingJob(
+            job_id="test-job-new",
+            mode=TrainingMode.CUSTOM_SCRIPT,
+            status=TrainingStatus.IDLE,
+            created_at=datetime.now(),
+            started_at=None, ended_at=None,
+            workspace=None, output_directory=None,
+            display_name="New", framework="custom",
+            python_executable=None, command=None, metadata={},
+            error_message=None,
+        )
+        adapter2 = Mock()
+        adapter2.can_start.return_value = (True, "")
+        ok, _ = job_manager.reserve_job(job2, adapter2)
+        assert ok is True
+        assert job_manager.get_current_job().job_id == "test-job-new"
+
+    def test_error_message_preserved_after_fail_reserved(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """fail_reserved_job stores the real exception as error_message."""
+        job_manager.reserve_job(sample_job, mock_adapter)
+        job_manager.fail_reserved_job(
+            sample_job.job_id, "create_yolo_dataset failed: Permission denied"
+        )
+
+        assert sample_job.error_message == "create_yolo_dataset failed: Permission denied"
+        assert sample_job.status == TrainingStatus.FAILED
