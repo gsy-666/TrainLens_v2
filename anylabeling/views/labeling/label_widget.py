@@ -1158,13 +1158,11 @@ class LabelingWidget(LabelDialog):
             icon="ultralytics",
         )
 
-        # Run Monitor action
-        run_monitor = action(
-            self.tr("Run Monitor"),
-            self.open_run_monitor,
-            shortcuts.get("run_monitor", "Ctrl+Shift+R"),
-            "run",
-            self.tr("Open Run Monitor for training script execution and monitoring"),
+        # Ultralytics training action
+        ultralytics_train = action(
+            "Ultralytics",
+            lambda: self.start_training("ultralytics"),
+            icon="ultralytics",
         )
 
         zoom = QtWidgets.QWidgetAction(self)
@@ -2019,7 +2017,6 @@ class LabelingWidget(LabelDialog):
             export=self.menu(self.tr("Export")),
             tool=self.menu(self.tr("Tool")),
             train=self.menu(self.tr("Train")),
-            run=self.menu(self.tr("Run")),
             help=self.menu(self.tr("Help")),
             recent_files=QtWidgets.QMenu(self.tr("Open Recent")),
         )
@@ -2053,7 +2050,6 @@ class LabelingWidget(LabelDialog):
             ),
         )
         utils.add_actions(self.menus.train, (ultralytics_train,))
-        utils.add_actions(self.menus.run, (run_monitor,))
         utils.add_actions(
             self.menus.tool,
             (
@@ -3328,16 +3324,6 @@ class LabelingWidget(LabelDialog):
         self.vqa_window.show()
         self.vqa_window.raise_()
         self.vqa_window.activateWindow()
-
-    def open_run_monitor(self):
-        """Open Run Monitor via unified TrainingCenterWindow (non-modal)."""
-        from anylabeling.views.training.training_center_window import open_training_center
-        open_training_center(
-            parent=self,
-            tab="custom",
-            open_folder_callback=self.open_folder_dialog,
-            image_list_getter=lambda: self.image_list,
-        )
 
     def open_paddleocr(self):
         if not hasattr(self, "ppocr_window") or self.ppocr_window is None:
