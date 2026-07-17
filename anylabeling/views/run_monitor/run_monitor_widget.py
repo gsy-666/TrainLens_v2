@@ -538,11 +538,11 @@ class RunMonitorWidget(QWidget):
     def _on_detection_done(self, info: EnvironmentInfo, generation: int):
         """Handle detection result."""
         if generation != self._env_generation:
-            return  # Stale result
+            return
 
         self._env_info = info
         self._display_env_info(info)
-        self._cleanup_env_thread()
+        self._finish_env_ui_operation()
         self._set_env_controls_enabled(True)
         self._update_env_buttons()
         self._update_start_button()
@@ -570,7 +570,7 @@ class RunMonitorWidget(QWidget):
             return
 
         self._env_log_append(message)
-        self._cleanup_env_thread()
+        self._finish_env_ui_operation()
         self._set_env_controls_enabled(True)
 
         if success and venv_path:
@@ -610,18 +610,16 @@ class RunMonitorWidget(QWidget):
     def _start_env_worker(self, worker: EnvironmentWorker):
         """Start an environment worker via the stable controller.
 
-        Internal lifecycle (finished→thread.quit→deleteLater) stays with
-        the controller. UI signals (log, status) are registered here for
-        later disconnect. Result signals are connected by the caller before
-        _start_env_worker is called.
+        Internal lifecycle stays with the controller.
+        Only connects UI signals here.
+        Previous task is not forcibly disconnected — it completes naturally.
         """
         ctrl = self._get_controller()
-        if self._env_task_id:
-            ctrl.disconnect_all_ui(self._env_task_id)
         task_id = ctrl.start_task(worker)
         self._env_task_id = task_id
 
-        # Register UI signals (disconnected by disconnect_all_ui on next task or cleanup)
+        # Register UI signals (disconnected only by controller on task finish
+        # or by _cleanup_env_thread on widget destruction)
         ctrl.connect_result(task_id, "log_message", self._env_log_append)
         ctrl.connect_result(task_id, "status_changed", self._set_env_status_text)
 
@@ -641,11 +639,20 @@ class RunMonitorWidget(QWidget):
             return False
         return self._env_controller.is_running(self._env_task_id)
 
-    def _cleanup_env_thread(self):
-        """Disconnect UI signals but keep internal lifecycle intact.
+    def _finish_env_ui_operation(self):
+        """Clear widget state after normal task completion.
 
-        Only disconnects UI signals (log, status) from the current task.
-        Internal finished→quit→deleteLater chain is NEVER touched.
+        Does NOT call disconnect_all_ui — the worker may already be deleted
+        by the time queued signals reach the GUI thread. Simply clears our
+        local task_id so the next operation can start fresh.
+        """
+        self._env_task_id = None
+
+    def _cleanup_env_thread(self):
+        """Disconnect UI signals — ONLY used during widget destruction.
+
+        Normal task completion uses _finish_env_ui_operation() instead
+        to avoid accessing workers that may already be deleted.
         """
         if self._env_task_id and self._env_controller:
             self._env_controller.disconnect_all_ui(self._env_task_id)
@@ -657,7 +664,7 @@ class RunMonitorWidget(QWidget):
             return
 
         self._env_log_append(message)
-        self._cleanup_env_thread()
+        self._finish_env_ui_operation()
         self._set_env_controls_enabled(True)
 
         if success:

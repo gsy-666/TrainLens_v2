@@ -6,8 +6,9 @@ disconnected by widget cleanup.
 """
 
 import threading
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
+from PyQt6 import sip
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
 from .worker import EnvironmentWorker
@@ -15,12 +16,14 @@ from .worker import EnvironmentWorker
 
 class _TaskHandle:
     """Internal handle for one environment task."""
-    __slots__ = ("task_id", "worker", "thread")
+    __slots__ = ("task_id", "worker", "thread", "ui_connections", "ui_disconnected")
 
     def __init__(self, task_id: str, worker: EnvironmentWorker, thread: QThread):
         self.task_id = task_id
         self.worker = worker
         self.thread = thread
+        self.ui_connections: List[Tuple[str, object]] = []  # (signal_name, slot)
+        self.ui_disconnected: bool = False
 
 
 class EnvironmentTaskController(QObject):
@@ -29,7 +32,8 @@ class EnvironmentTaskController(QObject):
     - Owns all running threads (QThread, no parent).
     - Internal lifecycle chain (worker.finished→thread.quit→deleteLater)
       is set up here and NEVER disconnected.
-    - Widgets subscribe to result/log signals via subscribe/unsubscribe.
+    - Widgets subscribe to result/log signals via connect_result.
+    - UI connections are tracked explicitly for safe disconnect.
     - When a task completes, the handle is removed from the registry.
     """
 
@@ -42,12 +46,11 @@ class EnvironmentTaskController(QObject):
     def start_task(self, worker: EnvironmentWorker) -> str:
         """Start an environment task on a new QThread.
 
-        Returns a task_id that can be used to subscribe to results.
-        The controller retains strong refs to worker + thread.
+        Returns a task_id. The controller retains strong refs to worker + thread.
         """
         self._counter += 1
         task_id = f"env_task_{self._counter}"
-        thread = QThread()  # No parent — controller holds ref
+        thread = QThread()
 
         worker.moveToThread(thread)
 
@@ -56,8 +59,6 @@ class EnvironmentTaskController(QObject):
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         thread.finished.connect(lambda tid=task_id: self._on_task_finished(tid))
-
-        # ── B: UI signals — widgets subscribe via connect_result etc ──
 
         thread.started.connect(worker.run)
 
@@ -68,44 +69,51 @@ class EnvironmentTaskController(QObject):
         thread.start()
         return task_id
 
-    def connect_result(self, task_id: str, signal_name: str, slot):
-        """Subscribe a widget slot to a result signal on the task's worker."""
+    def connect_result(self, task_id: str, signal_name: str, slot) -> bool:
+        """Subscribe a widget slot to a result signal.
+
+        Returns True if connected, False if task not found.
+        UI connections are tracked for safe disconnect_all_ui.
+        """
         handle = self._get_handle(task_id)
-        if handle is None:
-            return
-        signal = getattr(handle.worker, signal_name, None)
+        if handle is None or handle.ui_disconnected:
+            return False
+        worker = handle.worker
+        if worker is None or sip.isdeleted(worker):
+            return False
+        signal = getattr(worker, signal_name, None)
         if signal is not None:
             signal.connect(slot)
-
-    def disconnect_result(self, task_id: str, signal_name: str, slot):
-        """Unsubscribe a widget slot (safe to call after widget destroyed)."""
-        handle = self._get_handle(task_id)
-        if handle is None:
-            return
-        signal = getattr(handle.worker, signal_name, None)
-        if signal is not None:
-            try:
-                signal.disconnect(slot)
-            except Exception:
-                pass
+            handle.ui_connections.append((signal_name, slot))
+            return True
+        return False
 
     def disconnect_all_ui(self, task_id: str):
         """Disconnect all UI-related signals for a task.
 
-        This does NOT touch internal lifecycle signals (finished).
-        Safe to call when widget is being destroyed.
+        Idempotent and safe — handles deleted worker, missing task,
+        and repeated calls. NEVER touches internal lifecycle signals.
         """
         handle = self._get_handle(task_id)
-        if handle is None:
+        if handle is None or handle.ui_disconnected:
             return
-        for sig_name in ("detection_done", "venv_created", "requirements_done",
-                         "log_message", "status_changed"):
-            signal = getattr(handle.worker, sig_name, None)
+
+        worker = handle.worker
+        if worker is None or sip.isdeleted(worker):
+            handle.ui_connections.clear()
+            handle.ui_disconnected = True
+            return
+
+        for sig_name, slot in handle.ui_connections:
+            signal = getattr(worker, sig_name, None)
             if signal is not None:
                 try:
-                    signal.disconnect()
-                except Exception:
+                    signal.disconnect(slot)
+                except (TypeError, RuntimeError):
                     pass
+
+        handle.ui_connections.clear()
+        handle.ui_disconnected = True
 
     def is_running(self, task_id: str) -> bool:
         handle = self._get_handle(task_id)
