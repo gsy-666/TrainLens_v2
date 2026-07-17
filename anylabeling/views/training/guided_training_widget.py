@@ -145,6 +145,14 @@ class GuidedTrainingWidget(QWidget):
         self.job_manager.subscribe_events(self._on_training_event_from_job)
         self.job_manager.subscribe_status(self._on_job_status_change)
 
+        # Two-phase prepare start (background dataset creation)
+        self._prep_thread = None
+        self._prep_worker = None
+        self._prep_job_id = None
+        self._prep_adapter = None
+        self._pending_project_path = None
+        self._pending_name = None
+
         # Export related attributes
         self.export_log_redirector = ExportLogRedirector()
         self.export_log_redirector.log_signal.connect(
@@ -260,6 +268,8 @@ class GuidedTrainingWidget(QWidget):
                 pass
             self._prep_thread = None
             self._prep_worker = None
+            self._prep_job_id = None
+            self._prep_adapter = None
 
         # Save logs if needed
         if self.training_status in ["completed", "error", "stop"]:
@@ -1967,11 +1977,33 @@ class GuidedTrainingWidget(QWidget):
         )
 
         if reply == QMessageBox.StandardButton.Yes:
+            # For PREPARING: cancel the background prep thread first
+            current = self.job_manager.get_current_job()
+            if current is not None and current.status == TrainingStatus.PREPARING:
+                self._cancel_prep_thread()
+
             success = self.job_manager.request_stop()
             if success:
                 self.append_training_log(self.tr("Stopping training..."))
             else:
                 self.append_training_log(self.tr("Cancel to stop training"))
+
+    def _cancel_prep_thread(self):
+        """Cancel the background preparation thread and invalidate the reservation."""
+        if self._prep_thread is None:
+            return
+        # Clear job_id first so late queued signals are dropped
+        self._prep_job_id = None
+        # Disconnect signals so finished/error don't fire after stop
+        if self._prep_worker is not None:
+            self._prep_worker.finished.disconnect(self._on_prep_finished)
+            self._prep_worker.error.disconnect(self._on_prep_error)
+        self._prep_thread.quit()
+        if not self._prep_thread.wait(3000):
+            self._prep_thread.terminate()
+            self._prep_thread.wait()
+        self._prep_thread = None
+        self._prep_worker = None
 
     def get_training_args(self, config):
         try:
@@ -2062,19 +2094,6 @@ class GuidedTrainingWidget(QWidget):
             raise
 
     def start_training_from_train_tab(self):
-        # ── Early mutual exclusion check (GUI thread, fast) ──
-        current = self.job_manager.get_current_job()
-        if current is not None and current.status.is_active():
-            QMessageBox.critical(
-                self, self.tr("Training Busy"),
-                self.tr(
-                    f"Another training job is already running:\n"
-                    f"{current.display_name}\n\n"
-                    f"Please stop it or wait for it to finish before starting a new one."
-                ),
-            )
-            return
-
         # ── Read UI config (GUI thread, fast) ──
         try:
             config = self.get_current_config()
@@ -2086,7 +2105,37 @@ class GuidedTrainingWidget(QWidget):
         name = config["basic"]["name"]
         self.current_project_path = os.path.join(project_path, name)
 
-        # ── Immediate PREPARING registration (atomic mutual exclusion) ──
+        # ── Phase 1: Reserve job manager slot atomically ──
+        job_id = f"guided_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        self.current_job = TrainingJob(
+            job_id=job_id,
+            mode=TrainingMode.GUIDED_ULTRALYTICS,
+            status=TrainingStatus.IDLE,  # reserve_job will set PREPARING
+            created_at=datetime.datetime.now(),
+            started_at=None,
+            ended_at=None,
+            workspace=project_path,
+            output_directory=Path(self.current_project_path),
+            display_name=f"Guided: {name}",
+            framework="ultralytics",
+            command=[],
+            metadata={},
+            error_message=None,
+        )
+
+        adapter = UltralyticsAdapter()
+        ok, msg = self.job_manager.reserve_job(self.current_job, adapter)
+        if not ok:
+            self.append_training_log(f"Failed to reserve job: {msg}")
+            QMessageBox.critical(self, self.tr("Training Busy"), msg)
+            self.current_job = None
+            return
+
+        # Store for prep thread / late signal validation
+        self._prep_job_id = job_id
+        self._prep_adapter = adapter
+
+        # ── UI: preparing state ──
         self.training_status = "preparing"
         self.update_training_status_display()
         self.append_training_log(self.tr("Preparing training..."))
@@ -2095,7 +2144,7 @@ class GuidedTrainingWidget(QWidget):
         self.export_button.setVisible(False)
         self.previous_button.setVisible(False)
 
-        # ── Move heavy dataset creation to background thread ──
+        # ── Phase 2: Run dataset creation in background thread ──
         self._prep_thread = QThread(self)
         self._prep_worker = _TrainingPrepWorker(self, config)
         self._prep_worker.moveToThread(self._prep_thread)
@@ -2112,44 +2161,39 @@ class GuidedTrainingWidget(QWidget):
         self._prep_thread.start()
 
     def _on_prep_finished(self, train_args):
-        """Called on GUI thread after background preparation completes."""
+        """Called on GUI thread after background preparation completes.
+
+        Validates that the job is still in PREPARING state (handles late
+        signals from cancelled threads) before starting via JobManager.
+        """
         self._prep_thread.quit()
         self._prep_thread.wait()
         self._prep_thread = None
         self._prep_worker = None
 
-        project_path = self._pending_project_path
-        name = self._pending_name
+        # Late-signal guard: only proceed if still reserved
+        if self._prep_job_id is None:
+            return
 
-        # Route through JobManager for mutual exclusion
-        job_id = f"guided_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        self.current_job = TrainingJob(
-            job_id=job_id,
-            mode=TrainingMode.GUIDED_ULTRALYTICS,
-            status=TrainingStatus.IDLE,
-            created_at=datetime.datetime.now(),
-            started_at=None,
-            ended_at=None,
-            workspace=project_path,
-            output_directory=Path(self.current_project_path),
-            display_name=f"Guided: {name}",
-            framework="ultralytics",
-            command=[],
-            metadata={"train_args": train_args},
-            error_message=None,
-        )
+        current = self.job_manager.get_current_job()
+        if current is None or current.job_id != self._prep_job_id:
+            # Another job replaced us — silently drop
+            self._prep_job_id = None
+            return
+        if current.status != TrainingStatus.PREPARING:
+            # Already stopped or failed — silently drop
+            self._prep_job_id = None
+            return
 
-        adapter = UltralyticsAdapter()
-        success, message = self.job_manager.request_start(
-            job=self.current_job,
-            adapter=adapter,
+        success, message = self.job_manager.start_reserved_job(
+            job_id=self._prep_job_id,
             config=train_args,
         )
+        self._prep_job_id = None
 
         if not success:
             self.append_training_log(f"Failed to start training: {message}")
             QMessageBox.critical(self, self.tr("Training Error"), message)
-            self.current_job = None
             self._reset_start_ui()
             return
 
@@ -2161,6 +2205,15 @@ class GuidedTrainingWidget(QWidget):
         self._prep_thread.wait()
         self._prep_thread = None
         self._prep_worker = None
+
+        # Late-signal guard
+        if self._prep_job_id is None:
+            return
+
+        current = self.job_manager.get_current_job()
+        if current is not None and current.job_id == self._prep_job_id:
+            self.job_manager.fail_reserved_job(self._prep_job_id, error_msg)
+        self._prep_job_id = None
 
         self.append_training_log(f"ERROR: {error_msg}")
         QMessageBox.critical(self, self.tr("Training Error"), error_msg)

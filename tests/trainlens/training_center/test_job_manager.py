@@ -475,3 +475,227 @@ class TestCallbackSubscription:
         job_manager.unsubscribe_events(callback)
 
         assert callback not in job_manager._event_callbacks
+
+
+class TestTwoPhaseReserve:
+    """Test reserve_job / start_reserved_job / fail_reserved_job lifecycle"""
+
+    def test_reserve_occupies_job_manager(self, job_manager, mock_adapter, sample_job):
+        """reserve_job sets PREPARING and get_current_job() returns the reserved job"""
+        ok, msg = job_manager.reserve_job(sample_job, mock_adapter)
+
+        assert ok is True
+        assert "preparing" in msg.lower()
+        assert sample_job.status == TrainingStatus.PREPARING
+
+        current = job_manager.get_current_job()
+        assert current is not None
+        assert current.job_id == sample_job.job_id
+        assert current.status == TrainingStatus.PREPARING
+
+        # adapter.start() was NOT called
+        assert mock_adapter.start.called is False
+
+    def test_second_job_blocked_during_preparing(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """Another job cannot reserve while one is PREPARING"""
+        job_manager.reserve_job(sample_job, mock_adapter)
+
+        job2 = TrainingJob(
+            job_id="test-job-002",
+            mode=TrainingMode.GUIDED_ULTRALYTICS,
+            status=TrainingStatus.IDLE,
+            created_at=datetime.now(),
+            started_at=None,
+            ended_at=None,
+            workspace=None,
+            output_directory=None,
+            display_name="Second Job",
+            framework="ultralytics",
+            python_executable=None,
+            command=None,
+            metadata={},
+            error_message=None,
+        )
+
+        adapter2 = Mock()
+        adapter2.can_start.return_value = (True, "")
+
+        ok, msg = job_manager.reserve_job(job2, adapter2)
+
+        assert ok is False
+        assert "already in progress" in msg.lower()
+        assert adapter2.start.called is False
+
+    def test_start_reserved_transitions_to_running(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """start_reserved_job transitions PREPARING → RUNNING"""
+        job_manager.reserve_job(sample_job, mock_adapter)
+
+        mock_adapter.start.return_value = (True, "Started training")
+
+        ok, msg = job_manager.start_reserved_job(sample_job.job_id, {"data": "test"})
+
+        assert ok is True
+        assert mock_adapter.start.called
+
+        current = job_manager.get_current_job()
+        assert current.status == TrainingStatus.RUNNING
+
+    def test_start_reserved_wrong_id_fails(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """start_reserved_job rejects wrong job_id"""
+        job_manager.reserve_job(sample_job, mock_adapter)
+
+        ok, msg = job_manager.start_reserved_job("wrong-job-id", {})
+
+        assert ok is False
+        assert "mismatch" in msg.lower()
+
+    def test_start_reserved_not_preparing_fails(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """start_reserved_job fails if job was already cleaned up"""
+        job_manager.reserve_job(sample_job, mock_adapter)
+        # Transition away from PREPARING (fail = terminal + cleanup)
+        job_manager.fail_reserved_job(sample_job.job_id, "prep failed")
+
+        ok, msg = job_manager.start_reserved_job(sample_job.job_id, {})
+
+        assert ok is False
+        # After cleanup, _current_job is None, so "mismatch" is returned
+        assert "mismatch" in msg.lower()
+
+    def test_fail_reserved_transitions_to_failed(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """fail_reserved_job transitions PREPARING → FAILED and cleans up"""
+        job_manager.reserve_job(sample_job, mock_adapter)
+
+        job_ref = job_manager.get_current_job()
+        job_manager.fail_reserved_job(sample_job.job_id, "Dataset creation error")
+
+        assert job_ref.status == TrainingStatus.FAILED
+        assert job_ref.error_message == "Dataset creation error"
+        assert job_manager.get_current_job() is None
+
+    def test_fail_reserved_wrong_id_ignored(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """fail_reserved_job with wrong job_id is silently ignored"""
+        job_manager.reserve_job(sample_job, mock_adapter)
+
+        job_manager.fail_reserved_job("wrong-id", "error")
+
+        current = job_manager.get_current_job()
+        assert current.status == TrainingStatus.PREPARING
+
+    def test_fail_reserved_not_preparing_ignored(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """fail_reserved_job when not PREPARING is silently ignored"""
+        job_manager.reserve_job(sample_job, mock_adapter)
+        job_manager.fail_reserved_job(sample_job.job_id, "first error")
+        # Already FAILED → not PREPARING
+
+        job_manager.fail_reserved_job(sample_job.job_id, "second error")
+        # No-op, but first error message preserved
+        assert sample_job.error_message == "first error"
+
+    def test_stop_during_preparing_transitions_to_stopped(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """request_stop during PREPARING transitions directly to STOPPED"""
+        job_manager.reserve_job(sample_job, mock_adapter)
+
+        job_ref = job_manager.get_current_job()
+        result = job_manager.request_stop()
+
+        assert result is True
+        # adapter.stop() was NOT called (nothing running)
+        assert mock_adapter.stop.called is False
+        assert job_ref.status == TrainingStatus.STOPPED
+        assert job_manager.get_current_job() is None
+
+    def test_sequential_jobs_after_prepare_stopped(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """New job can reserve after previous PREPARING was stopped"""
+        job_manager.reserve_job(sample_job, mock_adapter)
+        job_manager.request_stop()  # STOPPED + cleanup
+
+        job2 = TrainingJob(
+            job_id="test-job-003",
+            mode=TrainingMode.CUSTOM_SCRIPT,
+            status=TrainingStatus.IDLE,
+            created_at=datetime.now(),
+            started_at=None,
+            ended_at=None,
+            workspace=None,
+            output_directory=None,
+            display_name="Second Job",
+            framework="custom",
+            python_executable=None,
+            command=None,
+            metadata={},
+            error_message=None,
+        )
+
+        adapter2 = Mock()
+        adapter2.can_start.return_value = (True, "")
+        adapter2.start.return_value = (True, "Started")
+
+        ok, msg = job_manager.reserve_job(job2, adapter2)
+
+        assert ok is True
+        assert job_manager.get_current_job().job_id == "test-job-003"
+        assert job_manager.get_current_job().status == TrainingStatus.PREPARING
+
+    def test_request_start_uses_two_phase_internally(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """The one-shot request_start still works as before"""
+        mock_adapter.start.return_value = (True, "Started training")
+
+        ok, msg = job_manager.request_start(sample_job, mock_adapter, {"data": "test"})
+
+        assert ok is True
+        assert mock_adapter.start.called
+        assert job_manager.get_current_job().status == TrainingStatus.RUNNING
+
+    def test_request_start_failure_still_cleans(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """request_start with failed adapter.start cleans up"""
+        mock_adapter.start.return_value = (False, "Export error")
+
+        ok, msg = job_manager.request_start(sample_job, mock_adapter, {})
+
+        assert ok is False
+        assert msg == "Export error"
+        assert job_manager.get_current_job() is None
+        assert sample_job.status == TrainingStatus.FAILED
+
+    def test_prepare_then_start_other_mode_works(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """Full two-phase guided workflow: reserve → start → complete"""
+        # Phase 1: Reserve
+        ok, _ = job_manager.reserve_job(sample_job, mock_adapter)
+        assert ok
+        assert job_manager.get_current_job().status == TrainingStatus.PREPARING
+
+        # Phase 2: Start
+        mock_adapter.start.return_value = (True, "Started")
+        ok, _ = job_manager.start_reserved_job(sample_job.job_id, {"data": "test"})
+        assert ok
+        assert job_manager.get_current_job().status == TrainingStatus.RUNNING
+
+        # Complete
+        job_ref = job_manager.get_current_job()
+        job_manager.complete_job(sample_job.job_id)
+        assert job_ref.status == TrainingStatus.COMPLETED
+        assert job_manager.get_current_job() is None

@@ -54,12 +54,28 @@ class JobManager:
         adapter: TrainingAdapter,
         config: Dict[str, Any]
     ) -> Tuple[bool, str]:
-        """Request to start a new training job
+        """Request to start a new training job (one-shot: reserve + start).
 
-        Args:
-            job: TrainingJob with initial metadata
-            adapter: Training adapter for this mode
-            config: System-specific configuration
+        For two-phase (reserve then start), use reserve_job() + start_reserved_job().
+
+        Returns:
+            (success, message)
+        """
+        ok, msg = self.reserve_job(job, adapter)
+        if not ok:
+            return False, msg
+        return self.start_reserved_job(job.job_id, config)
+
+    def reserve_job(
+        self,
+        job: TrainingJob,
+        adapter: TrainingAdapter,
+    ) -> Tuple[bool, str]:
+        """Phase 1: reserve the job manager slot (PREPARING state).
+
+        Does NOT call adapter.start(). The caller is responsible for
+        doing background preparation, then calling start_reserved_job()
+        or fail_reserved_job().
 
         Returns:
             (success, message)
@@ -80,16 +96,40 @@ class JobManager:
             adapter.subscribe(self._on_adapter_event)
             self._notify_status_change(job)
 
+        return True, "Job reserved, preparing..."
+
+    def start_reserved_job(
+        self,
+        job_id: str,
+        config: Dict[str, Any],
+    ) -> Tuple[bool, str]:
+        """Phase 2: start the actual training for a previously reserved job.
+
+        Requires that reserve_job() was called first and the job_id
+        matches the current reserved job.
+
+        Returns:
+            (success, message)
+        """
+        with self._state_lock:
+            if not self._validate_job_id(job_id):
+                return False, "Job ID mismatch or no reserved job"
+            if self._current_job.status != TrainingStatus.PREPARING:
+                return False, f"Job is not in PREPARING state (current: {self._current_job.status.value})"
+
+            adapter = self._current_adapter
+            job = self._current_job
+
         success, message = adapter.start(job, config)
 
         if success:
             with self._state_lock:
-                if self._current_job and self._current_job.job_id == job.job_id:
+                if self._current_job and self._current_job.job_id == job_id:
                     self._current_job.status = TrainingStatus.RUNNING
                     self._notify_status_change(self._current_job)
         else:
             with self._state_lock:
-                if self._current_job and self._current_job.job_id == job.job_id:
+                if self._current_job and self._current_job.job_id == job_id:
                     self._current_job.status = TrainingStatus.FAILED
                     self._current_job.error_message = message
                     self._notify_status_change(self._current_job)
@@ -97,24 +137,46 @@ class JobManager:
 
         return success, message
 
+    def fail_reserved_job(self, job_id: str, error: str):
+        """Fail a job that is in PREPARING state (e.g., background prep failed)."""
+        with self._state_lock:
+            if not self._validate_job_id(job_id):
+                return
+            if self._current_job.status != TrainingStatus.PREPARING:
+                return
+
+            self._current_job.status = TrainingStatus.FAILED
+            self._current_job.error_message = error
+            self._notify_status_change(self._current_job)
+            self._cleanup_job()
+
     def request_stop(self) -> bool:
-        """Request to stop the current training job
+        """Request to stop the current training job.
+
+        For PREPARING state: cancels the reservation directly (STOPPED).
+        For RUNNING state: signals adapter.stop() and transitions to STOPPING.
 
         Returns:
-            True if stop signal sent successfully, False if already stopping or no job
+            True if stop initiated, False if nothing to stop.
         """
         with self._state_lock:
             if self._current_job is None:
                 return False
 
-            # If already STOPPING, don't call adapter.stop again (idempotent)
             if self._current_job.status == TrainingStatus.STOPPING:
                 return False
 
-            # Only PREPARING or RUNNING can transition to STOPPING
             if not self._current_job.status.is_active():
                 return False
 
+            # PREPARING → STOPPED (no adapter activity to interrupt)
+            if self._current_job.status == TrainingStatus.PREPARING:
+                self._current_job.status = TrainingStatus.STOPPED
+                self._notify_status_change(self._current_job)
+                self._cleanup_job()
+                return True
+
+            # RUNNING → STOPPING (adapter.stop() will handle the rest)
             self._current_job.status = TrainingStatus.STOPPING
             adapter = self._current_adapter
             self._notify_status_change(self._current_job)
