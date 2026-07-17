@@ -529,20 +529,10 @@ class RunMonitorWidget(QWidget):
         self._set_env_controls_enabled(False)
 
         worker = EnvironmentWorker()
-        self._env_worker = worker
-        thread = QThread(self)
-        self._env_thread = thread
-        worker.moveToThread(thread)
-
+        worker.request_detect(python_path, str(self.workspace.path) if self.workspace else "", gen)
         worker.detection_done.connect(lambda info: self._on_detection_done(info, gen))
         worker.status_changed.connect(self._set_env_status_text)
-
-        thread.started.connect(worker.run)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(lambda: setattr(self, '_env_thread', None))
-
-        worker.request_detect(python_path, str(self.workspace.path) if self.workspace else "", gen)
-        thread.start()
+        self._start_env_worker(worker)
 
     def _on_detection_done(self, info: EnvironmentInfo, generation: int):
         """Handle detection result."""
@@ -568,21 +558,11 @@ class RunMonitorWidget(QWidget):
         self._set_env_controls_enabled(False)
 
         worker = EnvironmentWorker()
-        self._env_worker = worker
-        thread = QThread(self)
-        self._env_thread = thread
-        worker.moveToThread(thread)
-
+        worker.request_create_venv(str(self.workspace.path), gen)
         worker.venv_created.connect(lambda ok, path, msg: self._on_venv_created(ok, path, msg, gen))
         worker.log_message.connect(self._env_log_append)
         worker.status_changed.connect(self._set_env_status_text)
-
-        thread.started.connect(worker.run)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(lambda: setattr(self, '_env_thread', None))
-
-        worker.request_create_venv(str(self.workspace.path), gen)
-        thread.start()
+        self._start_env_worker(worker)
 
     def _on_venv_created(self, success: bool, venv_path: str, message: str, generation: int):
         """Handle venv creation result."""
@@ -622,20 +602,33 @@ class RunMonitorWidget(QWidget):
         self._set_env_controls_enabled(False)
 
         worker = EnvironmentWorker()
-        self._env_worker = worker
-        thread = QThread(self)
-        self._env_thread = thread
-        worker.moveToThread(thread)
-
+        worker.request_install_requirements(python_path, str(req_path), gen)
         worker.requirements_done.connect(lambda ok, msg: self._on_requirements_done(ok, msg, gen))
         worker.log_message.connect(self._env_log_append)
         worker.status_changed.connect(self._set_env_status_text)
+        self._start_env_worker(worker)
 
-        thread.started.connect(worker.run)
+    def _start_env_worker(self, worker: EnvironmentWorker):
+        """Start an environment worker on a properly owned QThread.
+
+        Thread chain: worker.finished → thread.quit + worker.deleteLater
+                     thread.finished → thread.deleteLater
+        No parent on QThread — survives widget destruction.
+        """
+        self._env_worker = worker
+        thread = QThread()  # No parent — survives widget close
+        self._env_thread = thread
+        worker.moveToThread(thread)
+
+        # Worker finishes → quit event loop + clean worker
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        # Thread finishes → clean thread + null widget refs
         thread.finished.connect(thread.deleteLater)
         thread.finished.connect(lambda: setattr(self, '_env_thread', None))
+        thread.finished.connect(lambda: setattr(self, '_env_worker', None))
 
-        worker.request_install_requirements(python_path, str(req_path), gen)
+        thread.started.connect(worker.run)
         thread.start()
 
     def _on_requirements_done(self, success: bool, message: str, generation: int):
@@ -660,18 +653,18 @@ class RunMonitorWidget(QWidget):
 
         Never calls QThread.quit() or QThread.terminate() — the worker
         may be blocked in subprocess.run and cannot be interrupted.
-        Thread cleanup is handled by finished -> deleteLater."""
+        Thread cleanup is handled by worker.finished → thread.quit → deleteLater."""
         if self._env_worker:
-            try:
-                self._env_worker.detection_done.disconnect()
-                self._env_worker.venv_created.disconnect()
-                self._env_worker.requirements_done.disconnect()
-                self._env_worker.log_message.disconnect()
-                self._env_worker.status_changed.disconnect()
-            except Exception:
-                pass
+            for sig in ('detection_done', 'venv_created', 'requirements_done',
+                        'log_message', 'status_changed', 'finished'):
+                try:
+                    getattr(self._env_worker, sig).disconnect()
+                except Exception:
+                    pass
             self._env_worker = None
         self._env_thread = None
+
+    # ── Environment UI helpers ──────────────────────────────────────────
 
     # ── Environment UI helpers ──────────────────────────────────────────
 
@@ -1112,20 +1105,18 @@ class RunMonitorWidget(QWidget):
 
         Disconnects UI signals from running workers but does NOT
         block on thread completion (worker subprocess may still be running).
-        Threads clean themselves up via finished -> deleteLater.
+        Threads clean themselves up via worker.finished → thread.quit → deleteLater.
         """
         # Disconnect env worker signals to prevent updates to destroyed widget
         if self._env_worker:
-            try:
-                self._env_worker.detection_done.disconnect()
-                self._env_worker.venv_created.disconnect()
-                self._env_worker.requirements_done.disconnect()
-                self._env_worker.log_message.disconnect()
-                self._env_worker.status_changed.disconnect()
-            except Exception:
-                pass
+            for sig in ('detection_done', 'venv_created', 'requirements_done',
+                        'log_message', 'status_changed', 'finished'):
+                try:
+                    getattr(self._env_worker, sig).disconnect()
+                except Exception:
+                    pass
             self._env_worker = None
-        # Do NOT call quit() on env thread — let subprocess finish naturally
+        # Do NOT quit the thread — let subprocess finish naturally
         self._env_thread = None
 
         if self.scanner_thread and self.scanner_thread.isRunning():

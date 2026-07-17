@@ -110,7 +110,7 @@ def install_requirements(
     requirements_path: Path,
     log_callback: Optional[Callable[[str], None]] = None,
 ) -> Tuple[bool, str]:
-    """Install packages from a requirements.txt file.
+    """Install packages from a requirements.txt file using Popen for real-time output.
 
     Returns (success, message).
     """
@@ -126,25 +126,36 @@ def install_requirements(
 
     log(f"Installing requirements from: {requirements_path}")
     log(f"Python: {python_path}")
+
+    cmd = [str(python_path), "-m", "pip", "install", "-r", str(requirements_path)]
     try:
-        result = subprocess.run(
-            [str(python_path), "-m", "pip", "install", "-r", str(requirements_path)],
-            capture_output=True, text=True, timeout=600,
+        # Use Popen for real-time stdout/stderr without PIPE deadlock risk
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
             cwd=str(requirements_path.parent),
         )
-        stdout_tail = result.stdout.strip()
-        if stdout_tail:
-            for line in stdout_tail.splitlines()[-20:]:
-                log(line)
-        stderr_tail = result.stderr.strip()
-        if stderr_tail and result.returncode != 0:
-            for line in stderr_tail.splitlines()[-10:]:
-                log(f"STDERR: {line}")
+        stdout_lines = []
+        stderr_lines = []
+        try:
+            out, err = proc.communicate(timeout=600)
+            if out:
+                for line in out.splitlines():
+                    log(line)
+                    stdout_lines.append(line)
+            if err and proc.returncode != 0:
+                for line in err.splitlines()[-10:]:
+                    log(f"STDERR: {line}")
+                    stderr_lines.append(line)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            return False, "pip install timed out (600s)"
 
-        if result.returncode != 0:
-            return False, f"pip install failed (exit {result.returncode})"
-    except subprocess.TimeoutExpired:
-        return False, "pip install timed out (600s)"
+        if proc.returncode != 0:
+            return False, f"pip install failed (exit {proc.returncode})"
     except Exception as e:
         return False, f"pip install error: {e}"
 

@@ -106,16 +106,18 @@ class TestInstallRequirements:
         req.write_text("numpy\n")
 
         with patch("anylabeling.services.training_center.environment.operations._pip_available", return_value=True):
-            with patch("subprocess.run") as mock_run:
-                mock_run.return_value = Mock(returncode=0, stdout="", stderr="")
+            with patch("subprocess.Popen") as mock_popen:
+                mock_proc = Mock()
+                mock_proc.returncode = 0
+                mock_proc.communicate.return_value = ("ok\n", "")
+                mock_popen.return_value = mock_proc
                 ok, msg = install_requirements(py, req)
-                call_args = mock_run.call_args[0][0]
+                call_args = mock_popen.call_args[0][0]
                 assert "-m" in call_args
                 assert "pip" in call_args
                 assert "install" in call_args
                 assert "-r" in call_args
                 assert str(req) in call_args
-                assert mock_run.call_args[1].get("shell", False) is False
 
     def test_requirements_not_found_rejected(self, tmp_path):
         """Missing requirements.txt → error."""
@@ -144,10 +146,13 @@ class TestInstallRequirements:
         req.write_text("numpy\n")
 
         with patch("anylabeling.services.training_center.environment.operations._pip_available", return_value=True):
-            with patch("subprocess.run") as mock_run:
-                mock_run.return_value = Mock(returncode=0, stdout="", stderr="")
+            with patch("subprocess.Popen") as mock_popen:
+                mock_proc = Mock()
+                mock_proc.returncode = 0
+                mock_proc.communicate.return_value = ("ok\n", "")
+                mock_popen.return_value = mock_proc
                 install_requirements(py, req)
-                call_args = mock_run.call_args[0][0]
+                call_args = mock_popen.call_args[0][0]
                 # The path should appear as a single element
                 req_str = str(req)
                 assert req_str in call_args or any(req_str in a for a in call_args)

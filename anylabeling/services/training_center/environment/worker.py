@@ -32,6 +32,9 @@ class EnvironmentWorker(QObject):
     log_message = pyqtSignal(str)
     status_changed = pyqtSignal(str)  # EnvironmentStatus value
 
+    # Lifecycle signal — emitted after run() completes (success or failure)
+    finished = pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._task: Optional[EnvironmentTask] = None
@@ -66,12 +69,15 @@ class EnvironmentWorker(QObject):
 
     def run(self):
         """Execute the requested task. Called after moveToThread + started signal."""
-        if self._task == EnvironmentTask.DETECT:
-            self._run_detect()
-        elif self._task == EnvironmentTask.CREATE_VENV:
-            self._run_create_venv()
-        elif self._task == EnvironmentTask.INSTALL_REQUIREMENTS:
-            self._run_install_requirements()
+        try:
+            if self._task == EnvironmentTask.DETECT:
+                self._run_detect()
+            elif self._task == EnvironmentTask.CREATE_VENV:
+                self._run_create_venv()
+            elif self._task == EnvironmentTask.INSTALL_REQUIREMENTS:
+                self._run_install_requirements()
+        finally:
+            self.finished.emit()
 
     # ── task implementations ────────────────────────────────────────────
 
