@@ -866,3 +866,180 @@ class TestLockReentrancy:
         job_manager.request_start(sample_job, mock_adapter, {})
 
         assert TrainingStatus.RUNNING in results
+
+
+class TestCallbacksOutsideLock:
+    """Verify all callbacks execute OUTSIDE _state_lock."""
+
+    def test_callback_get_current_job_no_deadlock(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """status callback calling get_current_job() does NOT deadlock."""
+        captured = []
+
+        def callback(job):
+            current = job_manager.get_current_job()
+            captured.append(current)
+
+        job_manager.subscribe_status(callback)
+        mock_adapter.start.return_value = (True, "Started")
+        job_manager.request_start(sample_job, mock_adapter, {"data": "test"})
+        assert len(captured) > 0
+
+    def test_callback_request_stop_no_deadlock(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """status callback calling request_stop() does NOT deadlock."""
+        mock_adapter.start.return_value = (True, "Started")
+        mock_adapter.stop.return_value = True
+        stopped = []
+
+        def callback(job):
+            if job.status == TrainingStatus.RUNNING:
+                job_manager.request_stop()
+                stopped.append(True)
+
+        job_manager.subscribe_status(callback)
+        job_manager.request_start(sample_job, mock_adapter, {})
+        assert len(stopped) > 0
+
+    def test_callback_unsubscribes_self_safely(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """Callback that unsubscribes itself does NOT break iteration."""
+        results = []
+
+        def self_removing(job):
+            results.append("self")
+            job_manager.unsubscribe_status(self_removing)
+
+        def other(job):
+            results.append("other")
+
+        job_manager.subscribe_status(self_removing)
+        job_manager.subscribe_status(other)
+        mock_adapter.start.return_value = (True, "Started")
+        job_manager.request_start(sample_job, mock_adapter, {})
+
+        assert "self" in results
+        assert "other" in results
+
+    def test_callback_registers_new_callback_not_called_this_round(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """Callback registering a new subscriber: new CB not in current snapshot, called next round."""
+        calls = []
+
+        def first_cb(job):
+            calls.append(("first", job.status))
+            job_manager.subscribe_status(second_cb)
+
+        def second_cb(job):
+            calls.append(("second", job.status))
+
+        job_manager.subscribe_status(first_cb)
+        mock_adapter.start.return_value = (True, "Started")
+        job_manager.request_start(sample_job, mock_adapter, {})
+
+        # second_cb registered during PREPARING callback → appears in RUNNING snapshot
+        # So it fires during RUNNING notification, not PREPARING
+        assert ("first", TrainingStatus.PREPARING) in calls
+        assert ("second", TrainingStatus.RUNNING) in calls
+        # second was NOT called during PREPARING (not in that snapshot)
+        assert ("second", TrainingStatus.PREPARING) not in calls
+
+    def test_callback_exception_isolated_lock_free(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """Exception in one callback does NOT prevent others from executing."""
+        results = []
+
+        def bad(job):
+            raise RuntimeError("crash")
+
+        def good(job):
+            results.append(job.status)
+
+        job_manager.subscribe_status(bad)
+        job_manager.subscribe_status(good)
+        mock_adapter.start.return_value = (True, "Started")
+        job_manager.request_start(sample_job, mock_adapter, {})
+
+        assert TrainingStatus.RUNNING in results
+
+    def test_adapter_start_outside_lock(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """adapter.start() is called while NO _state_lock is held."""
+        lock_held_during_start = []
+
+        original_start = mock_adapter.start
+
+        def tracking_start(job, config):
+            lock_held_during_start.append(job_manager._state_lock._is_owned())
+            return original_start(job, config)
+
+        mock_adapter.start = tracking_start
+        mock_adapter.start.return_value = (True, "Started")
+        mock_adapter.can_start.return_value = (True, "")
+
+        job_manager.reserve_job(sample_job, mock_adapter)
+        job_manager.start_reserved_job(sample_job.job_id, {})
+
+        assert len(lock_held_during_start) > 0
+        assert lock_held_during_start[0] is False, (
+            "adapter.start() was called while _state_lock was held!"
+        )
+
+    def test_full_lifecycle_callbacks_outside_lock(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """PREPARING → RUNNING → STOPPED: all callbacks outside lock."""
+        statuses_seen = []
+        lock_held_during_cb = []
+
+        def tracking_cb(job):
+            statuses_seen.append(job.status)
+            lock_held_during_cb.append(job_manager._state_lock._is_owned())
+
+        job_manager.subscribe_status(tracking_cb)
+        mock_adapter.start.return_value = (True, "Started")
+        mock_adapter.stop.return_value = True
+
+        job_manager.request_start(sample_job, mock_adapter, {})
+        job_manager.request_stop()
+
+        assert len(lock_held_during_cb) > 0
+        for i, held in enumerate(lock_held_during_cb):
+            assert held is False, (
+                f"Callback {i} ran while lock held (status={statuses_seen[i] if i < len(statuses_seen) else '?'})"
+            )
+
+    def test_slow_callback_does_not_block_other_thread(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """A slow callback does NOT prevent another thread from querying."""
+        import time, threading
+        slow_started = []
+
+        def slow_cb(job):
+            slow_started.append(True)
+            time.sleep(0.3)
+
+        job_manager.subscribe_status(slow_cb)
+        mock_adapter.start.return_value = (True, "Started")
+
+        def trigger():
+            job_manager.request_start(sample_job, mock_adapter, {})
+
+        t = threading.Thread(target=trigger)
+        t.start()
+        time.sleep(0.05)
+
+        start = time.time()
+        job = job_manager.get_current_job()
+        elapsed = time.time() - start
+
+        t.join(timeout=2)
+        assert elapsed < 0.5, f"get_current_job() blocked for {elapsed:.1f}s"
+        assert len(slow_started) > 0

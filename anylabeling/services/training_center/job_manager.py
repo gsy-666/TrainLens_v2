@@ -94,8 +94,9 @@ class JobManager:
             self._current_adapter = adapter
 
             adapter.subscribe(self._on_adapter_event)
-            self._notify_status_change(job)
+            cbs = list(self._status_callbacks)
 
+        self._notify_status_change(job, cbs)
         return True, "Job reserved, preparing..."
 
     def start_reserved_job(
@@ -126,14 +127,16 @@ class JobManager:
             with self._state_lock:
                 if self._current_job and self._current_job.job_id == job_id:
                     self._current_job.status = TrainingStatus.RUNNING
-                    self._notify_status_change(self._current_job)
+                    cbs = list(self._status_callbacks)
+            self._notify_status_change(self._current_job, cbs)
         else:
             with self._state_lock:
                 if self._current_job and self._current_job.job_id == job_id:
                     self._current_job.status = TrainingStatus.FAILED
                     self._current_job.error_message = message
-                    self._notify_status_change(self._current_job)
+                    cbs = list(self._status_callbacks)
                     self._cleanup_job()
+            self._notify_status_change(job, cbs)
 
         return success, message
 
@@ -147,8 +150,11 @@ class JobManager:
 
             self._current_job.status = TrainingStatus.FAILED
             self._current_job.error_message = error
-            self._notify_status_change(self._current_job)
+            job_ref = self._current_job
+            cbs = list(self._status_callbacks)
             self._cleanup_job()
+
+        self._notify_status_change(job_ref, cbs)
 
     def request_stop(self) -> bool:
         """Request to stop the current training job.
@@ -159,6 +165,9 @@ class JobManager:
         Returns:
             True if stop initiated, False if nothing to stop.
         """
+        status_cbs = []
+        job_ref = None
+
         with self._state_lock:
             if self._current_job is None:
                 return False
@@ -172,26 +181,26 @@ class JobManager:
             # PREPARING → STOPPED (no adapter activity to interrupt)
             if self._current_job.status == TrainingStatus.PREPARING:
                 self._current_job.status = TrainingStatus.STOPPED
-                self._notify_status_change(self._current_job)
+                job_ref = self._current_job
+                status_cbs = list(self._status_callbacks)
                 self._cleanup_job()
+                self._notify_status_change(job_ref, status_cbs)
                 return True
 
             # RUNNING → STOPPING (adapter.stop() will handle the rest)
             self._current_job.status = TrainingStatus.STOPPING
             adapter = self._current_adapter
-            self._notify_status_change(self._current_job)
+            status_cbs = list(self._status_callbacks)
 
+        self._notify_status_change(self._current_job, status_cbs)
         if adapter:
             return adapter.stop()
         return False
 
     def complete_job(self, job_id: str, **kwargs):
-        """Mark job as completed (idempotent)
-
-        Args:
-            job_id: Job ID to validate
-            **kwargs: Additional metadata to store
-        """
+        """Mark job as completed (idempotent)"""
+        job_ref = None
+        cbs = []
         with self._state_lock:
             if not self._validate_job_id(job_id):
                 return
@@ -208,17 +217,16 @@ class JobManager:
                 if save_dir:
                     self._current_job.output_directory = Path(save_dir)
 
-            self._notify_status_change(self._current_job)
+            job_ref = self._current_job
+            cbs = list(self._status_callbacks)
             self._cleanup_job()
 
-    def fail_job(self, job_id: str, error: str, **kwargs):
-        """Mark job as failed (idempotent)
+        self._notify_status_change(job_ref, cbs)
 
-        Args:
-            job_id: Job ID to validate
-            error: Error message
-            **kwargs: Additional metadata to store
-        """
+    def fail_job(self, job_id: str, error: str, **kwargs):
+        """Mark job as failed (idempotent)"""
+        job_ref = None
+        cbs = []
         with self._state_lock:
             if not self._validate_job_id(job_id):
                 return
@@ -236,16 +244,16 @@ class JobManager:
                 if save_dir:
                     self._current_job.output_directory = Path(save_dir)
 
-            self._notify_status_change(self._current_job)
+            job_ref = self._current_job
+            cbs = list(self._status_callbacks)
             self._cleanup_job()
 
-    def stop_job(self, job_id: str, **kwargs):
-        """Mark job as stopped (idempotent)
+        self._notify_status_change(job_ref, cbs)
 
-        Args:
-            job_id: Job ID to validate
-            **kwargs: Additional metadata to store
-        """
+    def stop_job(self, job_id: str, **kwargs):
+        """Mark job as stopped (idempotent)"""
+        job_ref = None
+        cbs = []
         with self._state_lock:
             if not self._validate_job_id(job_id):
                 return
@@ -262,8 +270,11 @@ class JobManager:
                 if save_dir:
                     self._current_job.output_directory = Path(save_dir)
 
-            self._notify_status_change(self._current_job)
+            job_ref = self._current_job
+            cbs = list(self._status_callbacks)
             self._cleanup_job()
+
+        self._notify_status_change(job_ref, cbs)
 
     def get_current_job(self) -> Optional[TrainingJob]:
         """Get current job (thread-safe read)"""
@@ -272,23 +283,27 @@ class JobManager:
 
     def subscribe_status(self, callback: Callable[[TrainingJob], None]):
         """Subscribe to job status changes"""
-        if callback not in self._status_callbacks:
-            self._status_callbacks.append(callback)
+        with self._state_lock:
+            if callback not in self._status_callbacks:
+                self._status_callbacks.append(callback)
 
     def unsubscribe_status(self, callback: Callable[[TrainingJob], None]):
         """Unsubscribe from job status changes"""
-        if callback in self._status_callbacks:
-            self._status_callbacks.remove(callback)
+        with self._state_lock:
+            if callback in self._status_callbacks:
+                self._status_callbacks.remove(callback)
 
     def subscribe_events(self, callback: Callable[[TrainingEvent], None]):
         """Subscribe to training events"""
-        if callback not in self._event_callbacks:
-            self._event_callbacks.append(callback)
+        with self._state_lock:
+            if callback not in self._event_callbacks:
+                self._event_callbacks.append(callback)
 
     def unsubscribe_events(self, callback: Callable[[TrainingEvent], None]):
         """Unsubscribe from training events"""
-        if callback in self._event_callbacks:
-            self._event_callbacks.remove(callback)
+        with self._state_lock:
+            if callback in self._event_callbacks:
+                self._event_callbacks.remove(callback)
 
     def _validate_job_id(self, job_id: str) -> bool:
         """Validate job_id matches current job"""
@@ -321,7 +336,12 @@ class JobManager:
                 pass
 
     def _on_adapter_event(self, event: TrainingEvent):
-        """Forward adapter events to subscribers"""
+        """Forward adapter events to subscribers — NO lock held for dispatch.
+
+        Terminal events (COMPLETED/FAILED/STOPPED) update job state
+        and notify status callbacks (lock-free). Event callbacks are
+        dispatched lock-free with a snapshot.
+        """
         if event.event_type == TrainingEventType.COMPLETED:
             self.complete_job(
                 event.job_id,
@@ -342,17 +362,31 @@ class JobManager:
                 metadata=event.payload
             )
 
-        for callback in self._event_callbacks[:]:
+        self._notify_event_callbacks(event)
+
+    def _notify_status_change(self, job: TrainingJob, callbacks: list):
+        """Notify subscribers of status change — NO lock held.
+
+        Args:
+            job: The job with updated status (caller's snapshot).
+            callbacks: Pre-snapshotted list of status callbacks.
+        """
+        for callback in callbacks:
             try:
-                callback(event)
+                callback(job)
             except Exception:
                 pass
 
-    def _notify_status_change(self, job: TrainingJob):
-        """Notify subscribers of status change"""
-        for callback in self._status_callbacks[:]:
+    def _notify_event_callbacks(self, event: TrainingEvent):
+        """Dispatch event to subscribers — NO lock held.
+
+        Snapshots event callbacks under lock, then dispatches outside.
+        """
+        with self._state_lock:
+            cbs = list(self._event_callbacks)
+        for callback in cbs:
             try:
-                callback(job)
+                callback(event)
             except Exception:
                 pass
 
