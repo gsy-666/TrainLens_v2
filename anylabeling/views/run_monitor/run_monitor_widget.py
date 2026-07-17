@@ -249,16 +249,10 @@ class RunMonitorWidget(QWidget):
         resources_layout.addWidget(self.resources_label)
         layout.addWidget(resources_group)
 
-        # Metrics placeholder
-        metrics_group = QGroupBox("Training Metrics")
-        metrics_layout = QVBoxLayout(metrics_group)
-        self.metrics_label = QLabel(
-            "Training metrics will be displayed when the script outputs structured events."
-        )
-        self.metrics_label.setStyleSheet("color: gray;")
-        self.metrics_label.setWordWrap(True)
-        metrics_layout.addWidget(self.metrics_label)
-        layout.addWidget(metrics_group)
+        # Metrics dashboard
+        from anylabeling.views.training.metrics import TrainingMetricsDashboard
+        self.metrics_dashboard = TrainingMetricsDashboard()
+        layout.addWidget(self.metrics_dashboard, stretch=2)
 
         layout.addStretch()
 
@@ -930,6 +924,10 @@ class RunMonitorWidget(QWidget):
         self.open_workspace_btn.setEnabled(False)
         self._set_env_controls_enabled(False)
 
+        # Bind metrics dashboard
+        od = str(self.workspace.path) if self.workspace else None
+        self.metrics_dashboard.bind_job(job_id, od)
+
         # Callback
         if self.on_run_start:
             self.on_run_start(self.current_run)
@@ -1056,6 +1054,9 @@ class RunMonitorWidget(QWidget):
                 timestamp = datetime.now().strftime("%H:%M:%S")
                 self.console_output.appendPlainText(f"[{timestamp}] {message}")
 
+        elif event.event_type == TrainingEventType.EPOCH_METRICS:
+            self.metrics_dashboard.on_metric_event(event.job_id, event.payload)
+
         elif event.event_type == TrainingEventType.COMPLETED:
             exit_code = event.payload.get('exit_code', 0)
             self.console_output.appendPlainText(
@@ -1065,6 +1066,7 @@ class RunMonitorWidget(QWidget):
             self.resource_monitor.stop_monitoring()
             self._update_status(RunStatus.COMPLETED)
             self._reset_ui_after_completion()
+            self.metrics_dashboard.on_run_completed(self.current_job.job_id)
 
             # Callback
             if self.on_run_complete:
@@ -1081,6 +1083,7 @@ class RunMonitorWidget(QWidget):
             self.resource_monitor.stop_monitoring()
             self._update_status(RunStatus.FAILED)
             self._reset_ui_after_completion()
+            self.metrics_dashboard.on_run_stopped(self.current_job.job_id)
 
             # Callback
             if self.on_run_complete:
@@ -1092,6 +1095,7 @@ class RunMonitorWidget(QWidget):
             self.resource_monitor.stop_monitoring()
             self._update_status(RunStatus.STOPPED)
             self._reset_ui_after_completion()
+            self.metrics_dashboard.on_run_stopped(self.current_job.job_id)
 
             # Callback
             if self.on_run_complete:
@@ -1117,6 +1121,7 @@ class RunMonitorWidget(QWidget):
         block on thread completion. Internal lifecycle is managed
         by EnvironmentTaskController — never touched here.
         """
+        self.metrics_dashboard.cleanup()
         # Disconnect UI signals from current env task (safe)
         self._cleanup_env_thread()
         # Controller survives — its tasks continue independently
