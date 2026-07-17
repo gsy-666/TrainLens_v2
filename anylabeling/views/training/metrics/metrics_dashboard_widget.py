@@ -12,10 +12,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QTabWidget, QVBoxLayout, QWidget,
 )
 
-from anylabeling.services.training_center.metrics import (
-    MetricRunData, MetricStore,
-)
-
+from anylabeling.services.training_center.metrics import MetricRunData, MetricStore
 from .metrics_chart_widget import MetricsChartWidget
 
 
@@ -23,15 +20,26 @@ class TrainingMetricsDashboard(QWidget):
     """Dashboard: metric cards + tabbed line charts + export buttons.
 
     Shared by Guided Training, Custom Project, and History detail view.
+    Uses a dirty flag + 200ms refresh timer for UI update throttling.
     """
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._store = MetricStore()
         self._current_job_id: Optional[str] = None
+        self._is_history_mode: bool = False
+
+        # CSV poll timer (1s)
         self._poll_timer = QTimer(self)
         self._poll_timer.timeout.connect(self._poll_csv)
         self._poll_timer.setInterval(1000)
+
+        # UI refresh throttle (dirty flag + 200ms timer)
+        self._dirty = False
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.timeout.connect(self._do_refresh)
+        self._refresh_timer.setInterval(200)
+        self._refresh_timer.setSingleShot(True)
 
         self._build_ui()
         self._show_empty()
@@ -40,7 +48,6 @@ class TrainingMetricsDashboard(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        # Metric cards row
         cards_group = QGroupBox("")
         cards_layout = QGridLayout(cards_group)
         self._epoch_card = self._make_card("Epoch", "- / -")
@@ -53,7 +60,6 @@ class TrainingMetricsDashboard(QWidget):
         cards_layout.addWidget(self._loss_card, 0, 3)
         layout.addWidget(cards_group)
 
-        # Tabbed charts
         self._tabs = QTabWidget()
         self._loss_chart = MetricsChartWidget()
         self._quality_chart = MetricsChartWidget()
@@ -65,20 +71,31 @@ class TrainingMetricsDashboard(QWidget):
         self._tabs.addTab(self._other_chart, "Other")
         layout.addWidget(self._tabs, stretch=1)
 
-        # Export buttons
         btn_row = QHBoxLayout()
         self._export_csv_btn = QPushButton("Export CSV")
         self._export_csv_btn.clicked.connect(self._export_csv)
         self._export_csv_btn.setEnabled(False)
         btn_row.addWidget(self._export_csv_btn)
-
         self._export_img_btn = QPushButton("Save Chart Image")
         self._export_img_btn.clicked.connect(self._export_image)
         self._export_img_btn.setEnabled(False)
         btn_row.addWidget(self._export_img_btn)
-
         btn_row.addStretch()
         layout.addLayout(btn_row)
+
+        # Empty state label (shown when no data)
+        self._empty_label = QLabel(
+            "No structured metrics detected.\n\n"
+            "Supported sources:\n"
+            "  TrainLens EPOCH_METRICS events\n"
+            "  metrics.jsonl\n"
+            "  Ultralytics results.csv"
+        )
+        self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_label.setStyleSheet("color: gray; font-size: 10pt;")
+        self._empty_label.setWordWrap(True)
+        self._empty_label.hide()
+        layout.addWidget(self._empty_label)
 
     def _make_card(self, title: str, value: str) -> QGroupBox:
         gb = QGroupBox(title)
@@ -86,38 +103,34 @@ class TrainingMetricsDashboard(QWidget):
         label = QLabel(value)
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         label.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
-        label.setObjectName(f"card_{title.lower().replace(' ', '_')}_value")
+        label.setObjectName(f"card_{title.lower().replace(' ', '_').replace('&&','').strip()}_value")
         ly.addWidget(label)
         return gb
 
     # ── public API ────────────────────────────────────────────────────
 
     def bind_job(self, job_id: str, output_dir: Optional[str] = None):
-        """Bind to a training job. Starts polling if output_dir is set."""
         if self._current_job_id and self._current_job_id != job_id:
             self.clear()
         self._current_job_id = job_id
+        self._is_history_mode = False
         self._store.start_run(job_id, output_dir)
-        if output_dir:
+        if output_dir and not self._is_history_mode:
             self._poll_timer.start()
-        self._refresh()
+        self._schedule_refresh()
 
     def on_metric_event(self, job_id: str, payload: dict):
-        """Handle an EPOCH_METRICS TrainingEvent."""
         if job_id != self._current_job_id:
             return
-
         metrics = payload.get("metrics", {})
         if not isinstance(metrics, dict):
             return
-
         values = {}
         for k, v in metrics.items():
             if isinstance(v, (int, float)):
                 values[str(k)] = float(v)
         if not values:
             return
-
         from anylabeling.services.training_center.metrics.models import MetricSample
         sample = MetricSample(
             job_id=job_id,
@@ -128,40 +141,36 @@ class TrainingMetricsDashboard(QWidget):
             timestamp=payload.get("timestamp", time.time()),
         )
         self._store.add_sample(sample)
-        self._refresh()
+        self._schedule_refresh()
 
     def on_run_completed(self, job_id: str):
-        """Called when training completes. Stops polling, reads final CSV."""
         if job_id != self._current_job_id:
             return
         self._poll_timer.stop()
         self._store.finish_run(job_id)
-        # One last poll
         data = self._store.poll_csv()
-        if data:
-            self._refresh()
-        else:
-            self._refresh()
+        self._schedule_refresh()
 
     def on_run_stopped(self, job_id: str):
-        """Called when training stops. Same as completed — keep data."""
         self.on_run_completed(job_id)
 
     def load_history(self, job_id: str, output_dir: str):
-        """Load metrics from a historical run's output directory."""
         self.clear()
         self._current_job_id = job_id
+        self._is_history_mode = True
+        self._poll_timer.stop()
         data = self._store.load_from_output_dir(job_id, output_dir)
         if data:
-            self._refresh()
-            self._poll_timer.stop()
+            self._schedule_refresh()
         else:
             self._show_empty()
 
     def clear(self):
-        """Clear all data and charts."""
         self._current_job_id = None
+        self._is_history_mode = False
         self._poll_timer.stop()
+        self._refresh_timer.stop()
+        self._dirty = False
         self._loss_chart.clear()
         self._quality_chart.clear()
         self._lr_chart.clear()
@@ -169,21 +178,37 @@ class TrainingMetricsDashboard(QWidget):
         self._show_empty()
 
     def cleanup(self):
-        """Stop timers before widget destruction."""
         self._poll_timer.stop()
+        self._refresh_timer.stop()
 
     # ── internal ──────────────────────────────────────────────────────
+
+    def _schedule_refresh(self):
+        """Set dirty flag, schedule deferred UI update (max ~5 FPS)."""
+        self._dirty = True
+        if not self._refresh_timer.isActive():
+            self._refresh_timer.start()
+
+    def _do_refresh(self):
+        if not self._dirty:
+            return
+        self._dirty = False
+        self._refresh()
 
     def _poll_csv(self):
         data = self._store.poll_csv()
         if data:
-            self._refresh()
+            self._schedule_refresh()
 
     def _refresh(self):
         run = self._store.get_run(self._current_job_id) if self._current_job_id else None
         if not run or not run.samples:
             self._show_empty()
             return
+
+        self._empty_label.hide()
+        for tab_idx in range(self._tabs.count()):
+            self._tabs.widget(tab_idx).show()
 
         series_list = run.to_series()
         by_group: dict = {"loss": [], "quality": [], "learning_rate": [], "other": []}
@@ -193,7 +218,6 @@ class TrainingMetricsDashboard(QWidget):
         self._loss_chart.set_series(by_group.get("loss", []))
         self._quality_chart.set_series(by_group.get("quality", []))
         self._lr_chart.set_series(by_group.get("learning_rate", []))
-
         other = by_group.get("other", [])
         if other:
             self._tabs.setTabVisible(3, True)
@@ -201,9 +225,7 @@ class TrainingMetricsDashboard(QWidget):
         else:
             self._tabs.setTabVisible(3, False)
 
-        # Update cards
         self._update_cards(run)
-
         self._export_csv_btn.setEnabled(True)
         self._export_img_btn.setEnabled(True)
 
@@ -214,35 +236,30 @@ class TrainingMetricsDashboard(QWidget):
             ep = f"{int(last.epoch or 0)} / {run.total_epochs or '?'}"
             self._set_card("epoch", ep)
 
-            # Current metric: prefer mAP, then accuracy, then first quality
             cur_val = "--"
             best_val = "--"
             best_ep = "--"
             qual_kvs = {}
             for s in samples:
                 for k, v in s.values.items():
-                    if "map" in k.lower() or "accuracy" in k.lower() or "precision" in k.lower():
+                    kl = k.lower()
+                    if any(w in kl for w in ("map", "accuracy", "precision")):
                         qual_kvs[(s.epoch or 0, k)] = v
             if qual_kvs:
                 last_items = sorted(qual_kvs.keys(), key=lambda x: x[0])
                 cur_val = f"{qual_kvs[last_items[-1]]:.4f}"
-                best_ep_key = max(qual_kvs, key=lambda x: qual_kvs[x])
-                best_val = f"{qual_kvs[best_ep_key]:.4f}"
-                best_ep = f"Epoch {int(best_ep_key[0])}"
-
+                best_key = max(qual_kvs, key=lambda x: qual_kvs[x])
+                best_val = f"{qual_kvs[best_key]:.4f}"
+                best_ep = f"Epoch {int(best_key[0])}"
             self._set_card("current", cur_val)
             self._set_card("best", f"{best_val} ({best_ep})")
 
-            # Loss
             loss_vals = []
             for s in samples:
                 for k, v in s.values.items():
                     if "loss" in k.lower():
                         loss_vals.append(v)
-            if loss_vals:
-                self._set_card("loss", f"{loss_vals[-1]:.4f}")
-            else:
-                self._set_card("loss", "--")
+            self._set_card("loss", f"{loss_vals[-1]:.4f}" if loss_vals else "--")
 
     def _set_card(self, name: str, value: str):
         card = self.findChild(QLabel, f"card_{name}_value")
@@ -256,6 +273,9 @@ class TrainingMetricsDashboard(QWidget):
             self._set_card(name, "--")
         self._export_csv_btn.setEnabled(False)
         self._export_img_btn.setEnabled(False)
+        self._empty_label.show()
+        for tab_idx in range(self._tabs.count()):
+            self._tabs.widget(tab_idx).hide()
 
     def _export_csv(self):
         run = self._store.get_run(self._current_job_id) if self._current_job_id else None

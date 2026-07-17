@@ -53,6 +53,7 @@ from anylabeling.services.auto_training.ultralytics.trainer import (
     TrainingLogRedirector,
     get_training_manager,
 )
+from anylabeling.views.training.metrics import TrainingMetricsDashboard
 from anylabeling.services.auto_training.ultralytics.utils import *
 from anylabeling.services.auto_training.ultralytics.validators import (
     validate_basic_config,
@@ -172,6 +173,9 @@ class GuidedTrainingWidget(QWidget):
         self.image_timer = QTimer()
         self.image_timer.timeout.connect(self.update_training_images)
         self.current_project_path = None
+
+        # Metrics dashboard (lazy-init on first use)
+        self._metrics_dashboard = None  # TrainingMetricsDashboard
         self.training_status = "idle"  # idle, training, completed, error
         self.current_epochs = 0
 
@@ -195,12 +199,15 @@ class GuidedTrainingWidget(QWidget):
         self.data_tab = QWidget()
         self.config_tab = QWidget()
         self.train_tab = QWidget()
+        self.metrics_tab = QWidget()  # placeholder, dashboard lazy-init
 
         self.tab_widget = QTabWidget()
         self.tab_widget.addTab(self.data_tab, self.tr("Data"))
         self.tab_widget.addTab(self.config_tab, self.tr("Config"))
         self.tab_widget.addTab(self.train_tab, self.tr("Train"))
+        self.tab_widget.addTab(self.metrics_tab, self.tr("Metrics"))
         self.tab_widget.tabBar().setEnabled(False)
+        self.tab_widget.setTabVisible(3, False)  # hidden until training starts
         main_layout = QVBoxLayout(self)
         main_layout.addWidget(self.tab_widget)
 
@@ -217,6 +224,18 @@ class GuidedTrainingWidget(QWidget):
             return
         self.init_train_tab()
         self._train_tab_initialized = True
+
+    def _ensure_metrics_dashboard(self) -> TrainingMetricsDashboard:
+        """Lazy-init the metrics dashboard on the Metrics tab."""
+        if self._metrics_dashboard is not None:
+            return self._metrics_dashboard
+        from anylabeling.views.training.metrics import TrainingMetricsDashboard
+
+        self._metrics_dashboard = TrainingMetricsDashboard()
+        layout = QVBoxLayout(self.metrics_tab)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.addWidget(self._metrics_dashboard)
+        return self._metrics_dashboard
 
     def save_training_logs_to_file(self):
         """Save training logs to a local file with timestamp"""
@@ -1710,9 +1729,16 @@ class GuidedTrainingWidget(QWidget):
             self.progress_timer.start(1000)
             self.image_timer.start(5000)
             self.append_training_log(self.tr("Training is about to start..."))
+
+            # Show Metrics tab and bind dashboard
+            dashboard = self._ensure_metrics_dashboard()
+            self.tab_widget.setTabVisible(3, True)
+            self.tab_widget.setTabEnabled(3, True)
+            save_dir = data.get("save_dir") or self.current_project_path
+            dashboard.bind_job("guided", save_dir)
+
         elif event_type == "training_completed":
             self.training_status = "completed"
-            # Use real save_dir from training worker if available
             real_save_dir = data.get("save_dir", "")
             if real_save_dir and os.path.isdir(real_save_dir):
                 self.current_project_path = real_save_dir
@@ -1728,6 +1754,9 @@ class GuidedTrainingWidget(QWidget):
             self.append_training_log(
                 self.tr("Training completed successfully!")
             )
+            if self._metrics_dashboard:
+                self._metrics_dashboard.on_run_completed("guided")
+
         elif event_type == "training_error":
             self.training_status = "error"
             real_save_dir = data.get("save_dir", "")
@@ -1742,6 +1771,9 @@ class GuidedTrainingWidget(QWidget):
             self.image_timer.stop()
             error_msg = data.get("error", "Unknown error occurred")
             self.append_training_log(f"ERROR: {error_msg}")
+            if self._metrics_dashboard:
+                self._metrics_dashboard.on_run_stopped("guided")
+
         elif event_type == "training_stopped":
             self.training_status = "stop"
             real_save_dir = data.get("save_dir", "")
@@ -1756,6 +1788,14 @@ class GuidedTrainingWidget(QWidget):
             self.progress_timer.stop()
             self.image_timer.stop()
             self.append_training_log(self.tr("Training stopped by user"))
+            if self._metrics_dashboard:
+                self._metrics_dashboard.on_run_stopped("guided")
+
+        elif event_type == "epoch_metrics":
+            # Forward structured metrics to dashboard (real-time)
+            if self._metrics_dashboard:
+                self._metrics_dashboard.on_metric_event("guided", data)
+
         elif event_type == "training_log":
             log_message = data.get("message", "")
             if log_message:

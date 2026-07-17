@@ -27,6 +27,7 @@ from anylabeling.services.training_center.history import get_history_store
 from anylabeling.services.training_center.job_manager import get_job_manager
 from anylabeling.services.training_center.models import TrainingStatus
 from anylabeling.services.training_center.event_protocol import TrainingEventType
+from anylabeling.views.training.metrics import TrainingMetricsDashboard
 
 
 # Status display helpers
@@ -112,6 +113,12 @@ class TrainingHistoryWidget(QWidget):
         self.open_dir_btn.clicked.connect(self._open_output_directory)
         self.open_dir_btn.setEnabled(False)
         action_buttons.addWidget(self.open_dir_btn)
+
+        self.view_metrics_btn = QPushButton("View Metrics")
+        self.view_metrics_btn.clicked.connect(self._view_metrics)
+        self.view_metrics_btn.setEnabled(False)
+        action_buttons.addWidget(self.view_metrics_btn)
+
         action_buttons.addStretch()
         detail_layout.addLayout(action_buttons)
 
@@ -198,6 +205,7 @@ class TrainingHistoryWidget(QWidget):
         if not selected:
             self.detail_text.clear()
             self.open_dir_btn.setEnabled(False)
+            self.view_metrics_btn.setEnabled(False)
             return
 
         row = selected[0].row()
@@ -206,6 +214,7 @@ class TrainingHistoryWidget(QWidget):
         if job is None:
             self.detail_text.clear()
             self.open_dir_btn.setEnabled(False)
+            self.view_metrics_btn.setEnabled(False)
             return
 
         # Build detail text
@@ -232,6 +241,7 @@ class TrainingHistoryWidget(QWidget):
 
         self.detail_text.setPlainText("\n".join(lines))
         self.open_dir_btn.setEnabled(bool(job.output_directory))
+        self.view_metrics_btn.setEnabled(bool(job.output_directory))
 
     def _open_output_directory(self):
         selected = self.table.selectedItems()
@@ -259,3 +269,50 @@ class TrainingHistoryWidget(QWidget):
             subprocess.run(["open", path])
         else:
             subprocess.run(["xdg-open", path])
+
+    def _view_metrics(self):
+        """Open a metrics dashboard dialog for the selected historical job."""
+        from PyQt6.QtWidgets import QDialog
+
+        selected = self.table.selectedItems()
+        if not selected:
+            return
+        row = selected[0].row()
+        job_id = self.table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        job = self.history_store.get_job(job_id)
+        if job is None or not job.output_directory:
+            QMessageBox.information(self, "Info", "No metrics data available for this job.")
+            return
+
+        path = job.output_directory
+        results_csv = os.path.join(path, "results.csv")
+        metrics_jsonl = os.path.join(path, "metrics.jsonl")
+        if not os.path.isfile(results_csv) and not os.path.isfile(metrics_jsonl):
+            QMessageBox.information(
+                self, "No Metrics Data",
+                "This job's output directory does not contain metrics data.\n\n"
+                f"Expected: {results_csv} or {metrics_jsonl}"
+            )
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Metrics — {job.display_name or job.job_id}")
+        dialog.resize(900, 600)
+        dialog.setMinimumSize(600, 400)
+        layout = QVBoxLayout(dialog)
+        dashboard = TrainingMetricsDashboard()
+        layout.addWidget(dashboard)
+        dashboard.load_history(job.job_id, path)
+
+        # Close button
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.close)
+        btn_layout.addWidget(close_btn)
+        layout.addLayout(btn_layout)
+
+        dialog.exec()
+
+        # Cleanup
+        dashboard.cleanup()

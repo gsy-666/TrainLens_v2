@@ -194,9 +194,10 @@ class MetricsChartWidget(QWidget):
                     self.width() - self._margin[0] - self._margin[2],
                     self.height() - self._margin[1] - self._margin[3])
 
-        # Check legend clicks
+        # ── check legend items first (higher priority) ──
         x_cursor = r.right() - 8
         y_cursor = r.top() + 4
+        legend_hit = False
         for name, display, pts, color, visible in reversed(self._series):
             label = display if display else name
             tw = QFontMetrics(QFont("Segoe UI", 8)).horizontalAdvance(label) + 18
@@ -209,9 +210,39 @@ class MetricsChartWidget(QWidget):
                         event.globalPosition().toPoint(),
                         f"{display}\nEpoch {nearest[0]:.4g}: {nearest[1]:.6g}"
                     )
-                return
+                legend_hit = True
+                break
             if x_cursor < r.left():
                 break
+
+        if legend_hit:
+            return
+
+        # ── plot-area hover: show crosshair-style tooltip for nearest point across all visible series ──
+        if r.contains(pos):
+            best_series_name = None
+            best_point = None
+            best_dist = float("inf")
+            for name, display, pts, color, visible in self._series:
+                if not visible or not pts:
+                    continue
+                nearest = self._find_nearest(r, pts, pos.x())
+                if nearest is None:
+                    continue
+                nx, ny = nearest
+                px = r.left() + (nx - self._x_min) / (self._x_max - self._x_min or 1) * r.width()
+                dist = abs(px - pos.x())
+                if dist < best_dist and dist < 25:
+                    best_dist = dist
+                    best_series_name = display
+                    best_point = (nx, ny)
+
+            if best_point:
+                QToolTip.showText(
+                    event.globalPosition().toPoint(),
+                    f"{best_series_name}\nEpoch {best_point[0]:.4g}: {best_point[1]:.6g}"
+                )
+                return
 
         QToolTip.hideText()
 
