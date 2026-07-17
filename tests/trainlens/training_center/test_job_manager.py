@@ -1257,3 +1257,71 @@ class TestHistoryIntegration:
             "IDLE job should NOT be persisted in history"
         )
         assert len(all_jobs) == 0
+
+    def test_jobmanager_uses_isolated_history_store(self, tmp_path):
+        """JobManager without explicit injection uses an isolated HistoryStore.
+
+        The conftest.py redirects the history singleton to a temp dir,
+        so any new JobManager must NOT write to the user's real APPDATA.
+        """
+        from anylabeling.services.training_center.history import get_history_store
+        import os
+
+        # Get the isolated store (set by conftest.py pytest_configure)
+        isolated_store = get_history_store()
+
+        # The isolated store's directory must NOT be the user's real APPDATA
+        real_appdata = os.environ.get("APPDATA", "")
+        if real_appdata:
+            assert str(real_appdata) not in str(isolated_store.history_dir), (
+                f"Isolated HistoryStore path {isolated_store.history_dir} "
+                f"should NOT be in user APPDATA {real_appdata}"
+            )
+
+        # Creating a JobManager should use this isolated store
+        jm = JobManager()
+        jm_store = jm._get_history_store()
+        assert jm_store.history_dir == isolated_store.history_dir, (
+            f"JobManager should use isolated store at {isolated_store.history_dir}, "
+            f"got {jm_store.history_dir}"
+        )
+
+    def test_jobmanager_write_stays_in_isolated_store(
+        self, tmp_path, mock_adapter
+    ):
+        """JobManager history writes go to isolated store, never user's real dir."""
+        from anylabeling.services.training_center.history import get_history_store
+        import os
+
+        jm = JobManager()
+        jm._current_job = None
+        jm._current_adapter = None
+        jm._status_callbacks = []
+        jm._event_callbacks = []
+
+        mock_adapter.start.return_value = (True, "Started")
+        job = TrainingJob(
+            job_id="isolation-test-001",
+            mode=TrainingMode.CUSTOM_SCRIPT,
+            status=TrainingStatus.IDLE,
+            created_at=datetime.now(),
+            workspace=Path("/tmp/workspace"),
+            display_name="Isolation Test",
+        )
+
+        jm.reserve_job(job, mock_adapter)
+        jm.start_reserved_job(job.job_id, {"data": "test"})
+        jm.complete_job(job.job_id)
+
+        # The record must exist in the isolated store
+        isolated_store = get_history_store()
+        record = isolated_store.get_job(job.job_id)
+        assert record is not None
+        assert record.status == "completed"
+
+        # The isolated store path must NOT contain the user's real APPDATA
+        real_appdata = os.environ.get("APPDATA", "")
+        if real_appdata:
+            assert str(real_appdata) not in str(isolated_store.history_dir), (
+                f"Isolated store path {isolated_store.history_dir} must not be in user APPDATA"
+            )
