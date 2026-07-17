@@ -143,15 +143,9 @@ def inspect_python_environment(python_path: Path) -> EnvironmentInfo:
         elif not info.pip_available:
             info.status = EnvironmentStatus.WARNING
             info.warning_message = "pip is not available"
-        elif not info.torch_installed or not info.ultralytics_installed:
-            info.status = EnvironmentStatus.WARNING
-            parts = []
-            if not info.torch_installed:
-                parts.append("PyTorch not installed")
-            if not info.ultralytics_installed:
-                parts.append("Ultralytics not installed")
-            info.warning_message = "; ".join(parts)
         else:
+            # Python + pip are valid — READY for general use
+            # torch/ultralytics status is informational only (displayed in summary)
             info.status = EnvironmentStatus.READY
 
         # requirements.txt detection

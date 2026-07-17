@@ -98,6 +98,7 @@ class TestRunMonitorWidgetCallbacks:
         callback = Mock()
         widget.on_run_start = callback
 
+        import sys as _sys
         # Mock workspace and environment
         widget.workspace = Mock(spec=Workspace)
         widget.workspace.path = Path("/tmp/workspace")
@@ -105,14 +106,15 @@ class TestRunMonitorWidgetCallbacks:
         widget.workspace.detected_environments = []
 
         # Simulate successful start
-        with patch('anylabeling.services.run_monitor.process_manager.ProcessManager.start', return_value=True):
-            with patch('anylabeling.services.training_center.job_manager.JobManager.request_start', return_value=(True, "Started")):
-                widget.script_combo.addItem("train.py", Mock(spec=DetectedScript, path=Path("/tmp/workspace/train.py"), framework="test"))
-                widget.python_path_edit.setText("/usr/bin/python3")
-                widget.script_combo.setEnabled(True)
-                widget.start_btn.setEnabled(True)
+        with patch('subprocess.run', return_value=Mock(returncode=0)):
+            with patch('anylabeling.services.run_monitor.process_manager.ProcessManager.start', return_value=True):
+                with patch('anylabeling.services.training_center.job_manager.JobManager.request_start', return_value=(True, "Started")):
+                    widget.script_combo.addItem("train.py", Mock(spec=DetectedScript, path=Path("/tmp/workspace/train.py"), framework="test"))
+                    widget.python_path_edit.setText(_sys.executable)
+                    widget.script_combo.setEnabled(True)
+                    widget._update_start_button()
 
-                widget._on_start_training()
+                    widget._on_start_training()
 
         assert callback.called
         assert callback.call_count == 1

@@ -70,8 +70,13 @@ from anylabeling.services.training_center.environment import (
 _ENV_BINDING_PREFIX = "trainlens/env_binding/"
 
 def _make_binding_key(project_dir: str) -> str:
-    """Create a QSettings key from a normalized project path."""
-    norm = str(Path(project_dir).resolve()).lower().replace("\\", "/")
+    """Create a QSettings key from a normalized project path.
+
+    Uses os.path.normcase for Windows case-insensitive matching.
+    """
+    import os
+    norm = os.path.normcase(os.path.normpath(os.path.abspath(str(project_dir))))
+    norm = norm.replace("\\", "/")
     return _ENV_BINDING_PREFIX + hashlib.sha256(norm.encode()).hexdigest()[:16]
 
 
@@ -651,12 +656,22 @@ class RunMonitorWidget(QWidget):
             self._update_start_button()
 
     def _cleanup_env_thread(self):
-        """Safely clean up environment thread."""
-        if self._env_thread and self._env_thread.isRunning():
-            self._env_thread.quit()
-            self._env_thread.wait(3000)
+        """Disconnect signals but let running subprocess finish naturally.
+
+        Never calls QThread.quit() or QThread.terminate() — the worker
+        may be blocked in subprocess.run and cannot be interrupted.
+        Thread cleanup is handled by finished -> deleteLater."""
+        if self._env_worker:
+            try:
+                self._env_worker.detection_done.disconnect()
+                self._env_worker.venv_created.disconnect()
+                self._env_worker.requirements_done.disconnect()
+                self._env_worker.log_message.disconnect()
+                self._env_worker.status_changed.disconnect()
+            except Exception:
+                pass
+            self._env_worker = None
         self._env_thread = None
-        self._env_worker = None
 
     # ── Environment UI helpers ──────────────────────────────────────────
 
@@ -1093,8 +1108,26 @@ class RunMonitorWidget(QWidget):
         self.resources_label.setStyleSheet("color: gray;")
 
     def cleanup(self):
-        """Clean up resources (call before destroying widget)"""
-        self._cleanup_env_thread()
+        """Clean up resources (call before destroying widget).
+
+        Disconnects UI signals from running workers but does NOT
+        block on thread completion (worker subprocess may still be running).
+        Threads clean themselves up via finished -> deleteLater.
+        """
+        # Disconnect env worker signals to prevent updates to destroyed widget
+        if self._env_worker:
+            try:
+                self._env_worker.detection_done.disconnect()
+                self._env_worker.venv_created.disconnect()
+                self._env_worker.requirements_done.disconnect()
+                self._env_worker.log_message.disconnect()
+                self._env_worker.status_changed.disconnect()
+            except Exception:
+                pass
+            self._env_worker = None
+        # Do NOT call quit() on env thread — let subprocess finish naturally
+        self._env_thread = None
+
         if self.scanner_thread and self.scanner_thread.isRunning():
             self.scanner_thread.cancel()
             self.scanner_thread.wait()
