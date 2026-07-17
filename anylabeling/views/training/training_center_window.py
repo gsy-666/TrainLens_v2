@@ -38,12 +38,14 @@ TAB_NAMES = {
 }
 
 
-def open_training_center(parent=None, tab="guided"):
+def open_training_center(parent=None, tab="guided", open_folder_callback=None, image_list_getter=None):
     """Open or raise the unified TrainingCenterWindow.
 
     Args:
         parent: Parent widget (typically the LabelingWidget)
         tab: Initial tab to show ("guided", "custom", "history")
+        open_folder_callback: Callable for Load Images button
+        image_list_getter: Callable returning current image list
 
     Returns:
         TrainingCenterWindow instance
@@ -55,15 +57,30 @@ def open_training_center(parent=None, tab="guided"):
         try:
             _training_center_window.isVisible()
         except RuntimeError:
-            # C++ object deleted, recreate
             _training_center_window = None
 
     if _training_center_window is None:
-        _training_center_window = TrainingCenterWindow(parent=parent)
+        _training_center_window = TrainingCenterWindow(
+            parent=parent,
+            open_folder_callback=open_folder_callback,
+            image_list_getter=image_list_getter,
+        )
+    else:
+        # Update callbacks on existing window (host may have changed)
+        if open_folder_callback is not None:
+            _training_center_window.guided_widget._open_folder_callback = open_folder_callback
+        if image_list_getter is not None:
+            _training_center_window.guided_widget._image_list_getter = image_list_getter
+            # Re-sync images when reusing existing window
+            _training_center_window.guided_widget.sync_image_list_from_host()
 
     # Switch to requested tab
     tab_idx = TAB_NAMES.get(tab, TAB_GUIDED)
     _training_center_window.tab_widget.setCurrentIndex(tab_idx)
+
+    # Auto-sync when opening Guided tab
+    if tab_idx == TAB_GUIDED:
+        _training_center_window.guided_widget.sync_image_list_from_host()
 
     _training_center_window.show()
     _training_center_window.raise_()
@@ -75,7 +92,7 @@ def open_training_center(parent=None, tab="guided"):
 class TrainingCenterWindow(QMainWindow):
     """Unified training center with Guided, Custom, and History tabs."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, open_folder_callback=None, image_list_getter=None):
         super().__init__(parent)
 
         # Shared services
@@ -101,12 +118,14 @@ class TrainingCenterWindow(QMainWindow):
         self.tab_widget = QTabWidget()
         self.tab_widget.currentChanged.connect(self._on_tab_changed)
 
-        # Tab 0: Guided Training
+        # Tab 0: Guided Training — inject host callbacks
         self.guided_widget = GuidedTrainingWidget(
             parent=None,
             image_list=[],
             output_dir="",
             supported_shape=["rectangle", "polygon"],
+            open_folder_callback=open_folder_callback,
+            image_list_getter=image_list_getter,
         )
         self.tab_widget.addTab(self.guided_widget, "Guided Training")
 
@@ -177,7 +196,9 @@ class TrainingCenterWindow(QMainWindow):
                 self.history_widget.refresh()
 
     def _on_tab_changed(self, index):
-        """Handle tab changes."""
+        """Handle tab changes — auto-sync images for Guided tab."""
+        if index == TAB_GUIDED and hasattr(self, 'guided_widget'):
+            self.guided_widget.sync_image_list_from_host()
         if index == TAB_HISTORY and hasattr(self, 'history_widget'):
             self.history_widget.refresh()
 

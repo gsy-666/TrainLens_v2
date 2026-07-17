@@ -66,10 +66,22 @@ from anylabeling.services.training_center.event_protocol import TrainingEventTyp
 
 
 class GuidedTrainingWidget(QWidget):
-    def __init__(self, parent=None, image_list=None, output_dir=None, supported_shape=None):
+    def __init__(
+        self,
+        parent=None,
+        image_list=None,
+        output_dir=None,
+        supported_shape=None,
+        open_folder_callback=None,
+        image_list_getter=None,
+    ):
         super().__init__(parent)
 
-        # Accept parameters directly or from parent
+        # Store callbacks for explicit dependency injection (no parent() chain)
+        self._open_folder_callback = open_folder_callback
+        self._image_list_getter = image_list_getter
+
+        # Accept parameters directly or from parent (backward compat)
         if parent is not None and hasattr(parent, 'image_list'):
             self.image_list = parent.image_list
             self.output_dir = parent.output_dir
@@ -443,11 +455,56 @@ class GuidedTrainingWidget(QWidget):
         self._summary_view_mode = None
 
     def load_images(self):
-        self.parent().open_folder_dialog()
-        self.image_list = self.parent().image_list
+        """Load images via the host's folder dialog callback.
+
+        Uses explicit callback injection — no parent() chain traversal.
+        """
+        if not callable(self._open_folder_callback):
+            QMessageBox.information(
+                self,
+                self.tr("Load Images"),
+                self.tr("Image loading is not available in standalone mode."),
+            )
+            return
+
+        previous_images = list(self.image_list) if self.image_list else []
+
+        # Invoke the host's folder dialog
+        self._open_folder_callback()
+
+        # Sync latest image list from host
+        if callable(self._image_list_getter):
+            latest_images = self._image_list_getter()
+            if latest_images:
+                self.image_list = list(latest_images)
+            elif previous_images:
+                # User cancelled — restore previous list
+                self.image_list = previous_images
+        elif previous_images:
+            self.image_list = previous_images
+
         self.clear_cache()
         self.refresh_dataset_summary()
         self.update_labeled_images_hint()
+
+    def sync_image_list_from_host(self):
+        """Pull latest image_list from the host via image_list_getter.
+
+        Returns:
+            True if sync succeeded, False otherwise.
+        """
+        if not callable(self._image_list_getter):
+            return False
+
+        images = self._image_list_getter()
+        if images is None:
+            return False
+
+        self.image_list = list(images)
+        self.clear_cache()
+        self.refresh_dataset_summary()
+        self.update_labeled_images_hint()
+        return True
 
     def init_dataset_summary(self, parent_layout):
         summary_widget = QWidget()

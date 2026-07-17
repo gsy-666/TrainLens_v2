@@ -3263,7 +3263,12 @@ class LabelingWidget(LabelDialog):
         """
         if mode == "ultralytics":
             from anylabeling.views.training.training_center_window import open_training_center
-            open_training_center(parent=self, tab="guided")
+            open_training_center(
+                parent=self,
+                tab="guided",
+                open_folder_callback=self.open_folder_dialog,
+                image_list_getter=lambda: self.image_list,
+            )
         else:
             return
 
@@ -3327,7 +3332,12 @@ class LabelingWidget(LabelDialog):
     def open_run_monitor(self):
         """Open Run Monitor via unified TrainingCenterWindow (non-modal)."""
         from anylabeling.views.training.training_center_window import open_training_center
-        open_training_center(parent=self, tab="custom")
+        open_training_center(
+            parent=self,
+            tab="custom",
+            open_folder_callback=self.open_folder_dialog,
+            image_list_getter=lambda: self.image_list,
+        )
 
     def open_paddleocr(self):
         if not hasattr(self, "ppocr_window") or self.ppocr_window is None:

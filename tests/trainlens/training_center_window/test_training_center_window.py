@@ -22,6 +22,7 @@ from anylabeling.views.training.training_center_window import (
     open_training_center,
     TAB_GUIDED, TAB_CUSTOM, TAB_HISTORY,
 )
+from anylabeling.views.training.guided_training_widget import GuidedTrainingWidget
 
 
 @pytest.fixture(scope="session")
@@ -317,5 +318,148 @@ class TestSingleJobManager:
         jm_after = get_job_manager()
         assert jm_before is jm_after
         assert window.job_manager is jm_before
+        window.shutdown()
+        window.close()
+
+
+# ── Image sync tests ───────────────────────────────────────────────────
+
+class FakeHost:
+    """Simulates a LabelingWidget host with image_list and open_folder_dialog."""
+
+    def __init__(self, images=None):
+        self.image_list = list(images) if images else []
+        self._dialog_call_count = 0
+
+    def open_folder_dialog(self, _value=False, dirpath=None):
+        self._dialog_call_count += 1
+        # Simulate user selecting images
+        self.image_list = ["/img/a.jpg", "/img/b.jpg", "/img/c.jpg"]
+
+
+class TestImageSync:
+
+    def test_guided_widget_gets_callbacks(self, qapp):
+        """GuidedTrainingWidget stores injected callbacks."""
+        host = FakeHost(["img1.jpg"])
+        widget = GuidedTrainingWidget(
+            parent=None,
+            image_list=[],
+            open_folder_callback=host.open_folder_dialog,
+            image_list_getter=lambda: host.image_list,
+        )
+        assert widget._open_folder_callback is not None
+        assert widget._image_list_getter is not None
+
+    def test_sync_pulls_images_from_host(self, qapp):
+        """sync_image_list_from_host pulls images from host getter."""
+        host = FakeHost(["img1.jpg", "img2.jpg"])
+        widget = GuidedTrainingWidget(
+            parent=None,
+            image_list=[],
+            image_list_getter=lambda: host.image_list,
+        )
+        assert widget.sync_image_list_from_host() is True
+        assert widget.image_list == ["img1.jpg", "img2.jpg"]
+
+    def test_sync_no_getter_returns_false(self, qapp):
+        """sync returns False without image_list_getter."""
+        widget = GuidedTrainingWidget(parent=None, image_list=[])
+        assert widget.sync_image_list_from_host() is False
+
+    def test_load_images_calls_callback_once(self, qapp):
+        """Clicking Load Images calls open_folder_callback exactly once."""
+        host = FakeHost([])
+        widget = GuidedTrainingWidget(
+            parent=None,
+            image_list=[],
+            open_folder_callback=host.open_folder_dialog,
+            image_list_getter=lambda: host.image_list,
+        )
+        widget.load_images()
+        assert host._dialog_call_count == 1
+
+    def test_load_images_updates_from_getter(self, qapp):
+        """After Load Images, image_list is updated from getter."""
+        host = FakeHost([])
+        widget = GuidedTrainingWidget(
+            parent=None,
+            image_list=[],
+            open_folder_callback=host.open_folder_dialog,
+            image_list_getter=lambda: host.image_list,
+        )
+        widget.load_images()
+        assert widget.image_list == ["/img/a.jpg", "/img/b.jpg", "/img/c.jpg"]
+
+    def test_load_images_preserves_on_cancel(self, qapp):
+        """When user cancels (getter returns empty), previous images preserved."""
+        host = FakeHost(["old.jpg"])
+        # After dialog, host returns empty (cancelled)
+        host.open_folder_dialog = lambda _value=False, dirpath=None: None
+        host.image_list = []  # cancelled — no images selected
+
+        widget = GuidedTrainingWidget(
+            parent=None,
+            image_list=["old.jpg"],
+            open_folder_callback=host.open_folder_dialog,
+            image_list_getter=lambda: host.image_list,
+        )
+        widget.load_images()
+        assert widget.image_list == ["old.jpg"]
+
+    def test_standalone_load_images_no_crash(self, qapp):
+        """In standalone mode (no callbacks), Load Images shows info, no crash."""
+        widget = GuidedTrainingWidget(parent=None, image_list=[])
+        with patch('anylabeling.views.training.guided_training_widget.QMessageBox.information') as mock_info:
+            widget.load_images()
+            mock_info.assert_called_once()
+
+    def test_no_parent_open_folder_dialog_in_source(self):
+        """GuidedTrainingWidget.load_images source must NOT contain self.parent().open_folder_dialog."""
+        import inspect
+        from anylabeling.views.training.guided_training_widget import GuidedTrainingWidget
+        source = inspect.getsource(GuidedTrainingWidget.load_images)
+        assert "self.parent().open_folder_dialog" not in source
+        assert "self.parent().image_list" not in source
+
+    def test_training_center_passes_callbacks_to_guided(self, qapp, reset_center_singleton):
+        """TrainingCenterWindow passes callbacks to GuidedTrainingWidget."""
+        host = FakeHost(["test.jpg"])
+        window = TrainingCenterWindow(
+            parent=None,
+            open_folder_callback=host.open_folder_dialog,
+            image_list_getter=lambda: host.image_list,
+        )
+        assert window.guided_widget._open_folder_callback is not None
+        assert callable(window.guided_widget._open_folder_callback)
+        assert window.guided_widget._image_list_getter is not None
+        assert callable(window.guided_widget._image_list_getter)
+        window.shutdown()
+        window.close()
+
+    def test_open_training_center_syncs_on_guided_tab(self, qapp, reset_center_singleton):
+        """open_training_center(tab='guided') auto-syncs images."""
+        host = FakeHost(["img1.jpg", "img2.jpg"])
+        window = open_training_center(
+            parent=None,
+            tab="guided",
+            image_list_getter=lambda: host.image_list,
+        )
+        assert window.guided_widget.image_list == ["img1.jpg", "img2.jpg"]
+        window.shutdown()
+        window.close()
+
+    def test_tab_switch_to_guided_syncs(self, qapp, reset_center_singleton):
+        """Switching to Guided tab triggers image sync."""
+        host = FakeHost(["synced.jpg"])
+        window = TrainingCenterWindow(
+            parent=None,
+            image_list_getter=lambda: host.image_list,
+        )
+        # Start on a different tab
+        window.tab_widget.setCurrentIndex(TAB_CUSTOM)
+        # Switch to Guided
+        window.tab_widget.setCurrentIndex(TAB_GUIDED)
+        assert window.guided_widget.image_list == ["synced.jpg"]
         window.shutdown()
         window.close()
