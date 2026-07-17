@@ -4,7 +4,7 @@ Combines Guided Training, Custom Project (Run Monitor), and History
 into a single non-modal window with shared JobManager and HistoryStore.
 """
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -145,25 +145,6 @@ class TrainingCenterWindow(QMainWindow):
 
         # Initial status
         self._update_status_bar_from_current()
-
-        # === TEMPORARY DIAGNOSTIC: heartbeat timer ===
-        self._heartbeat_timer = QTimer(self)
-        self._heartbeat_timer.timeout.connect(self._heartbeat)
-        self._heartbeat_timer.start(250)
-
-    def _heartbeat(self):
-        """Temporary diagnostic heartbeat."""
-        from datetime import datetime as _dt
-        try:
-            with open(
-                r"D:\TrainLensTest\guided_start_trace.log",
-                "a",
-                encoding="utf-8",
-            ) as _f:
-                _f.write(f"{_dt.now().isoformat(timespec='milliseconds')} HEARTBEAT\n")
-                _f.flush()
-        except Exception:
-            pass
 
     def _create_status_bar(self, parent_layout):
         """Create a thin status bar at the top."""

@@ -171,7 +171,7 @@ class TestEarlyMutualExclusion:
         """When a custom job is active, guided start is rejected before data prep."""
         jm = training_center.job_manager
 
-        # Use a real TrainingJob with RUNNING status
+        # Place an active job directly into JobManager (reserve_job checks _current_job)
         active_job = TrainingJob(
             job_id="custom-active",
             mode=TrainingMode.CUSTOM_SCRIPT,
@@ -181,11 +181,11 @@ class TestEarlyMutualExclusion:
             workspace=Path("/tmp"),
             command=["python", "train.py"],
         )
+        jm._current_job = active_job
 
-        with patch.object(jm, 'get_current_job', return_value=active_job):
-            with patch('anylabeling.views.training.guided_training_widget.QMessageBox.critical') as mock_msg:
-                training_center.guided_widget.start_training_from_train_tab()
-                mock_msg.assert_called_once()
+        with patch('anylabeling.views.training.guided_training_widget.QMessageBox.critical') as mock_msg:
+            training_center.guided_widget.start_training_from_train_tab()
+            mock_msg.assert_called_once()
 
     def test_custom_rejected_when_guided_active(self, qapp, training_center):
         """When a guided job is active, custom start is rejected."""
