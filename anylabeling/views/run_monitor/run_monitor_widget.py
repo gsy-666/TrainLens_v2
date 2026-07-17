@@ -54,7 +54,6 @@ from anylabeling.services.training_center.models import (
     TrainingStatus,
 )
 from anylabeling.services.training_center.job_manager import get_job_manager
-from anylabeling.services.training_center.history import get_history_store, JobHistoryRecord
 from anylabeling.services.training_center.event_protocol import TrainingEvent, TrainingEventType
 
 
@@ -82,7 +81,6 @@ class RunMonitorWidget(QWidget):
         # Services
         self.resource_monitor = ResourceMonitor()
         self.job_manager = get_job_manager()
-        self.history_store = get_history_store()
 
         # Callbacks
         self.on_run_start: Optional[Callable[[Run], None]] = None
@@ -466,22 +464,7 @@ class RunMonitorWidget(QWidget):
             )
             self.storage.save_event(event)
 
-        # Save to HistoryStore (unified)
-        history_record = JobHistoryRecord(
-            job_id=job_id,
-            mode=TrainingMode.CUSTOM_SCRIPT.value,
-            status=TrainingStatus.IDLE.value,
-            created_at=self.current_job.created_at.isoformat(),
-            workspace=str(self.workspace.path),
-            display_name=self.current_job.display_name,
-            framework=self.current_job.framework,
-            python_executable=str(selected_env.python_path),
-            command=[str(selected_script.path)] + arguments,
-            metadata=self.current_job.metadata,
-        )
-        self.history_store.append_job(history_record)
-
-        # Request start via JobManager
+        # Request start via JobManager (sole HistoryStore authority)
         from anylabeling.services.training_center.adapters.custom_script_adapter import CustomScriptAdapter
 
         adapter = CustomScriptAdapter()
@@ -613,12 +596,12 @@ class RunMonitorWidget(QWidget):
     def _on_training_event(self, event: TrainingEvent):
         """Handle unified training events from JobManager
 
-        Maps TrainingEvent to UI updates and HistoryStore writes.
+        Maps TrainingEvent to UI updates (display only).
+        HistoryStore writes are handled by JobManager.
         """
         if not self.current_job or event.job_id != self.current_job.job_id:
             return
 
-        # Update HistoryStore based on event type
         if event.event_type == TrainingEventType.PROCESS_STARTED:
             pid = event.payload.get('pid', 0)
             self.console_output.appendPlainText(f"[System] Process started (PID: {pid})")
@@ -626,12 +609,6 @@ class RunMonitorWidget(QWidget):
             # Start resource monitoring
             if pid:
                 self.resource_monitor.start_monitoring(pid, interval_ms=1000)
-
-            self.history_store.update_job(
-                event.job_id,
-                status=TrainingStatus.RUNNING.value,
-                started_at=datetime.fromtimestamp(event.timestamp).isoformat(),
-            )
 
         elif event.event_type == TrainingEventType.CONSOLE_OUTPUT:
             # Display console output
@@ -655,13 +632,6 @@ class RunMonitorWidget(QWidget):
             self._update_status(RunStatus.COMPLETED)
             self._reset_ui_after_completion()
 
-            self.history_store.finalize_job(
-                event.job_id,
-                status=TrainingStatus.COMPLETED,
-                ended_at=datetime.fromtimestamp(event.timestamp),
-                output_directory=event.payload.get('save_dir', ''),
-            )
-
             # Callback
             if self.on_run_complete:
                 self.on_run_complete(exit_code)
@@ -678,14 +648,6 @@ class RunMonitorWidget(QWidget):
             self._update_status(RunStatus.FAILED)
             self._reset_ui_after_completion()
 
-            self.history_store.finalize_job(
-                event.job_id,
-                status=TrainingStatus.FAILED,
-                ended_at=datetime.fromtimestamp(event.timestamp),
-                error_message=error_msg,
-                output_directory=event.payload.get('save_dir', ''),
-            )
-
             # Callback
             if self.on_run_complete:
                 self.on_run_complete(exit_code)
@@ -696,13 +658,6 @@ class RunMonitorWidget(QWidget):
             self.resource_monitor.stop_monitoring()
             self._update_status(RunStatus.STOPPED)
             self._reset_ui_after_completion()
-
-            self.history_store.finalize_job(
-                event.job_id,
-                status=TrainingStatus.STOPPED,
-                ended_at=datetime.fromtimestamp(event.timestamp),
-                output_directory=event.payload.get('save_dir', ''),
-            )
 
             # Callback
             if self.on_run_complete:

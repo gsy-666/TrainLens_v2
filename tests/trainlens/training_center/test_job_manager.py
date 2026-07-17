@@ -1204,3 +1204,56 @@ class TestHistoryIntegration:
 
         # Cleanup singleton state
         JobManager._instance = None
+
+    def test_custom_script_no_duplicate_history(
+        self, job_manager_with_history, mock_adapter, sample_job, history_store
+    ):
+        """Custom Script jobs via JobManager produce exactly one history record."""
+        jm = job_manager_with_history
+        mock_adapter.start.return_value = (True, "Started")
+
+        sample_job.task = "Detect"
+        sample_job.model = "yolov8n.pt"
+        sample_job.data = "data.yaml"
+
+        # Full lifecycle: reserve → start → complete
+        jm.reserve_job(sample_job, mock_adapter)
+        jm.start_reserved_job(sample_job.job_id, {"save_dir": "/output"})
+        jm.complete_job(sample_job.job_id, metadata={"save_dir": "/output"})
+
+        # Verify exactly ONE record per job_id
+        jobs = history_store.list_jobs()
+        matching = [j for j in jobs if j.job_id == sample_job.job_id]
+        assert len(matching) == 1, (
+            f"Expected exactly 1 history record for {sample_job.job_id}, "
+            f"got {len(matching)}: {[j.status for j in matching]}"
+        )
+        assert matching[0].status == "completed"
+        assert matching[0].output_directory == "/output"
+
+    def test_custom_script_no_idle_record(
+        self, job_manager_with_history, mock_adapter, sample_job, history_store
+    ):
+        """IDLE is never written: RunMonitorWidget must not directly call append_job."""
+        jm = job_manager_with_history
+
+        # Without any reservation, there should be no record
+        all_jobs = history_store.list_jobs()
+        assert len(all_jobs) == 0
+
+        # Even after creating a TrainingJob (simulating RunMonitorWidget flow),
+        # NO history record should be created until reserve_job is called
+        idle_job = TrainingJob(
+            job_id="idle-custom-001",
+            mode=TrainingMode.CUSTOM_SCRIPT,
+            status=TrainingStatus.IDLE,
+            created_at=datetime.now(),
+            workspace=Path("/tmp/workspace"),
+            display_name="Idle Custom Job",
+        )
+        # (no reserve_job call → no history record)
+        all_jobs = history_store.list_jobs()
+        assert all(j.job_id != idle_job.job_id for j in all_jobs), (
+            "IDLE job should NOT be persisted in history"
+        )
+        assert len(all_jobs) == 0

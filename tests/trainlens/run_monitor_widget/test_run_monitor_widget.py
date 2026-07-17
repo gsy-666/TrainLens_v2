@@ -141,18 +141,16 @@ class TestRunMonitorWidgetCallbacks:
             framework="custom"
         )
 
-        # Mock history_store.finalize_job to avoid KeyError
-        with patch.object(widget.history_store, 'finalize_job'):
-            # Simulate COMPLETED event
-            event = TrainingEvent(
-                schema_version=1,
-                job_id="test-run-001",
-                event_type=TrainingEventType.COMPLETED,
-                timestamp=time.time(),
-                payload={'exit_code': 0},
-                source='test'
-            )
-            widget._on_training_event(event)
+        # Simulate COMPLETED event
+        event = TrainingEvent(
+            schema_version=1,
+            job_id="test-run-001",
+            event_type=TrainingEventType.COMPLETED,
+            timestamp=time.time(),
+            payload={'exit_code': 0},
+            source='test'
+        )
+        widget._on_training_event(event)
 
         assert callback.called
         assert callback.call_args[0][0] == 0
