@@ -2127,6 +2127,11 @@ class GuidedTrainingWidget(QWidget):
             command=[],
             metadata={},
             error_message=None,
+            task=self.selected_task_type or "",
+            model=config["basic"].get("model", ""),
+            data=config["basic"].get("data", ""),
+            project=project_path,
+            name=name,
         )
 
         adapter = UltralyticsAdapter()

@@ -6,6 +6,7 @@ Enforces mutual exclusion and manages job lifecycle.
 
 import threading
 import time
+from datetime import datetime
 from typing import Optional, Tuple, Dict, Any, Callable, List
 from pathlib import Path
 
@@ -46,7 +47,84 @@ class JobManager:
         self._current_adapter: Optional[TrainingAdapter] = None
         self._status_callbacks: List[Callable[[TrainingJob], None]] = []
         self._event_callbacks: List[Callable[[TrainingEvent], None]] = []
+        self._history_store = None  # Lazy-init on first use
         self._initialized = True
+        self._recover_orphaned_jobs()
+
+    def _get_history_store(self):
+        """Lazy-init HistoryStore singleton."""
+        if self._history_store is None:
+            from .history import get_history_store
+            self._history_store = get_history_store()
+        return self._history_store
+
+    def _recover_orphaned_jobs(self):
+        """On startup, mark any PREPARING/RUNNING records as FAILED (interrupted)."""
+        try:
+            store = self._get_history_store()
+        except Exception:
+            return
+        store._ensure_loaded()
+        orphaned = []
+        for job_id, record in list(store._cache.items()):
+            try:
+                status = TrainingStatus(record.status)
+            except ValueError:
+                continue
+            if status in (TrainingStatus.PREPARING, TrainingStatus.RUNNING):
+                orphaned.append(job_id)
+        for job_id in orphaned:
+            try:
+                store.finalize_job(
+                    job_id,
+                    TrainingStatus.FAILED,
+                    error_message="Application exited before the training job reached a terminal state.",
+                )
+            except Exception:
+                pass
+
+    def _history_append(self, job: TrainingJob):
+        """Write job to history with PREPARING status (called from reserve_job)."""
+        try:
+            store = self._get_history_store()
+            from .history import JobHistoryRecord
+            record = JobHistoryRecord(
+                job_id=job.job_id,
+                mode=job.mode.value,
+                status=TrainingStatus.PREPARING.value,
+                created_at=(job.created_at or datetime.now()).isoformat(),
+                workspace=str(job.workspace) if job.workspace else None,
+                output_directory=str(job.output_directory) if job.output_directory else None,
+                display_name=job.display_name,
+                framework=job.framework,
+                python_executable=str(job.python_executable) if job.python_executable else None,
+                command=job.command,
+                metadata=dict(job.metadata),
+                task=getattr(job, 'task', None),
+                model=getattr(job, 'model', None),
+                data=getattr(job, 'data', None),
+            )
+            store.append_job(record)
+        except Exception:
+            pass
+
+    def _history_update(self, job_id: str, **updates):
+        """Update history record in-place."""
+        try:
+            self._get_history_store().update_job(job_id, **updates)
+        except Exception:
+            pass
+
+    def _history_finalize(self, job_id: str, status: TrainingStatus, error_message=None, **kwargs):
+        """Finalize history record with terminal status."""
+        try:
+            self._get_history_store().finalize_job(
+                job_id, status,
+                error_message=error_message,
+                **kwargs,
+            )
+        except Exception:
+            pass
 
     def request_start(
         self,
@@ -97,6 +175,7 @@ class JobManager:
             cbs = list(self._status_callbacks)
 
         self._notify_status_change(job, cbs)
+        self._history_append(job)
         return True, "Job reserved, preparing..."
 
     def start_reserved_job(
@@ -127,8 +206,11 @@ class JobManager:
             with self._state_lock:
                 if self._current_job and self._current_job.job_id == job_id:
                     self._current_job.status = TrainingStatus.RUNNING
+                    self._current_job.started_at = datetime.now()
                     cbs = list(self._status_callbacks)
             self._notify_status_change(self._current_job, cbs)
+            self._history_update(job_id, status=TrainingStatus.RUNNING.value,
+                                 started_at=self._current_job.started_at.isoformat() if self._current_job.started_at else None)
         else:
             with self._state_lock:
                 if self._current_job and self._current_job.job_id == job_id:
@@ -155,6 +237,7 @@ class JobManager:
             self._cleanup_job()
 
         self._notify_status_change(job_ref, cbs)
+        self._history_finalize(job_id, TrainingStatus.FAILED, error_message=error)
 
     def request_stop(self) -> bool:
         """Request to stop the current training job.
@@ -185,6 +268,7 @@ class JobManager:
                 status_cbs = list(self._status_callbacks)
                 self._cleanup_job()
                 self._notify_status_change(job_ref, status_cbs)
+                self._history_finalize(job_ref.job_id, TrainingStatus.STOPPED)
                 return True
 
             # RUNNING → STOPPING (adapter.stop() will handle the rest)
@@ -222,6 +306,10 @@ class JobManager:
             self._cleanup_job()
 
         self._notify_status_change(job_ref, cbs)
+        save_dir = kwargs.get('metadata', {}).get('save_dir', '')
+        self._history_finalize(job_id, TrainingStatus.COMPLETED,
+                               output_directory=save_dir or None,
+                               ended_at=kwargs.get('ended_at'))
 
     def fail_job(self, job_id: str, error: str, **kwargs):
         """Mark job as failed (idempotent)"""
@@ -249,6 +337,10 @@ class JobManager:
             self._cleanup_job()
 
         self._notify_status_change(job_ref, cbs)
+        save_dir = kwargs.get('metadata', {}).get('save_dir', '')
+        self._history_finalize(job_id, TrainingStatus.FAILED, error_message=error,
+                               output_directory=save_dir or None,
+                               ended_at=kwargs.get('ended_at'))
 
     def stop_job(self, job_id: str, **kwargs):
         """Mark job as stopped (idempotent)"""
@@ -275,6 +367,10 @@ class JobManager:
             self._cleanup_job()
 
         self._notify_status_change(job_ref, cbs)
+        save_dir = kwargs.get('metadata', {}).get('save_dir', '')
+        self._history_finalize(job_id, TrainingStatus.STOPPED,
+                               output_directory=save_dir or None,
+                               ended_at=kwargs.get('ended_at'))
 
     def get_current_job(self) -> Optional[TrainingJob]:
         """Get current job (thread-safe read)"""

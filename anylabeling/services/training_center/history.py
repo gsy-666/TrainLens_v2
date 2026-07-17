@@ -56,6 +56,11 @@ class JobHistoryRecord:
     results_path: Optional[str] = None
     export_path: Optional[str] = None
 
+    # Training config (for Guided display)
+    task: Optional[str] = None
+    model: Optional[str] = None
+    data: Optional[str] = None
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization"""
         return asdict(self)

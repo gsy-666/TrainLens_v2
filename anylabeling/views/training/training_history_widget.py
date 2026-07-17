@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
 )
 
 from anylabeling.services.training_center.history import get_history_store
+from anylabeling.services.training_center.job_manager import get_job_manager
 from anylabeling.services.training_center.models import TrainingStatus
 from anylabeling.services.training_center.event_protocol import TrainingEventType
 
@@ -63,6 +64,7 @@ class TrainingHistoryWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.history_store = get_history_store()
+        self.job_manager = get_job_manager()
 
         self._init_ui()
         self.refresh()
@@ -116,20 +118,37 @@ class TrainingHistoryWidget(QWidget):
         layout.addLayout(detail_layout)
 
     def refresh(self):
-        """Reload history from store."""
+        """Reload history from store. Filter IDLE; show active job from JobManager."""
         jobs = self.history_store.list_jobs()
-        self.table.setRowCount(len(jobs))
+        active_job = self.job_manager.get_current_job()
 
-        for row, job in enumerate(jobs):
-            self._set_row(row, job)
+        # Filter out IDLE records that aren't the current active job
+        filtered = []
+        for job in jobs:
+            if job.status == "idle":
+                if active_job and job.job_id == active_job.job_id:
+                    pass  # Keep if it's the current active job (shouldn't happen)
+                else:
+                    continue  # Skip IDLE records
+            filtered.append(job)
+
+        self.table.setRowCount(len(filtered))
+
+        for row, job in enumerate(filtered):
+            self._set_row(row, job, active_job)
 
         self.table.resizeColumnsToContents()
 
-    def _set_row(self, row, job):
+    def _set_row(self, row, job, active_job=None):
+        # Determine effective status: JobManager's active job overrides stale history
+        effective_status = job.status
+        if active_job and job.job_id == active_job.job_id:
+            effective_status = active_job.status.value
+
         # Status
-        status_text = STATUS_LABELS.get(job.status, job.status.upper())
+        status_text = STATUS_LABELS.get(effective_status, effective_status.upper())
         status_item = QTableWidgetItem(status_text)
-        color = STATUS_COLORS.get(job.status, QColor(158, 158, 158))
+        color = STATUS_COLORS.get(effective_status, QColor(158, 158, 158))
         status_item.setForeground(color)
         status_item.setData(Qt.ItemDataRole.UserRole, job.job_id)
         self.table.setItem(row, 0, status_item)
@@ -147,6 +166,8 @@ class TrainingHistoryWidget(QWidget):
             task_text = " ".join(str(c) for c in job.command)
             if len(task_text) > 60:
                 task_text = task_text[:57] + "..."
+        elif job.metadata and isinstance(job.metadata, dict):
+            task_text = job.metadata.get("task", "") or job.metadata.get("model", "")
         self.table.setItem(row, 3, QTableWidgetItem(task_text))
 
         # Started At

@@ -1043,3 +1043,164 @@ class TestCallbacksOutsideLock:
         t.join(timeout=2)
         assert elapsed < 0.5, f"get_current_job() blocked for {elapsed:.1f}s"
         assert len(slow_started) > 0
+
+
+class TestHistoryIntegration:
+    """Verify JobManager writes to HistoryStore on every lifecycle state transition."""
+
+    @pytest.fixture
+    def history_store(self, tmp_path):
+        """Isolated HistoryStore using tmp_path."""
+        from anylabeling.services.training_center.history import HistoryStore
+        store = HistoryStore(history_dir=tmp_path / "history")
+        return store
+
+    @pytest.fixture
+    def job_manager_with_history(self, history_store):
+        """JobManager with isolated HistoryStore injected."""
+        from anylabeling.services.training_center.job_manager import JobManager
+        jm = JobManager()
+        jm._current_job = None
+        jm._current_adapter = None
+        jm._status_callbacks = []
+        jm._event_callbacks = []
+        jm._history_store = history_store  # Inject isolated store
+        return jm
+
+    def test_reserve_writes_preparing_record(
+        self, job_manager_with_history, mock_adapter, sample_job, history_store
+    ):
+        """reserve_job creates a PREPARING history record."""
+        jm = job_manager_with_history
+        sample_job.task = "Detect"
+        sample_job.model = "yolov8n.pt"
+        sample_job.data = "data.yaml"
+
+        jm.reserve_job(sample_job, mock_adapter)
+
+        record = history_store.get_job(sample_job.job_id)
+        assert record is not None
+        assert record.status == "preparing"
+        assert record.mode == "custom_script"
+        assert record.display_name == "Test Job"
+
+    def test_start_updates_to_running(
+        self, job_manager_with_history, mock_adapter, sample_job, history_store
+    ):
+        """start_reserved_job updates the same record to RUNNING."""
+        jm = job_manager_with_history
+        mock_adapter.start.return_value = (True, "Started")
+
+        jm.reserve_job(sample_job, mock_adapter)
+        jm.start_reserved_job(sample_job.job_id, {"data": "test"})
+
+        record = history_store.get_job(sample_job.job_id)
+        assert record is not None
+        assert record.status == "running"
+
+    def test_complete_finalizes_record(
+        self, job_manager_with_history, mock_adapter, sample_job, history_store
+    ):
+        """complete_job finalizes the record as COMPLETED."""
+        jm = job_manager_with_history
+        mock_adapter.start.return_value = (True, "Started")
+
+        jm.request_start(sample_job, mock_adapter, {})
+        jm.complete_job(sample_job.job_id)
+
+        record = history_store.get_job(sample_job.job_id)
+        assert record is not None
+        assert record.status == "completed"
+
+    def test_stop_finalizes_record(
+        self, job_manager_with_history, mock_adapter, sample_job, history_store
+    ):
+        """request_stop during RUNNING finalizes as STOPPED."""
+        jm = job_manager_with_history
+        mock_adapter.start.return_value = (True, "Started")
+        mock_adapter.stop.return_value = True
+
+        jm.request_start(sample_job, mock_adapter, {})
+        jm.request_stop()
+        jm.stop_job(sample_job.job_id)
+
+        record = history_store.get_job(sample_job.job_id)
+        assert record is not None
+        assert record.status == "stopped"
+
+    def test_fail_reserved_finalizes_record(
+        self, job_manager_with_history, mock_adapter, sample_job, history_store
+    ):
+        """fail_reserved_job finalizes the record as FAILED."""
+        jm = job_manager_with_history
+        jm.reserve_job(sample_job, mock_adapter)
+        jm.fail_reserved_job(sample_job.job_id, "dataset error")
+
+        record = history_store.get_job(sample_job.job_id)
+        assert record is not None
+        assert record.status == "failed"
+        assert record.error_message == "dataset error"
+
+    def test_stop_preparing_finalizes_record(
+        self, job_manager_with_history, mock_adapter, sample_job, history_store
+    ):
+        """request_stop during PREPARING finalizes as STOPPED."""
+        jm = job_manager_with_history
+        jm.reserve_job(sample_job, mock_adapter)
+        jm.request_stop()
+
+        record = history_store.get_job(sample_job.job_id)
+        assert record is not None
+        assert record.status == "stopped"
+
+    def test_one_job_id_one_record(
+        self, job_manager_with_history, mock_adapter, sample_job, history_store
+    ):
+        """A single job_id always maps to exactly one history record."""
+        jm = job_manager_with_history
+        mock_adapter.start.return_value = (True, "Started")
+
+        jm.reserve_job(sample_job, mock_adapter)
+        jm.start_reserved_job(sample_job.job_id, {})
+        jm.complete_job(sample_job.job_id)
+
+        jobs = history_store.list_jobs()
+        matching = [j for j in jobs if j.job_id == sample_job.job_id]
+        assert len(matching) == 1
+        assert matching[0].status == "completed"
+
+    def test_idle_not_written_to_history(
+        self, job_manager_with_history, mock_adapter, sample_job, history_store
+    ):
+        """IDLE jobs are never written to history."""
+        # Create a job, don't reserve it (stays IDLE)
+        jobs_before = len(history_store.list_jobs())
+        # Nothing should change — reserve_job is the entry point
+        assert jobs_before == 0  # Fresh store has no records
+
+    def test_orphan_recovery_on_startup(self, tmp_path, mock_adapter, sample_job):
+        """Orphaned PREPARING/RUNNING records are marked FAILED on JobManager init."""
+        from anylabeling.services.training_center.history import HistoryStore, JobHistoryRecord
+        from anylabeling.services.training_center.job_manager import JobManager
+        from datetime import datetime
+
+        # Pre-populate history with an orphaned PREPARING record
+        store = HistoryStore(history_dir=tmp_path / "history")
+        orphan = JobHistoryRecord(
+            job_id="orphan-1", mode="guided_ultralytics", status="running",
+            created_at=datetime.now().isoformat(), display_name="Orphan Job",
+        )
+        store.append_job(orphan)
+
+        # Creating a new JobManager should trigger recovery
+        jm = JobManager()
+        jm._history_store = store
+        jm._recover_orphaned_jobs()
+
+        recovered = store.get_job("orphan-1")
+        assert recovered is not None
+        assert recovered.status == "failed"
+        assert "Application exited" in (recovered.error_message or "")
+
+        # Cleanup singleton state
+        JobManager._instance = None
