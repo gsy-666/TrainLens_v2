@@ -126,10 +126,10 @@ def install_requirements(
 
     log(f"Installing requirements from: {requirements_path}")
     log(f"Python: {python_path}")
+    log("Running pip install (output shown after completion)...")
 
     cmd = [str(python_path), "-m", "pip", "install", "-r", str(requirements_path)]
     try:
-        # Use Popen for real-time stdout/stderr without PIPE deadlock risk
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -137,18 +137,19 @@ def install_requirements(
             text=True,
             cwd=str(requirements_path.parent),
         )
-        stdout_lines = []
-        stderr_lines = []
         try:
             out, err = proc.communicate(timeout=600)
             if out:
-                for line in out.splitlines():
+                lines = out.splitlines()
+                if len(lines) > 200:
+                    log(f"Output truncated ({len(lines)} lines total, showing last 200)")
+                    lines = lines[-200:]
+                for line in lines:
                     log(line)
-                    stdout_lines.append(line)
             if err and proc.returncode != 0:
-                for line in err.splitlines()[-10:]:
+                err_lines = err.splitlines()
+                for line in err_lines[-20:]:
                     log(f"STDERR: {line}")
-                    stderr_lines.append(line)
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()

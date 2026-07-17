@@ -63,6 +63,7 @@ from anylabeling.services.training_center.environment import (
     EnvironmentInfo,
     EnvironmentStatus,
     EnvironmentWorker,
+    EnvironmentTaskController,
     find_project_python,
 )
 
@@ -107,10 +108,9 @@ class RunMonitorWidget(QWidget):
 
         # Environment wizard state
         self._env_info: Optional[EnvironmentInfo] = None
-        self._env_worker: Optional[EnvironmentWorker] = None
-        self._env_thread: Optional[QThread] = None
+        self._env_controller: Optional[EnvironmentTaskController] = None
+        self._env_task_id: Optional[str] = None  # current task id (for UI signal disconnect)
         self._env_generation: int = 0
-        self._env_task_running: bool = False
 
         # Callbacks
         self.on_run_start: Optional[Callable[[Run], None]] = None
@@ -530,8 +530,9 @@ class RunMonitorWidget(QWidget):
 
         worker = EnvironmentWorker()
         worker.request_detect(python_path, str(self.workspace.path) if self.workspace else "", gen)
+        # Result signal connected before start_task (must be on worker before thread runs)
         worker.detection_done.connect(lambda info: self._on_detection_done(info, gen))
-        worker.status_changed.connect(self._set_env_status_text)
+
         self._start_env_worker(worker)
 
     def _on_detection_done(self, info: EnvironmentInfo, generation: int):
@@ -560,8 +561,7 @@ class RunMonitorWidget(QWidget):
         worker = EnvironmentWorker()
         worker.request_create_venv(str(self.workspace.path), gen)
         worker.venv_created.connect(lambda ok, path, msg: self._on_venv_created(ok, path, msg, gen))
-        worker.log_message.connect(self._env_log_append)
-        worker.status_changed.connect(self._set_env_status_text)
+
         self._start_env_worker(worker)
 
     def _on_venv_created(self, success: bool, venv_path: str, message: str, generation: int):
@@ -604,32 +604,52 @@ class RunMonitorWidget(QWidget):
         worker = EnvironmentWorker()
         worker.request_install_requirements(python_path, str(req_path), gen)
         worker.requirements_done.connect(lambda ok, msg: self._on_requirements_done(ok, msg, gen))
-        worker.log_message.connect(self._env_log_append)
-        worker.status_changed.connect(self._set_env_status_text)
+
         self._start_env_worker(worker)
 
     def _start_env_worker(self, worker: EnvironmentWorker):
-        """Start an environment worker on a properly owned QThread.
+        """Start an environment worker via the stable controller.
 
-        Thread chain: worker.finished → thread.quit + worker.deleteLater
-                     thread.finished → thread.deleteLater
-        No parent on QThread — survives widget destruction.
+        Internal lifecycle (finished→thread.quit→deleteLater) stays with
+        the controller. UI signals (log, status) are registered here for
+        later disconnect. Result signals are connected by the caller before
+        _start_env_worker is called.
         """
-        self._env_worker = worker
-        thread = QThread()  # No parent — survives widget close
-        self._env_thread = thread
-        worker.moveToThread(thread)
+        ctrl = self._get_controller()
+        if self._env_task_id:
+            ctrl.disconnect_all_ui(self._env_task_id)
+        task_id = ctrl.start_task(worker)
+        self._env_task_id = task_id
 
-        # Worker finishes → quit event loop + clean worker
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        # Thread finishes → clean thread + null widget refs
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(lambda: setattr(self, '_env_thread', None))
-        thread.finished.connect(lambda: setattr(self, '_env_worker', None))
+        # Register UI signals (disconnected by disconnect_all_ui on next task or cleanup)
+        ctrl.connect_result(task_id, "log_message", self._env_log_append)
+        ctrl.connect_result(task_id, "status_changed", self._set_env_status_text)
 
-        thread.started.connect(worker.run)
-        thread.start()
+    def _get_controller(self) -> EnvironmentTaskController:
+        """Get or create the shared environment task controller.
+
+        The controller lives on the widget's parent chain or is created
+        once per widget. Its lifetime is independent of widget destruction.
+        """
+        if self._env_controller is None:
+            self._env_controller = EnvironmentTaskController()
+        return self._env_controller
+
+    def _is_env_task_running(self) -> bool:
+        """Check if the current env task is still running."""
+        if not self._env_task_id or not self._env_controller:
+            return False
+        return self._env_controller.is_running(self._env_task_id)
+
+    def _cleanup_env_thread(self):
+        """Disconnect UI signals but keep internal lifecycle intact.
+
+        Only disconnects UI signals (log, status) from the current task.
+        Internal finished→quit→deleteLater chain is NEVER touched.
+        """
+        if self._env_task_id and self._env_controller:
+            self._env_controller.disconnect_all_ui(self._env_task_id)
+        self._env_task_id = None
 
     def _on_requirements_done(self, success: bool, message: str, generation: int):
         """Handle requirements installation result."""
@@ -641,28 +661,11 @@ class RunMonitorWidget(QWidget):
         self._set_env_controls_enabled(True)
 
         if success:
-            # Re-detect environment after install
             self._on_detect_environment()
         else:
             self._set_env_status(EnvironmentStatus.ERROR, message)
             self._update_env_buttons()
             self._update_start_button()
-
-    def _cleanup_env_thread(self):
-        """Disconnect signals but let running subprocess finish naturally.
-
-        Never calls QThread.quit() or QThread.terminate() — the worker
-        may be blocked in subprocess.run and cannot be interrupted.
-        Thread cleanup is handled by worker.finished → thread.quit → deleteLater."""
-        if self._env_worker:
-            for sig in ('detection_done', 'venv_created', 'requirements_done',
-                        'log_message', 'status_changed', 'finished'):
-                try:
-                    getattr(self._env_worker, sig).disconnect()
-                except Exception:
-                    pass
-            self._env_worker = None
-        self._env_thread = None
 
     # ── Environment UI helpers ──────────────────────────────────────────
 
@@ -702,7 +705,7 @@ class RunMonitorWidget(QWidget):
         has_python = bool(self.python_path_edit.text().strip())
         has_venv = has_project and (self.workspace.path / ".venv").exists()
         has_req = has_project and (self.workspace.path / "requirements.txt").exists()
-        task_running = self._env_thread is not None and self._env_thread.isRunning()
+        task_running = self._is_env_task_running()
         training_running = (
             self.current_job is not None
             and self.current_job.status.is_active()
@@ -1104,20 +1107,12 @@ class RunMonitorWidget(QWidget):
         """Clean up resources (call before destroying widget).
 
         Disconnects UI signals from running workers but does NOT
-        block on thread completion (worker subprocess may still be running).
-        Threads clean themselves up via worker.finished → thread.quit → deleteLater.
+        block on thread completion. Internal lifecycle is managed
+        by EnvironmentTaskController — never touched here.
         """
-        # Disconnect env worker signals to prevent updates to destroyed widget
-        if self._env_worker:
-            for sig in ('detection_done', 'venv_created', 'requirements_done',
-                        'log_message', 'status_changed', 'finished'):
-                try:
-                    getattr(self._env_worker, sig).disconnect()
-                except Exception:
-                    pass
-            self._env_worker = None
-        # Do NOT quit the thread — let subprocess finish naturally
-        self._env_thread = None
+        # Disconnect UI signals from current env task (safe)
+        self._cleanup_env_thread()
+        # Controller survives — its tasks continue independently
 
         if self.scanner_thread and self.scanner_thread.isRunning():
             self.scanner_thread.cancel()
