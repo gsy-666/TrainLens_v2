@@ -8,7 +8,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QObject, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
@@ -63,6 +63,31 @@ from anylabeling.services.training_center.job_manager import get_job_manager
 from anylabeling.services.training_center.models import TrainingJob, TrainingMode, TrainingStatus
 from anylabeling.services.training_center.adapters.ultralytics_adapter import UltralyticsAdapter
 from anylabeling.services.training_center.event_protocol import TrainingEventType
+
+
+class _TrainingPrepWorker(QObject):
+    """Background worker for dataset creation + training args preparation.
+
+    Runs on a QThread to keep the GUI responsive during
+    create_yolo_dataset() — which copies images, parses labels,
+    and writes YAML — all of which are synchronous file I/O.
+    """
+
+    finished = pyqtSignal(dict)   # train_args on success
+    error = pyqtSignal(str)       # error message on failure
+
+    def __init__(self, widget, config):
+        super().__init__()
+        self.widget = widget
+        self.config = config
+
+    def run(self):
+        """Execute get_training_args() on background thread."""
+        try:
+            train_args = self.widget.get_training_args(self.config)
+            self.finished.emit(train_args)
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 class GuidedTrainingWidget(QWidget):
@@ -226,6 +251,16 @@ class GuidedTrainingWidget(QWidget):
 
     def shutdown(self) -> None:
         """Shutdown widget and cleanup resources (idempotent)"""
+        # Stop background prep thread if running
+        if hasattr(self, '_prep_thread') and self._prep_thread is not None:
+            try:
+                self._prep_thread.quit()
+                self._prep_thread.wait(1000)
+            except Exception:
+                pass
+            self._prep_thread = None
+            self._prep_worker = None
+
         # Save logs if needed
         if self.training_status in ["completed", "error", "stop"]:
             self.save_training_logs_to_file()
@@ -2027,8 +2062,7 @@ class GuidedTrainingWidget(QWidget):
             raise
 
     def start_training_from_train_tab(self):
-        # ── Early mutual exclusion check ──
-        # Must happen BEFORE expensive data preparation (dataset creation, etc.)
+        # ── Early mutual exclusion check (GUI thread, fast) ──
         current = self.job_manager.get_current_job()
         if current is not None and current.status.is_active():
             QMessageBox.critical(
@@ -2041,54 +2075,106 @@ class GuidedTrainingWidget(QWidget):
             )
             return
 
-        config = self.get_current_config()
+        # ── Read UI config (GUI thread, fast) ──
+        try:
+            config = self.get_current_config()
+        except Exception as e:
+            QMessageBox.critical(self, self.tr("Config Error"), str(e))
+            return
+
         project_path = config["basic"]["project"]
         name = config["basic"]["name"]
         self.current_project_path = os.path.join(project_path, name)
 
-        try:
-            self.append_training_log(self.tr("Preparing training..."))
-            train_args = self.get_training_args(config)
+        # ── Immediate PREPARING registration (atomic mutual exclusion) ──
+        self.training_status = "preparing"
+        self.update_training_status_display()
+        self.append_training_log(self.tr("Preparing training..."))
+        self.start_training_button.setEnabled(False)
+        self.stop_training_button.setVisible(True)
+        self.export_button.setVisible(False)
+        self.previous_button.setVisible(False)
 
-            # Route through JobManager for mutual exclusion
-            job_id = f"guided_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            self.current_job = TrainingJob(
-                job_id=job_id,
-                mode=TrainingMode.GUIDED_ULTRALYTICS,
-                status=TrainingStatus.IDLE,
-                created_at=datetime.datetime.now(),
-                started_at=None,
-                ended_at=None,
-                workspace=project_path,
-                output_directory=Path(self.current_project_path),
-                display_name=f"Guided: {name}",
-                framework="ultralytics",
-                command=[],
-                metadata={"train_args": train_args},
-                error_message=None,
-            )
+        # ── Move heavy dataset creation to background thread ──
+        self._prep_thread = QThread(self)
+        self._prep_worker = _TrainingPrepWorker(self, config)
+        self._prep_worker.moveToThread(self._prep_thread)
 
-            adapter = UltralyticsAdapter()
-            success, message = self.job_manager.request_start(
-                job=self.current_job,
-                adapter=adapter,
-                config=train_args,
-            )
+        self._prep_thread.started.connect(self._prep_worker.run)
+        self._prep_worker.finished.connect(self._on_prep_finished)
+        self._prep_worker.error.connect(self._on_prep_error)
+        self._prep_thread.finished.connect(self._prep_thread.deleteLater)
 
-            if not success:
-                self.append_training_log(
-                    f"Failed to start training: {message}"
-                )
-                QMessageBox.critical(self, self.tr("Training Error"), message)
-                self.current_job = None
-                return
+        # Store config for adapter creation later
+        self._pending_project_path = project_path
+        self._pending_name = name
 
-            self.append_training_log(self.tr(f"Training started: {message}"))
+        self._prep_thread.start()
 
-        except Exception as e:
-            error_msg = f"Failed to start training: {str(e)}"
-            self.append_training_log(f"ERROR: {error_msg}")
-            QMessageBox.critical(self, self.tr("Training Error"), error_msg)
+    def _on_prep_finished(self, train_args):
+        """Called on GUI thread after background preparation completes."""
+        self._prep_thread.quit()
+        self._prep_thread.wait()
+        self._prep_thread = None
+        self._prep_worker = None
+
+        project_path = self._pending_project_path
+        name = self._pending_name
+
+        # Route through JobManager for mutual exclusion
+        job_id = f"guided_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        self.current_job = TrainingJob(
+            job_id=job_id,
+            mode=TrainingMode.GUIDED_ULTRALYTICS,
+            status=TrainingStatus.IDLE,
+            created_at=datetime.datetime.now(),
+            started_at=None,
+            ended_at=None,
+            workspace=project_path,
+            output_directory=Path(self.current_project_path),
+            display_name=f"Guided: {name}",
+            framework="ultralytics",
+            command=[],
+            metadata={"train_args": train_args},
+            error_message=None,
+        )
+
+        adapter = UltralyticsAdapter()
+        success, message = self.job_manager.request_start(
+            job=self.current_job,
+            adapter=adapter,
+            config=train_args,
+        )
+
+        if not success:
+            self.append_training_log(f"Failed to start training: {message}")
+            QMessageBox.critical(self, self.tr("Training Error"), message)
+            self.current_job = None
+            self._reset_start_ui()
+            return
+
+        self.append_training_log(self.tr(f"Training started: {message}"))
+
+    def _on_prep_error(self, error_msg):
+        """Called on GUI thread when background preparation fails."""
+        self._prep_thread.quit()
+        self._prep_thread.wait()
+        self._prep_thread = None
+        self._prep_worker = None
+
+        self.append_training_log(f"ERROR: {error_msg}")
+        QMessageBox.critical(self, self.tr("Training Error"), error_msg)
+        self._reset_start_ui()
+
+    def _reset_start_ui(self):
+        """Restore Start button state after preparation/startup failure."""
+        self.training_status = "idle"
+        self.update_training_status_display()
+        self.start_training_button.setEnabled(True)
+        self.start_training_button.setVisible(True)
+        self.stop_training_button.setVisible(False)
+        self.export_button.setVisible(False)
+        self.previous_button.setVisible(True)
 
     def init_training_actions(self, parent_layout):
         actions_layout = QHBoxLayout()
