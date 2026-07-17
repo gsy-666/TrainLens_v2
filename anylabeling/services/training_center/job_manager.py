@@ -41,7 +41,7 @@ class JobManager:
         if self._initialized:
             return
 
-        self._state_lock = threading.Lock()
+        self._state_lock = threading.RLock()
         self._current_job: Optional[TrainingJob] = None
         self._current_adapter: Optional[TrainingAdapter] = None
         self._status_callbacks: List[Callable[[TrainingJob], None]] = []

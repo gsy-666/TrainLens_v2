@@ -180,8 +180,18 @@ class TrainingCenterWindow(QMainWindow):
             )
 
     def _update_status_bar(self, job):
-        """Update status bar when job status changes."""
-        self._update_status_bar_from_current()
+        """Update status bar when job status changes — uses passed job to avoid lock reentry."""
+        if job is not None and job.status.is_active():
+            name = job.display_name or job.job_id
+            self.status_label.setText(f"Running: {name}")
+            self.status_label.setStyleSheet(
+                "font-weight: bold; font-size: 12px; color: #1976D2;"
+            )
+        else:
+            self.status_label.setText("Idle")
+            self.status_label.setStyleSheet(
+                "font-weight: bold; font-size: 12px; color: #4CAF50;"
+            )
 
     def _on_job_event(self, event):
         """Handle job events for History auto-refresh."""

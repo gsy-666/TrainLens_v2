@@ -822,3 +822,47 @@ class TestTwoPhaseReserve:
 
         assert sample_job.error_message == "create_yolo_dataset failed: Permission denied"
         assert sample_job.status == TrainingStatus.FAILED
+
+
+class TestLockReentrancy:
+    """Test that callbacks can safely re-enter JobManager without deadlock."""
+
+    def test_status_callback_can_call_get_current_job(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """status callback calling get_current_job() does NOT deadlock."""
+        captured = []
+
+        def callback(job):
+            # Simulate TrainingCenterWindow._update_status_bar pattern:
+            # callback re-enters JobManager.get_current_job()
+            current = job_manager.get_current_job()
+            captured.append(current)
+
+        job_manager.subscribe_status(callback)
+        mock_adapter.start.return_value = (True, "Started")
+
+        # This would deadlock with threading.Lock() (non-reentrant)
+        job_manager.request_start(sample_job, mock_adapter, {"data": "test"})
+
+        assert len(captured) > 0
+
+    def test_status_callback_exception_does_not_block_others(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """Exception in one callback doesn't prevent others from running."""
+        results = []
+
+        def bad_callback(job):
+            raise RuntimeError("callback boom")
+
+        def good_callback(job):
+            results.append(job.status)
+
+        job_manager.subscribe_status(bad_callback)
+        job_manager.subscribe_status(good_callback)
+        mock_adapter.start.return_value = (True, "Started")
+
+        job_manager.request_start(sample_job, mock_adapter, {})
+
+        assert TrainingStatus.RUNNING in results
