@@ -65,6 +65,21 @@ from anylabeling.services.training_center.adapters.ultralytics_adapter import Ul
 from anylabeling.services.training_center.event_protocol import TrainingEventType
 
 
+# === TEMPORARY DIAGNOSTIC: remove after debugging GUI freeze ===
+def _trace_startup(message):
+    from datetime import datetime as _dt
+    with open(
+        r"D:\TrainLensTest\guided_start_trace.log",
+        "a",
+        encoding="utf-8",
+    ) as _f:
+        _f.write(
+            f"{_dt.now().isoformat(timespec='milliseconds')} "
+            f"{message}\n"
+        )
+        _f.flush()
+
+
 class _TrainingPrepWorker(QObject):
     """Background worker for dataset creation + training args preparation.
 
@@ -83,10 +98,15 @@ class _TrainingPrepWorker(QObject):
 
     def run(self):
         """Execute get_training_args() on background thread."""
+        _trace_startup("worker entered")
         try:
+            _trace_startup("get_training_args begin")
             train_args = self.widget.get_training_args(self.config)
+            _trace_startup("get_training_args done")
+            _trace_startup("worker finished emitted")
             self.finished.emit(train_args)
         except Exception as e:
+            _trace_startup(f"worker error: {e}")
             self.error.emit(str(e))
 
 
@@ -2015,6 +2035,7 @@ class GuidedTrainingWidget(QWidget):
                     f"Using existing dataset: {data_path}"
                 )
             else:
+                _trace_startup("create_yolo_dataset begin")
                 temp_dir = create_yolo_dataset(
                     self.image_list,
                     self.selected_task_type,
@@ -2025,6 +2046,7 @@ class GuidedTrainingWidget(QWidget):
                     config["checkpoint"].get("skip_empty_files", False),
                     config["checkpoint"].get("only_checked_files", False),
                 )
+                _trace_startup("create_yolo_dataset done")
                 logger.info(f"Successfully created YOLO dataset at {temp_dir}")
                 self.append_training_log(f"Created dataset: {temp_dir}")
 
@@ -2094,13 +2116,22 @@ class GuidedTrainingWidget(QWidget):
             raise
 
     def start_training_from_train_tab(self):
+        _trace_startup("01 handler entered")
+        _trace_startup(f"  file={__file__}")
+        _trace_startup(f"  modal={QApplication.activeModalWidget()}")
+        _trace_startup(f"  popup={QApplication.activePopupWidget()}")
+
         # ── Read UI config (GUI thread, fast) ──
+        _trace_startup("04 config read begin")
         try:
             config = self.get_current_config()
+            _trace_startup("05 config read done")
         except Exception as e:
+            _trace_startup(f"04 config read FAILED: {e}")
             QMessageBox.critical(self, self.tr("Config Error"), str(e))
             return
 
+        _trace_startup("06 job creation begin")
         project_path = config["basic"]["project"]
         name = config["basic"]["name"]
         self.current_project_path = os.path.join(project_path, name)
@@ -2122,9 +2153,15 @@ class GuidedTrainingWidget(QWidget):
             metadata={},
             error_message=None,
         )
+        _trace_startup("07 job creation done")
 
+        _trace_startup("08 adapter creation begin")
         adapter = UltralyticsAdapter()
+        _trace_startup("09 adapter creation done")
+
+        _trace_startup("10 reserve_job begin")
         ok, msg = self.job_manager.reserve_job(self.current_job, adapter)
+        _trace_startup(f"11 reserve_job returned ok={ok} msg={msg}")
         if not ok:
             self.append_training_log(f"Failed to reserve job: {msg}")
             QMessageBox.critical(self, self.tr("Training Busy"), msg)
@@ -2136,6 +2173,7 @@ class GuidedTrainingWidget(QWidget):
         self._prep_adapter = adapter
 
         # ── UI: preparing state ──
+        _trace_startup("12 preparing UI update begin")
         self.training_status = "preparing"
         self.update_training_status_display()
         self.append_training_log(self.tr("Preparing training..."))
@@ -2143,8 +2181,10 @@ class GuidedTrainingWidget(QWidget):
         self.stop_training_button.setVisible(True)
         self.export_button.setVisible(False)
         self.previous_button.setVisible(False)
+        _trace_startup("13 preparing UI update done")
 
         # ── Phase 2: Run dataset creation in background thread ──
+        _trace_startup("14 prep thread creation begin")
         self._prep_thread = QThread(self)
         self._prep_worker = _TrainingPrepWorker(self, config)
         self._prep_worker.moveToThread(self._prep_thread)
@@ -2157,8 +2197,12 @@ class GuidedTrainingWidget(QWidget):
         # Store config for adapter creation later
         self._pending_project_path = project_path
         self._pending_name = name
+        _trace_startup("15 prep thread creation done")
 
+        _trace_startup("16 prep thread start begin")
         self._prep_thread.start()
+        _trace_startup("17 prep thread start returned")
+        _trace_startup("18 handler returning")
 
     def _on_prep_finished(self, train_args):
         """Called on GUI thread after background preparation completes.
@@ -2166,6 +2210,7 @@ class GuidedTrainingWidget(QWidget):
         Validates that the job is still in PREPARING state (handles late
         signals from cancelled threads) before starting via JobManager.
         """
+        _trace_startup("_on_prep_finished entered")
         self._prep_thread.quit()
         self._prep_thread.wait()
         self._prep_thread = None
@@ -2173,22 +2218,27 @@ class GuidedTrainingWidget(QWidget):
 
         # Late-signal guard: only proceed if still reserved
         if self._prep_job_id is None:
+            _trace_startup("_on_prep_finished: _prep_job_id is None, dropping")
             return
 
         current = self.job_manager.get_current_job()
         if current is None or current.job_id != self._prep_job_id:
             # Another job replaced us — silently drop
+            _trace_startup(f"_on_prep_finished: job_id mismatch, dropping")
             self._prep_job_id = None
             return
         if current.status != TrainingStatus.PREPARING:
             # Already stopped or failed — silently drop
+            _trace_startup(f"_on_prep_finished: status={current.status}, dropping")
             self._prep_job_id = None
             return
 
+        _trace_startup("_on_prep_finished: calling start_reserved_job")
         success, message = self.job_manager.start_reserved_job(
             job_id=self._prep_job_id,
             config=train_args,
         )
+        _trace_startup(f"_on_prep_finished: start_reserved_job returned ok={success}")
         self._prep_job_id = None
 
         if not success:
@@ -2198,9 +2248,11 @@ class GuidedTrainingWidget(QWidget):
             return
 
         self.append_training_log(self.tr(f"Training started: {message}"))
+        _trace_startup("_on_prep_finished exiting")
 
     def _on_prep_error(self, error_msg):
         """Called on GUI thread when background preparation fails."""
+        _trace_startup(f"_on_prep_error entered: {error_msg}")
         self._prep_thread.quit()
         self._prep_thread.wait()
         self._prep_thread = None
@@ -2208,16 +2260,19 @@ class GuidedTrainingWidget(QWidget):
 
         # Late-signal guard
         if self._prep_job_id is None:
+            _trace_startup("_on_prep_error: _prep_job_id is None, dropping")
             return
 
         current = self.job_manager.get_current_job()
         if current is not None and current.job_id == self._prep_job_id:
+            _trace_startup("_on_prep_error: calling fail_reserved_job")
             self.job_manager.fail_reserved_job(self._prep_job_id, error_msg)
         self._prep_job_id = None
 
         self.append_training_log(f"ERROR: {error_msg}")
         QMessageBox.critical(self, self.tr("Training Error"), error_msg)
         self._reset_start_ui()
+        _trace_startup("_on_prep_error exiting")
 
     def _reset_start_ui(self):
         """Restore Start button state after preparation/startup failure."""
