@@ -2495,7 +2495,7 @@ class GuidedTrainingWidget(QWidget):
                 return True
 
             self.append_training_log(self.tr("Preparing dataset..."))
-            temp_dir = create_yolo_dataset(
+            final_dir = create_yolo_dataset(
                 self.image_list, self.selected_task_type, ratio,
                 config["basic"]["data"], self.output_dir,
                 config["basic"].get("pose_config"),
