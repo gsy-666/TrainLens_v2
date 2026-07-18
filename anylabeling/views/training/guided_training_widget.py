@@ -673,9 +673,11 @@ class GuidedTrainingWidget(QWidget):
                 ))
 
         # Dataset YAML + label checks (if config available)
+        # Prefer prepared YAML; fall back to config data field
         if hasattr(self, 'config_widgets') and self.config_widgets:
             config = self.get_current_config()
-            yaml_path = config.get("basic", {}).get("data", "")
+            yaml_path = (getattr(self, '_prepared_yaml_path', None)
+                         or config.get("basic", {}).get("data", ""))
             if yaml_path and os.path.isfile(yaml_path):
                 yaml_data, yaml_error = read_yaml_safe(yaml_path)
                 if yaml_error:
@@ -2509,7 +2511,8 @@ class GuidedTrainingWidget(QWidget):
             self.append_training_log(self.tr("Preparing dataset..."))
             final_dir = create_yolo_dataset(
                 self.image_list, self.selected_task_type, ratio,
-                config["basic"]["data"], self.output_dir,
+                "",  # Empty data_file → force auto-extraction from JSON (not coco8)
+                self.output_dir,
                 config["basic"].get("pose_config"),
                 skip_empty_files=True,
                 only_checked_files=config["checkpoint"].get("only_checked_files", False),

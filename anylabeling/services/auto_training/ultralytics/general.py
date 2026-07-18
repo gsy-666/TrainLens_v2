@@ -139,10 +139,10 @@ def create_yolo_dataset(
                         all_labels.add(stripped)
                 except Exception:
                     pass
-        if classes_from_yaml:
-            converter.classes = classes_from_yaml
-        elif all_labels:
-            converter.classes = sorted(all_labels)  # stable, reproducible ordering
+        if all_labels:
+            converter.classes = sorted(all_labels)  # prefer auto-extracted from source JSON
+        elif classes_from_yaml:
+            converter.classes = classes_from_yaml  # fallback to YAML when no JSON annotations
         else:
             converter.classes = []
         data_file_name = os.path.splitext(os.path.basename(data_file))[0] if data_file else "auto_dataset"

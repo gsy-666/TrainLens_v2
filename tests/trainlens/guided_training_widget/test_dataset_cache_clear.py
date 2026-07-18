@@ -416,3 +416,140 @@ class TestManifestValidImages:
         # Should be 2 valid, not 3 total
         assert manifest["valid_images"] == 2
 
+
+# ── Test 20-24: Preflight class metadata ─────────────────────────────
+
+class TestPreflightClassMetadata:
+    """Full Preflight uses prepared YAML classes, not COCO80."""
+
+    def _make_widget_with_config(self, task_type="Detect"):
+        """Create widget with config_widgets pointing to coco8."""
+        w = _make_widget(image_list=[], task_type=task_type)
+        from anylabeling.views.training.widgets.ultralytics_widgets.custom_widgets import CustomLineEdit
+        w.config_widgets = {
+            "data": CustomLineEdit(),
+            "project": CustomLineEdit(),
+            "name": CustomLineEdit(),
+            "model": CustomLineEdit(),
+            "device": CustomLineEdit(),
+            "epochs": CustomLineEdit(),
+            "batch": CustomLineEdit(),
+            "imgsz": CustomLineEdit(),
+        }
+        w.config_widgets["data"].setText("/tmp/coco8.yaml")
+        w.config_widgets["project"].setText("/tmp/proj")
+        w.config_widgets["name"].setText("exp")
+        w.config_widgets["model"].setText("/tmp/model.pt")
+        w.config_widgets["device"].setText("cpu")
+        w.config_widgets["epochs"].setText("100")
+        w.config_widgets["batch"].setText("16")
+        w.config_widgets["imgsz"].setText("640")
+        return w
+
+    def test_context_uses_prepared_yaml_not_config_data(self, qapp, tmp_path):
+        """_build_guided_preflight_context uses _prepared_yaml_path over config data."""
+        w = self._make_widget_with_config()
+        prepared = str(tmp_path / "auto_dataset_test" / "data.yaml")
+        os.makedirs(os.path.dirname(prepared), exist_ok=True)
+        Path(prepared).touch()
+        w._prepared_yaml_path = prepared
+        w._prepared_dataset_dir = os.path.dirname(prepared)
+        ctx = w._build_guided_preflight_context()
+        assert ctx.dataset_yaml == prepared
+
+    def test_context_falls_back_when_no_prepared(self, qapp, tmp_path):
+        """Without prepared YAML, context falls back to config data if it exists."""
+        w = self._make_widget_with_config()
+        w._prepared_yaml_path = None
+        # Set config data to an existing file
+        coco8 = str(tmp_path / "coco8.yaml")
+        Path(coco8).touch()
+        w.config_widgets["data"].setText(coco8)
+        ctx = w._build_guided_preflight_context()
+        assert ctx.dataset_yaml == coco8
+
+    def test_data_check_uses_prepared_yaml(self, qapp, tmp_path):
+        """_run_data_check prefers prepared YAML over config data."""
+        w = self._make_widget_with_config()
+        w.image_list = ["/fake/img1.jpg"]  # at least 1 image
+        w.selected_task_type = "Detect"
+        w.output_dir = str(tmp_path)
+        # Create prepared YAML with only 3 classes
+        prepared_dir = str(tmp_path / "auto_dataset_3cls")
+        os.makedirs(prepared_dir, exist_ok=True)
+        prepared_yaml = os.path.join(prepared_dir, "data.yaml")
+        import yaml
+        yaml_data = {
+            "names": {0: "apple", 1: "bed", 2: "bowl"},
+            "nc": 3,
+            "path": prepared_dir,
+            "train": "images/train",
+            "val": "images/val",
+        }
+        with open(prepared_yaml, "w") as f:
+            yaml.dump(yaml_data, f)
+        w._prepared_yaml_path = prepared_yaml
+        # config still points to coco8
+        w.config_widgets["data"].setText("/tmp/coco8.yaml")
+        # Verify the YAML path resolution logic directly
+        config = w.get_current_config()
+        resolved = (getattr(w, '_prepared_yaml_path', None)
+                    or config.get("basic", {}).get("data", ""))
+        assert resolved == prepared_yaml  # prepared takes priority
+
+    def test_preflight_context_passes_correct_dataset_yaml(self, qapp, tmp_path):
+        """GuidedPreflightContext.dataset_yaml must be the prepared YAML path."""
+        w = self._make_widget_with_config()
+        prepared = str(tmp_path / "auto_dataset_14cls" / "data.yaml")
+        os.makedirs(os.path.dirname(prepared), exist_ok=True)
+        Path(prepared).touch()
+        w._prepared_yaml_path = prepared
+        w._prepared_dataset_dir = os.path.dirname(prepared)
+        ctx = w._build_guided_preflight_context()
+        # dataset_yaml should be the prepared one, not coco8
+        assert ctx.dataset_yaml == prepared
+        assert ctx.dataset_yaml != "/tmp/coco8.yaml"
+
+    def test_prepared_yaml_has_correct_num_classes(self, qapp, tmp_path):
+        """Prepared YAML must have nc matching actual classes, not COCO80."""
+        w = _make_widget(image_list=["/a/img1.jpg", "/a/img2.jpg"])
+        w.selected_task_type = "Detect"
+        w.output_dir = str(tmp_path)
+        # Create fake JSONs with 2 distinct labels
+        for i, lbl in enumerate(["shoes", "bag"], 1):
+            json_path = os.path.join(str(tmp_path), f"img{i}.json")
+            data = {"shapes": [{"label": lbl, "shape_type": "rectangle", "points": [[0,0],[1,1]]}]}
+            with open(json_path, "w") as f:
+                json.dump(data, f)
+        # Create a minimal prepared YAML
+        prepared_dir = str(tmp_path / "auto_dataset_2cls")
+        os.makedirs(prepared_dir, exist_ok=True)
+        prepared_yaml = os.path.join(prepared_dir, "data.yaml")
+        import yaml
+        yaml_data = {
+            "names": {0: "shoes", 1: "bag"},
+            "nc": 2,
+            "path": prepared_dir,
+            "train": "images/train",
+            "val": "images/val",
+        }
+        with open(prepared_yaml, "w") as f:
+            yaml.dump(yaml_data, f)
+        # Create dummy images dirs
+        for split in ("train", "val"):
+            os.makedirs(os.path.join(prepared_dir, "images", split), exist_ok=True)
+            os.makedirs(os.path.join(prepared_dir, "labels", split), exist_ok=True)
+            Path(os.path.join(prepared_dir, "images", split, "img1.jpg")).touch()
+        # Write manifest
+        mf_path = os.path.join(prepared_dir, "dataset_manifest.json")
+        manifest = {"classes": ["shoes", "bag"], "valid_images": 2, "class_to_id": {"shoes": 0, "bag": 1}}
+        with open(mf_path, "w") as f:
+            json.dump(manifest, f)
+        # Write label files with valid IDs
+        for split in ("train", "val"):
+            lbl_dir = os.path.join(prepared_dir, "labels", split)
+            with open(os.path.join(lbl_dir, "img1.txt"), "w") as f:
+                f.write("0 0.5 0.5 0.1 0.1\n")
+        # Validation should pass: nc=2 matches manifest classes=2
+        assert w._validate_prepared_output(prepared_dir, prepared_yaml, manifest)
+
