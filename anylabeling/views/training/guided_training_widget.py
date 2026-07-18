@@ -206,8 +206,10 @@ class GuidedTrainingWidget(QWidget):
         self.tab_widget.addTab(self.config_tab, self.tr("Config"))
         self.tab_widget.addTab(self.train_tab, self.tr("Train"))
         self.tab_widget.addTab(self.metrics_tab, self.tr("Metrics"))
-        self.tab_widget.tabBar().setEnabled(False)
         self.tab_widget.setTabVisible(3, False)  # hidden until training starts
+
+        # Config controls: disabled during PREPARING / RUNNING / STOPPING
+        self._training_config_controls = []  # populated on first use
         main_layout = QVBoxLayout(self)
         main_layout.addWidget(self.tab_widget)
 
@@ -224,6 +226,56 @@ class GuidedTrainingWidget(QWidget):
             return
         self.init_train_tab()
         self._train_tab_initialized = True
+
+    # ── Config control management ───────────────────────────────────
+
+    def _gather_config_controls(self) -> list:
+        """Return all controls that modify training config (cached after first call)."""
+        if self._training_config_controls:
+            return self._training_config_controls
+
+        controls = []
+
+        # Data tab: task type buttons
+        for btn in getattr(self, 'task_type_buttons', {}).values():
+            if hasattr(btn, 'isEnabled'):
+                controls.append(btn)
+
+        # Data tab: load images button
+        if hasattr(self, 'load_images_button'):
+            controls.append(self.load_images_button)
+
+        # Config tab: all config_widgets
+        for w in getattr(self, 'config_widgets', {}).values():
+            if hasattr(w, 'isEnabled'):
+                controls.append(w)
+
+        # Config tab: import/save buttons
+        for attr in ('_import_btn', '_save_config_btn', '_previous_btn', '_train_btn'):
+            w = getattr(self, attr, None)
+            if w is not None and hasattr(w, 'isEnabled'):
+                controls.append(w)
+
+        # Train tab: start button, previous button
+        for attr in ('start_training_button', 'previous_button'):
+            w = getattr(self, attr, None)
+            if w is not None and hasattr(w, 'isEnabled'):
+                controls.append(w)
+
+        self._training_config_controls = [c for c in controls if c is not None]
+        return self._training_config_controls
+
+    def _set_config_controls_enabled(self, enabled: bool):
+        """Enable/disable only configuration-changing controls.
+
+        Does NOT touch: tab bar, stop button, console, metrics dashboard,
+        export button, or Training Center top-level tabs.
+        """
+        for control in self._gather_config_controls():
+            try:
+                control.setEnabled(enabled)
+            except RuntimeError:
+                pass  # control was deleted
 
     def _ensure_metrics_dashboard(self) -> TrainingMetricsDashboard:
         """Lazy-init the metrics dashboard on the Metrics tab."""
@@ -1557,22 +1609,22 @@ class GuidedTrainingWidget(QWidget):
     def init_config_buttons(self, parent_layout):
         button_layout = QHBoxLayout()
 
-        import_btn = SecondaryButton(self.tr("Import Config"))
-        import_btn.clicked.connect(self.import_config)
-        button_layout.addWidget(import_btn)
+        self._import_btn = SecondaryButton(self.tr("Import Config"))
+        self._import_btn.clicked.connect(self.import_config)
+        button_layout.addWidget(self._import_btn)
 
-        save_btn = SecondaryButton(self.tr("Save Config"))
-        save_btn.clicked.connect(self.save_current_config)
-        button_layout.addWidget(save_btn)
+        self._save_config_btn = SecondaryButton(self.tr("Save Config"))
+        self._save_config_btn.clicked.connect(self.save_current_config)
+        button_layout.addWidget(self._save_config_btn)
         button_layout.addStretch()
 
-        previous_btn = SecondaryButton(self.tr("Previous"))
-        previous_btn.clicked.connect(lambda: self.go_to_specific_tab(0))
-        button_layout.addWidget(previous_btn)
+        self._previous_btn = SecondaryButton(self.tr("Previous"))
+        self._previous_btn.clicked.connect(lambda: self.go_to_specific_tab(0))
+        button_layout.addWidget(self._previous_btn)
 
-        train_btn = PrimaryButton(self.tr("Next"))
-        train_btn.clicked.connect(self.start_training)
-        button_layout.addWidget(train_btn)
+        self._train_btn = PrimaryButton(self.tr("Next"))
+        self._train_btn.clicked.connect(self.start_training)
+        button_layout.addWidget(self._train_btn)
 
         parent_layout.addLayout(button_layout)
 
@@ -1719,9 +1771,14 @@ class GuidedTrainingWidget(QWidget):
             self.training_status = "training"
             self.total_epochs = data["total_epochs"]
             self.current_epochs = 0
-            self.progress_bar.setValue(0)
-            self.progress_bar.setFormat(f"0/{self.total_epochs}")
+            # Guard: train tab may not be initialized yet (off-screen tests)
+            if hasattr(self, 'progress_bar'):
+                self.progress_bar.setValue(0)
+                self.progress_bar.setFormat(f"0/{self.total_epochs}")
             self.update_training_status_display()
+
+            # Disable ONLY config-changing controls, NOT tabs/metrics/console/stop
+            self._set_config_controls_enabled(False)
             self.start_training_button.setVisible(False)
             self.stop_training_button.setVisible(True)
             self.export_button.setVisible(False)
@@ -1733,15 +1790,17 @@ class GuidedTrainingWidget(QWidget):
             # Show Metrics tab and bind dashboard
             dashboard = self._ensure_metrics_dashboard()
             self.tab_widget.setTabVisible(3, True)
-            self.tab_widget.setTabEnabled(3, True)
             save_dir = data.get("save_dir") or self.current_project_path
             dashboard.bind_job("guided", save_dir)
+            # Auto-switch to Train tab so user sees progress
+            self.tab_widget.setCurrentIndex(2)
 
         elif event_type == "training_completed":
             self.training_status = "completed"
             real_save_dir = data.get("save_dir", "")
             if real_save_dir and os.path.isdir(real_save_dir):
                 self.current_project_path = real_save_dir
+            self._set_config_controls_enabled(True)
             self.update_training_status_display()
             self.stop_training_button.setVisible(False)
             self.start_training_button.setVisible(False)
@@ -1762,6 +1821,7 @@ class GuidedTrainingWidget(QWidget):
             real_save_dir = data.get("save_dir", "")
             if real_save_dir and os.path.isdir(real_save_dir):
                 self.current_project_path = real_save_dir
+            self._set_config_controls_enabled(True)
             self.update_training_status_display()
             self.start_training_button.setVisible(False)
             self.previous_button.setVisible(True)
@@ -1779,6 +1839,7 @@ class GuidedTrainingWidget(QWidget):
             real_save_dir = data.get("save_dir", "")
             if real_save_dir and os.path.isdir(real_save_dir):
                 self.current_project_path = real_save_dir
+            self._set_config_controls_enabled(True)
             self.update_training_status_display()
             self.start_training_button.setVisible(True)
             self.start_training_button.setEnabled(True)
