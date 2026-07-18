@@ -105,10 +105,38 @@ def create_yolo_dataset(
             converter = LabelConverter(pose_cfg_file=pose_cfg_file)
         else:
             converter = LabelConverter()
-        converter.classes = [
-            data["names"][i] for i in sorted(data["names"].keys())
-        ]
-        data_file_name = os.path.splitext(os.path.basename(data_file))[0]
+        # Extract class names: prefer YAML, fall back to JSON annotations
+        classes_from_yaml = None
+        if data and isinstance(data, dict) and "names" in data:
+            names_dict = data["names"]
+            if isinstance(names_dict, dict):
+                classes_from_yaml = [names_dict[i] for i in sorted(names_dict.keys())]
+            elif isinstance(names_dict, list):
+                classes_from_yaml = list(names_dict)
+        # Auto-extract from JSON annotations first
+        all_labels = set()
+        for image_file in image_list:
+            label_json = os.path.join(
+                os.path.dirname(image_file) if not output_dir else output_dir,
+                os.path.splitext(os.path.basename(image_file))[0] + ".json",
+            )
+            if os.path.exists(label_json):
+                try:
+                    with open(label_json, "r", encoding="utf-8") as f:
+                        jd = json.load(f)
+                    for s in jd.get("shapes", []):
+                        lbl = s.get("label", "")
+                        if lbl:
+                            all_labels.add(lbl)
+                except Exception:
+                    pass
+        if classes_from_yaml:
+            converter.classes = classes_from_yaml
+        elif all_labels:
+            converter.classes = sorted(all_labels)
+        else:
+            converter.classes = []
+        data_file_name = os.path.splitext(os.path.basename(data_file))[0] if data_file else "auto_dataset"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     temp_dir = os.path.join(
         get_dataset_path(), task_type.lower(), f"{data_file_name}_{timestamp}"
@@ -263,9 +291,19 @@ def create_yolo_dataset(
             "nc": len(class_names),
         }
     else:
+        # Build fresh YAML data from detected classes
+        if data is None or not isinstance(data, dict):
+            data = {}
         data["path"] = temp_dir
         data["train"] = "images/train"
         data["val"] = "images/val"
+        # Build names from converter.classes if not already set
+        if "names" not in data or not data["names"]:
+            names_dict = {}
+            for i, cls_name in enumerate(converter.classes):
+                names_dict[i] = cls_name
+            data["names"] = names_dict
+            data["nc"] = len(names_dict)
 
     save_yaml_config(data, yaml_file)
 

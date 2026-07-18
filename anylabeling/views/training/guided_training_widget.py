@@ -2459,8 +2459,8 @@ class GuidedTrainingWidget(QWidget):
                 config["basic"]["data"],
                 self.output_dir,
                 config["basic"].get("pose_config"),
-                config["checkpoint"].get("skip_empty_files", False),
-                config["checkpoint"].get("only_checked_files", False),
+                skip_empty_files=True,  # Prepared dataset: only valid images
+                only_checked_files=config["checkpoint"].get("only_checked_files", False),
             )
             self._prepared_dataset_dir = temp_dir
             if self.selected_task_type == "Classify":
