@@ -307,17 +307,36 @@ class RunMonitorWidget(QWidget):
         btn_row.addStretch()
         layout.addLayout(btn_row)
 
-        # Environment log
-        self.env_log = QTextEdit()
-        self.env_log.setReadOnly(True)
-        self.env_log.setMaximumHeight(120)
-        self.env_log.setStyleSheet("font-family: Consolas, monospace; font-size: 8pt;")
-        self.env_log.setPlaceholderText("Environment operation log...")
-        layout.addWidget(self.env_log)
-
+        # Environment log header row
+        self._env_log_header = QWidget()
+        self._env_log_header.hide()  # hidden until log shown
+        log_header_layout = QHBoxLayout(self._env_log_header)
+        log_header_layout.setContentsMargins(0, 2, 0, 0)
+        log_header_layout.addWidget(QLabel("Environment Log"))
+        log_header_layout.addStretch()
         self.env_clear_log_btn = QPushButton("Clear")
         self.env_clear_log_btn.clicked.connect(lambda: self.env_log.clear())
-        layout.addWidget(self.env_clear_log_btn)
+        log_header_layout.addWidget(self.env_clear_log_btn)
+        layout.addWidget(self._env_log_header)
+
+        # Show/Hide Log toggle (in button row)
+        self._env_toggle_log_btn = QPushButton("Show Log")
+        self._env_toggle_log_btn.clicked.connect(self._toggle_env_log)
+        btn_row.addWidget(self._env_toggle_log_btn)
+        btn_row.addStretch()
+
+        # Environment log (QPlainTextEdit, default hidden)
+        self.env_log = QPlainTextEdit()
+        self.env_log.setReadOnly(True)
+        self.env_log.setMinimumHeight(140)
+        self.env_log.setMaximumBlockCount(2000)
+        self.env_log.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.env_log.setStyleSheet(
+            "font-family: Consolas, 'Courier New', monospace; font-size: 10pt;"
+        )
+        self.env_log.setPlaceholderText("Environment operation log...")
+        self.env_log.hide()
+        layout.addWidget(self.env_log, stretch=1)
 
         return group
 
@@ -520,6 +539,7 @@ class RunMonitorWidget(QWidget):
         self._env_generation += 1
         gen = self._env_generation
         self._set_env_status(EnvironmentStatus.CHECKING, "Detecting...")
+        self._auto_show_env_log()
         self._set_env_controls_enabled(False)
 
         worker = EnvironmentWorker()
@@ -550,6 +570,7 @@ class RunMonitorWidget(QWidget):
         gen = self._env_generation
         self._set_env_status(EnvironmentStatus.CREATING, "Creating .venv ...")
         self._env_log_clear()
+        self._auto_show_env_log()
         self._set_env_controls_enabled(False)
 
         worker = EnvironmentWorker()
@@ -573,6 +594,7 @@ class RunMonitorWidget(QWidget):
                 self._save_python_binding(self.workspace.path, venv_path)
             self._on_detect_environment()
         else:
+            self._auto_show_env_log()
             self._set_env_status(EnvironmentStatus.ERROR, message)
             self._update_env_buttons()
             self._update_start_button()
@@ -593,6 +615,7 @@ class RunMonitorWidget(QWidget):
         gen = self._env_generation
         self._set_env_status(EnvironmentStatus.INSTALLING, "Installing requirements...")
         self._env_log_clear()
+        self._auto_show_env_log()
         self._set_env_controls_enabled(False)
 
         worker = EnvironmentWorker()
@@ -664,6 +687,7 @@ class RunMonitorWidget(QWidget):
         if success:
             self._on_detect_environment()
         else:
+            self._auto_show_env_log()
             self._set_env_status(EnvironmentStatus.ERROR, message)
             self._update_env_buttons()
             self._update_start_button()
@@ -725,15 +749,37 @@ class RunMonitorWidget(QWidget):
         """Enable/disable environment controls."""
         self._update_env_buttons()
 
+    def _toggle_env_log(self):
+        """Toggle environment log visibility."""
+        if self.env_log.isVisible():
+            self._hide_env_log()
+        else:
+            self._show_env_log()
+
+    def _show_env_log(self):
+        """Show environment log with header."""
+        self.env_log.show()
+        self._env_log_header.show()
+        self._env_toggle_log_btn.setText("Hide Log")
+
+    def _hide_env_log(self):
+        """Hide environment log and header."""
+        self.env_log.hide()
+        self._env_log_header.hide()
+        self._env_toggle_log_btn.setText("Show Log")
+
+    def _auto_show_env_log(self):
+        """Auto-expand log on operation start/error (idempotent)."""
+        if not self.env_log.isVisible():
+            self._show_env_log()
+
     def _env_log_append(self, message: str):
-        """Append a message to the environment log."""
-        self.env_log.append(message.rstrip())
-        # Limit log lines
-        if self.env_log.document().blockCount() > 200:
-            cursor = self.env_log.textCursor()
-            cursor.movePosition(cursor.MoveOperation.Start)
-            cursor.movePosition(cursor.MoveOperation.Down, cursor.MoveMode.KeepAnchor, 50)
-            cursor.removeSelectedText()
+        """Append a message to the environment log with auto-scroll."""
+        self.env_log.appendPlainText(message.rstrip())
+        # Auto-scroll to bottom unless user scrolled up
+        sb = self.env_log.verticalScrollBar()
+        if sb and sb.value() >= sb.maximum() - 10:
+            sb.setValue(sb.maximum())
 
     def _env_log_clear(self):
         """Clear environment log."""
