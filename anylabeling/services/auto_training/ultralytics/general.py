@@ -115,6 +115,7 @@ def create_yolo_dataset(
                 classes_from_yaml = list(names_dict)
         # Auto-extract from JSON annotations first
         all_labels = set()
+        skipped_labels = []
         for image_file in image_list:
             label_json = os.path.join(
                 os.path.dirname(image_file) if not output_dir else output_dir,
@@ -125,15 +126,22 @@ def create_yolo_dataset(
                     with open(label_json, "r", encoding="utf-8") as f:
                         jd = json.load(f)
                     for s in jd.get("shapes", []):
-                        lbl = s.get("label", "")
-                        if lbl:
-                            all_labels.add(lbl)
+                        lbl = s.get("label")
+                        if lbl is None:
+                            continue
+                        stripped = str(lbl).strip()
+                        if not stripped:
+                            skipped_labels.append(
+                                f"{label_json}: empty/whitespace label in shape"
+                            )
+                            continue
+                        all_labels.add(stripped)
                 except Exception:
                     pass
         if classes_from_yaml:
             converter.classes = classes_from_yaml
         elif all_labels:
-            converter.classes = sorted(all_labels)
+            converter.classes = sorted(all_labels)  # stable, reproducible ordering
         else:
             converter.classes = []
         data_file_name = os.path.splitext(os.path.basename(data_file))[0] if data_file else "auto_dataset"
@@ -294,18 +302,54 @@ def create_yolo_dataset(
         # Build fresh YAML data from detected classes
         if data is None or not isinstance(data, dict):
             data = {}
+        # Remove stale fields from inherited YAML (download, test, coco classes)
+        data.pop("download", None)
+        data.pop("test", None)
+        data.pop("nc", None)
         data["path"] = temp_dir
         data["train"] = "images/train"
         data["val"] = "images/val"
-        # Build names from converter.classes if not already set
-        if "names" not in data or not data["names"]:
-            names_dict = {}
-            for i, cls_name in enumerate(converter.classes):
-                names_dict[i] = cls_name
-            data["names"] = names_dict
-            data["nc"] = len(names_dict)
+        # Build names from converter.classes (never inherit old names)
+        names_dict = {}
+        for i, cls_name in enumerate(converter.classes):
+            names_dict[i] = cls_name
+        data["names"] = names_dict
+        data["nc"] = len(names_dict)
 
     save_yaml_config(data, yaml_file)
+
+    # ── Post-export integrity check ─────────────────────────────────
+    if task_type != "Classify":
+        nc = data.get("nc", 0)
+        names = data.get("names", {})
+        errors = []
+        for split_dir, split_name in [(train_labels_dir, "train"), (val_labels_dir, "val")]:
+            for txt_file in glob.glob(os.path.join(split_dir, "*.txt")):
+                if not os.path.getsize(txt_file):
+                    continue
+                with open(txt_file, "r", encoding="utf-8") as f:
+                    for line_no, line in enumerate(f, 1):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        parts = line.split()
+                        if not parts:
+                            continue
+                        try:
+                            cls_id = int(float(parts[0]))
+                        except (ValueError, TypeError):
+                            errors.append(f"{txt_file}:{line_no}: invalid class_id")
+                            continue
+                        if cls_id < 0 or cls_id >= nc:
+                            errors.append(
+                                f"{txt_file}:{line_no}: class_id {cls_id} out of range [0, {nc - 1}]"
+                            )
+        if errors:
+            raise RuntimeError(
+                f"Dataset integrity check failed ({len(errors)} errors):\n"
+                + "\n".join(errors[:20])
+                + ("\n..." if len(errors) > 20 else "")
+            )
 
     return temp_dir
 
