@@ -226,3 +226,15 @@ class PreflightDialog(QDialog):
     @property
     def user_choice(self) -> str:
         return self._user_choice or "back"
+
+    def closeEvent(self, event):
+        """Window close (X, Alt+F4) must NOT start training."""
+        self._user_choice = "cancel"
+        self.reject()
+        event.accept()
+
+    def reject(self):
+        """Override to ensure user_choice is set before rejecting."""
+        if self._user_choice is None:
+            self._user_choice = "cancel"
+        super().reject()

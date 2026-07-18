@@ -2514,9 +2514,12 @@ class GuidedTrainingWidget(QWidget):
         self._preflight_thread.finished.connect(self._preflight_thread.deleteLater)
 
         self._preflight_thread.start()
-        dialog.exec()
+        result = dialog.exec()
 
-        # Dialog closed
+        # If user closed/cancelled, invalidate result
+        if result != QDialog.DialogCode.Accepted:
+            self._preflight_result = None
+            self._preflight_running = False
         if self._preflight_worker:
             self._preflight_worker.cancel()
 
