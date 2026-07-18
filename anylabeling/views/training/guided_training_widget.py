@@ -232,11 +232,11 @@ class GuidedTrainingWidget(QWidget):
         self.init_data_tab()
 
     def _update_stage_gates(self):
-        """Enable/disable tabs and Next button based on current stage.
+        """Enable/disable tabs based on current stage.
 
         Data tab always enabled. Config enabled after Data Check passes.
         Train enabled after Config is completed. Metrics shown during training.
-        Never uses tabBar().setEnabled(False) — only per-tab setTabEnabled.
+        Next button always enabled — navigation is gated by click handler.
         """
         data_ok = self._data_check_passed
         config_ok = self._config_completed
@@ -244,10 +244,6 @@ class GuidedTrainingWidget(QWidget):
         self.tab_widget.setTabEnabled(0, True)   # Data always enabled
         self.tab_widget.setTabEnabled(1, data_ok)  # Config: data must pass
         self.tab_widget.setTabEnabled(2, data_ok and config_ok)  # Train: both
-
-        # Next button
-        if hasattr(self, 'next_button'):
-            self.next_button.setEnabled(data_ok)
 
     def ensure_config_tab_initialized(self):
         if self._config_tab_initialized:
@@ -765,19 +761,70 @@ class GuidedTrainingWidget(QWidget):
         parent_layout.addWidget(summary_widget, 1)
 
     def proceed_to_config(self):
-        if not self._data_check_passed:
-            QMessageBox.warning(
-                self, self.tr("Check Required"),
-                self.tr("Please run 'Check Dataset' first to verify your data."),
+        """Handle Next button click with clear feedback for each state.
+
+        Gating order:
+        1. No images loaded → tell user to load images
+        2. Images loaded but < required → show current vs required count
+        3. Data Check not done → prompt to run Check Dataset
+        4. Data Check has ERROR → re-show last result
+        5. Data Check PASS → navigate to Config
+        """
+        from anylabeling.services.auto_training.ultralytics.config import MIN_LABELED_IMAGES_THRESHOLD
+
+        task_type = self.selected_task_type or ""
+
+        # 1. No images loaded
+        if not self.image_list:
+            self._show_data_gate_message(
+                self.tr("No Images Loaded"),
+                self.tr("Load images before continuing.\n\n"
+                        f"At least {MIN_LABELED_IMAGES_THRESHOLD} valid labeled images are required."),
             )
             return
 
+        # 2. Count valid images
+        from anylabeling.services.auto_training.ultralytics.validators import get_task_valid_images
+        if task_type:
+            valid = get_task_valid_images(self.image_list, task_type, self.output_dir)
+        else:
+            valid = 0
+
+        if valid < MIN_LABELED_IMAGES_THRESHOLD:
+            self._show_data_gate_message(
+                self.tr("Not Enough Valid Images"),
+                self.tr(f"Current valid images: {valid}\n"
+                        f"Required valid images: {MIN_LABELED_IMAGES_THRESHOLD}\n\n"
+                        f"Load or label more images before continuing."),
+            )
+            return
+
+        # 3. Data Check not performed yet
+        if not self._data_check_passed:
+            # Auto-run Data Check
+            self._run_data_check()
+            if self._data_check_passed:
+                # Check passed → proceed
+                pass  # Fall through to navigation
+            elif self._preflight_result and self._preflight_result.has_errors:
+                # ERROR → re-show last result
+                self._show_data_gate_message(
+                    self.tr("Data Check Failed"),
+                    self.tr("The dataset check found errors:\n\n") +
+                    "\n".join(f"• {i.title}" for i in self._preflight_result.errors()),
+                )
+                return
+            else:
+                # Warnings or cancelled → let user try again
+                return
+
+        # 4. Navigate to Config
         is_valid, error_message = validate_task_requirements(
             self.selected_task_type, self.image_list, self.output_dir
         )
         if not is_valid:
-            QMessageBox.warning(
-                self, self.tr("Validation Error"), error_message
+            self._show_data_gate_message(
+                self.tr("Validation Error"), error_message,
             )
             return
 
@@ -791,6 +838,14 @@ class GuidedTrainingWidget(QWidget):
         self.config_widgets["project"].setReadOnly(self.project_readonly)
 
         self.go_to_specific_tab(1)
+
+    def _show_data_gate_message(self, title: str, message: str):
+        """Show a data gate message to the user.
+
+        Production: uses QMessageBox.warning.
+        Tests can patch this method to avoid modal dialogs blocking.
+        """
+        QMessageBox.warning(self, title, message)
 
     def init_actions(self, parent_layout):
         actions_layout = QHBoxLayout()
@@ -807,7 +862,6 @@ class GuidedTrainingWidget(QWidget):
 
         self.next_button = PrimaryButton(self.tr("Next"))
         self.next_button.clicked.connect(self.proceed_to_config)
-        self.next_button.setEnabled(False)  # disabled until Data Check passes
         actions_layout.addWidget(self.next_button)
         parent_layout.addLayout(actions_layout)
 
