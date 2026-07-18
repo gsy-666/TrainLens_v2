@@ -42,7 +42,7 @@ class TestEarlyBusyCheck:
         # Mock both QMessageBox.critical (for config error path) and
         # reserve_job's rejection via QMessageBox.critical
         with patch('anylabeling.views.training.guided_training_widget.QMessageBox.critical') as mock_crit:
-            widget.start_training_from_train_tab()
+            widget.start_training_from_train_tab(skip_preflight=True)
             # Either config error or reserve rejection — both show critical dialog
             assert mock_crit.call_count >= 1
 
@@ -59,7 +59,7 @@ class TestEarlyBusyCheck:
 
         start = time.time()
         with patch('anylabeling.views.training.guided_training_widget.QMessageBox.critical'):
-            widget.start_training_from_train_tab()
+            widget.start_training_from_train_tab(skip_preflight=True)
         elapsed = time.time() - start
         assert elapsed < 2.0, f"Blocked for {elapsed:.1f}s"
 

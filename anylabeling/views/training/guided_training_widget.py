@@ -54,6 +54,11 @@ from anylabeling.services.auto_training.ultralytics.trainer import (
     get_training_manager,
 )
 from anylabeling.views.training.metrics import TrainingMetricsDashboard
+from anylabeling.services.training_center.preflight.models import (
+    GuidedPreflightContext,
+)
+from anylabeling.services.training_center.preflight.worker import PreflightWorker
+from anylabeling.views.training.preflight_dialog import PreflightDialog
 from anylabeling.services.auto_training.ultralytics.utils import *
 from anylabeling.services.auto_training.ultralytics.validators import (
     validate_basic_config,
@@ -176,6 +181,12 @@ class GuidedTrainingWidget(QWidget):
 
         # Metrics dashboard (lazy-init on first use)
         self._metrics_dashboard = None  # TrainingMetricsDashboard
+
+        # Preflight state
+        self._preflight_worker: Optional[PreflightWorker] = None
+        self._preflight_thread: Optional[QThread] = None
+        self._preflight_result = None
+        self._preflight_running = False
         self.training_status = "idle"  # idle, training, completed, error
         self.current_epochs = 0
 
@@ -2203,7 +2214,99 @@ class GuidedTrainingWidget(QWidget):
             )
             raise
 
-    def start_training_from_train_tab(self):
+    # ── Preflight ───────────────────────────────────────────────────
+
+    def _build_guided_preflight_context(self) -> GuidedPreflightContext:
+        """Build immutable preflight snapshot from current UI state."""
+        config = self.get_current_config()
+        project = config["basic"].get("project", "")
+        name = config["basic"].get("name", "")
+        output_dir = os.path.join(project, name) if project and name else project
+        return GuidedPreflightContext(
+            task_type=self.selected_task_type or "",
+            model_path=config["basic"].get("model", ""),
+            dataset_yaml=config["basic"].get("data", ""),
+            epochs=config["train"].get("epochs", 100),
+            batch=config["train"].get("batch", 16),
+            imgsz=config["train"].get("imgsz", 640),
+            device=str(config["basic"].get("device", "cpu")),
+            output_dir=output_dir,
+            job_name=name,
+        )
+
+    def _run_preflight_check(self):
+        """Run preflight background check and show result dialog."""
+        if self._preflight_running:
+            return  # Prevent double-click
+
+        ctx = self._build_guided_preflight_context()
+        is_active = self.job_manager.get_current_job() is not None
+
+        self._preflight_running = True
+        self._preflight_result = None
+
+        # Create worker + thread
+        self._preflight_worker = PreflightWorker()
+        self._preflight_thread = QThread()
+        self._preflight_worker.moveToThread(self._preflight_thread)
+
+        # Dialog (shown immediately in "checking" mode)
+        from anylabeling.services.training_center.preflight import PreflightResult
+        dialog = PreflightDialog(PreflightResult(mode="guided"), self)
+        dialog.set_checking(True)
+
+        # Wire signals
+        self._preflight_worker.progress.connect(dialog.set_progress)
+        self._preflight_worker.finished.connect(
+            lambda result: self._on_preflight_finished(result, dialog)
+        )
+        self._preflight_thread.started.connect(
+            lambda: self._preflight_worker.run_guided(ctx, is_active)
+        )
+
+        # Internal lifecycle
+        self._preflight_worker.finished.connect(self._preflight_thread.quit)
+        self._preflight_thread.finished.connect(self._preflight_thread.deleteLater)
+
+        self._preflight_thread.start()
+        dialog.exec()
+
+        # Dialog closed
+        if self._preflight_worker:
+            self._preflight_worker.cancel()
+
+    def _on_preflight_finished(self, result, dialog):
+        """Handle preflight completion — update dialog and store result."""
+        self._preflight_running = False
+        self._preflight_result = result
+        dialog.update_result(result)
+
+        # Re-enable start button state
+        if hasattr(self, 'start_training_button'):
+            self.start_training_button.setEnabled(True)
+
+    def start_training_from_train_tab(self, skip_preflight: bool = False):
+        # Ensure config and train tabs are initialized
+        self.ensure_config_tab_initialized()
+        self.ensure_train_tab_initialized()
+
+        if self._preflight_running:
+            return
+
+        # Run preflight unless skipped
+        if not skip_preflight:
+            self._run_preflight_check()
+            if self._preflight_result is None:
+                return  # Dialog cancelled or closed
+            if self._preflight_result.has_errors:
+                return  # Cannot start with errors
+            if self._preflight_result.has_warnings:
+                # User must confirm
+                choice = self._preflight_result  # result already handles warn/start logic
+                # The dialog already asked — if they chose Start Anyway, result is stored
+                if not self._preflight_result.can_start:
+                    return
+        # Fall through to original start logic
         # Ensure config and train tabs are initialized
         self.ensure_config_tab_initialized()
         self.ensure_train_tab_initialized()
@@ -2352,6 +2455,11 @@ class GuidedTrainingWidget(QWidget):
         self.open_dir_button = SecondaryButton(self.tr("Open Directory"))
         self.open_dir_button.clicked.connect(self.open_training_directory)
         actions_layout.addWidget(self.open_dir_button)
+
+        self.run_check_button = SecondaryButton(self.tr("Run Check"))
+        self.run_check_button.clicked.connect(self._run_preflight_check)
+        actions_layout.addWidget(self.run_check_button)
+
         actions_layout.addStretch()
 
         self.stop_training_button = SecondaryButton(self.tr("Stop Training"))

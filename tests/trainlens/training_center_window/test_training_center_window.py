@@ -184,7 +184,7 @@ class TestEarlyMutualExclusion:
         jm._current_job = active_job
 
         with patch('anylabeling.views.training.guided_training_widget.QMessageBox.critical') as mock_msg:
-            training_center.guided_widget.start_training_from_train_tab()
+            training_center.guided_widget.start_training_from_train_tab(skip_preflight=True)
             mock_msg.assert_called_once()
 
     def test_custom_rejected_when_guided_active(self, qapp, training_center):
