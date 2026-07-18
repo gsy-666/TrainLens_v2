@@ -2452,11 +2452,16 @@ class GuidedTrainingWidget(QWidget):
             job_name=name,
         )
 
+    # ── Dataset cache constants ──────────────────────────────────────
+    _MANIFEST_VERSION = 2
+    _CONVERTER_VERSION = 2  # bumped to invalidate old coco8/coco80 caches
+    _SPLIT_SEED = 42
+
     def _prepare_dataset(self) -> bool:
         """Create (or reuse) YOLO dataset from loaded images.
 
-        Returns True on success, False on failure.
-        Cache: checks dataset_manifest.json fingerprint before re-creating.
+        Returns True on success. False on failure.
+        Cache: validates manifest integrity before reuse.
         """
         if self._dataset_preparing:
             return False
@@ -2470,17 +2475,23 @@ class GuidedTrainingWidget(QWidget):
             self.run_check_button.setEnabled(False)
 
         config = self.get_current_config()
+        ratio = config["basic"].get("dataset_ratio", 0.8)
         try:
-            # Check for cached manifest
-            ratio = config["basic"].get("dataset_ratio", 0.8)
             fp = self._compute_source_fingerprint()
             manifest = self._find_cached_manifest(fp, ratio)
-            if manifest and not getattr(self, '_force_rebuild_dataset', False):
+            if (manifest and not getattr(self, '_force_rebuild_dataset', False)
+                    and self._validate_manifest_integrity(manifest)):
+                # Merge class IDs (preserve existing, append new)
+                merged = self._merge_class_mapping(
+                    manifest.get("class_to_id", {}), self._extract_labels_from_source()
+                )
+                manifest["class_to_id"] = merged
+                manifest["classes"] = [k for k, _ in sorted(merged.items(), key=lambda x: x[1])]
                 self._prepared_dataset_dir = manifest["dataset_dir"]
                 self._prepared_yaml_path = manifest["yaml_path"]
                 self._update_dataset_status(manifest)
-                self.append_training_log(self.tr("Reusing prepared dataset."))
                 self._force_rebuild_dataset = False
+                self.append_training_log(self.tr("Reusing prepared dataset."))
                 return True
 
             self.append_training_log(self.tr("Preparing dataset..."))
@@ -2491,13 +2502,13 @@ class GuidedTrainingWidget(QWidget):
                 skip_empty_files=True,
                 only_checked_files=config["checkpoint"].get("only_checked_files", False),
             )
-            self._prepared_dataset_dir = temp_dir
-            yaml_path = os.path.join(temp_dir, "data.yaml") if self.selected_task_type != "Classify" else temp_dir
+
+            yaml_path = os.path.join(final_dir, "data.yaml") if self.selected_task_type != "Classify" else final_dir
+            self._prepared_dataset_dir = final_dir
             self._prepared_yaml_path = yaml_path
             self._force_rebuild_dataset = False
 
-            # Save manifest
-            manifest = self._save_manifest(temp_dir, yaml_path, fp, ratio)
+            manifest = self._save_manifest(final_dir, yaml_path, fp, ratio)
             self._update_dataset_status(manifest)
             self.append_training_log(self.tr(f"Dataset prepared: {yaml_path}"))
             return True
@@ -2518,28 +2529,58 @@ class GuidedTrainingWidget(QWidget):
             if hasattr(self, 'run_check_button'):
                 self.run_check_button.setEnabled(True)
 
-    # ── Manifest / caching helpers ───────────────────────────────────
+    # ── Fingerprint ──────────────────────────────────────────────────
 
     def _compute_source_fingerprint(self) -> str:
-        """SHA256 of source image paths + JSON mtimes (fast, no file content)."""
+        """SHA256 of sorted image paths, sizes, mtimes, JSON content hashes, task, ratio, seed."""
         import hashlib
-        parts = [self.selected_task_type or ""]
+        h = hashlib.sha256()
+        h.update((self.selected_task_type or "").encode())
+        config = self.get_current_config()
+        ratio = config["basic"].get("dataset_ratio", 0.8)
+        h.update(f":ratio={ratio}:seed={self._SPLIT_SEED}:cv={self._CONVERTER_VERSION}:".encode())
         for img in sorted(self.image_list):
-            parts.append(img)
+            rel = os.path.relpath(img, self.output_dir) if self.output_dir else img
+            h.update(rel.encode())
+            try:
+                st = os.stat(img)
+                h.update(f":{st.st_size}:{st.st_mtime_ns}".encode())
+            except OSError:
+                h.update(b":missing")
             json_path = os.path.splitext(img)[0] + ".json"
             if os.path.isfile(json_path):
                 try:
-                    st = os.stat(json_path)
-                    parts.append(f"{json_path}:{st.st_mtime}:{st.st_size}")
+                    h.update(open(json_path, "rb").read())
                 except OSError:
-                    parts.append(f"{json_path}:missing")
+                    h.update(b":json_unreadable")
             else:
-                parts.append(f"{json_path}:none")
-        raw = "|".join(parts)
-        return hashlib.sha256(raw.encode()).hexdigest()[:16]
+                h.update(b":no_json")
+        return h.hexdigest()[:24]
+
+    # ── Label extraction ─────────────────────────────────────────────
+
+    def _extract_labels_from_source(self) -> list:
+        """Extract sorted unique labels from all source JSON annotations."""
+        labels = set()
+        for img in self.image_list:
+            json_path = os.path.splitext(img)[0] + ".json"
+            if not os.path.isfile(json_path):
+                continue
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    jd = json.load(f)
+                for s in jd.get("shapes", []):
+                    lbl = s.get("label")
+                    if lbl and str(lbl).strip():
+                        labels.add(str(lbl).strip())
+            except Exception:
+                pass
+        return sorted(labels)
+
+    # ── Manifest I/O ─────────────────────────────────────────────────
 
     def _find_cached_manifest(self, fingerprint: str, ratio: float):
-        """Find a cached manifest matching the fingerprint and ratio."""
+        """Find a cached manifest matching fingerprint, ratio, and converter_version."""
         try:
             from anylabeling.services.auto_training.ultralytics.config import get_dataset_path
             base = get_dataset_path()
@@ -2552,10 +2593,11 @@ class GuidedTrainingWidget(QWidget):
                     try:
                         with open(mf, "r", encoding="utf-8") as f:
                             data = json.load(f)
-                        if (data.get("fingerprint") == fingerprint
+                        if (data.get("manifest_version") == self._MANIFEST_VERSION
+                                and data.get("converter_version") == self._CONVERTER_VERSION
+                                and data.get("fingerprint") == fingerprint
                                 and abs(data.get("split_ratio", 0.8) - ratio) < 0.001
-                                and os.path.isdir(data.get("dataset_dir", ""))
-                                and os.path.isfile(data.get("yaml_path", ""))):
+                                and data.get("task_type") == (self.selected_task_type or "detect").lower()):
                             return data
                     except Exception:
                         pass
@@ -2565,23 +2607,22 @@ class GuidedTrainingWidget(QWidget):
 
     def _save_manifest(self, dataset_dir: str, yaml_path: str,
                        fingerprint: str, ratio: float) -> dict:
-        """Save dataset_manifest.json next to data.yaml."""
-        yaml_data = {}
-        if os.path.isfile(yaml_path):
-            try:
-                from anylabeling.services.auto_training.ultralytics._io import load_yaml_config
-                yaml_data = load_yaml_config(yaml_path) or {}
-            except Exception:
-                pass
-        names = yaml_data.get("names", {})
+        """Save dataset_manifest.json."""
+        labels = self._extract_labels_from_source()
+        class_to_id = {lbl: i for i, lbl in enumerate(labels)}
         manifest = {
+            "manifest_version": self._MANIFEST_VERSION,
+            "converter_version": self._CONVERTER_VERSION,
             "dataset_dir": dataset_dir,
             "yaml_path": yaml_path,
+            "source_fingerprint": fingerprint,
             "fingerprint": fingerprint,
             "split_ratio": ratio,
-            "task_type": self.selected_task_type or "detect",
-            "classes": list(names.values()) if isinstance(names, dict) else list(names),
-            "class_to_id": {v: k for k, v in names.items()} if isinstance(names, dict) else {},
+            "split_seed": self._SPLIT_SEED,
+            "task_type": (self.selected_task_type or "detect").lower(),
+            "source_dir": str(self.output_dir) if self.output_dir else "",
+            "classes": labels,
+            "class_to_id": class_to_id,
             "valid_images": len(self.image_list),
             "created_at": datetime.datetime.now().isoformat(),
         }
@@ -2590,15 +2631,110 @@ class GuidedTrainingWidget(QWidget):
             json.dump(manifest, f, indent=2, ensure_ascii=False)
         return manifest
 
+    # ── Integrity validation ─────────────────────────────────────────
+
+    def _validate_manifest_integrity(self, manifest: dict) -> bool:
+        """Validate cached dataset is complete before reuse. Returns True if valid."""
+        try:
+            ds = manifest.get("dataset_dir", "")
+            yaml_path = manifest.get("yaml_path", "")
+            if not ds or not os.path.isdir(ds):
+                return False
+            if not yaml_path or not os.path.isfile(yaml_path):
+                return False
+
+            # Validate YAML
+            from anylabeling.services.auto_training.ultralytics._io import load_yaml_config
+            yaml_data = load_yaml_config(yaml_path)
+            if not yaml_data or not isinstance(yaml_data, dict):
+                return False
+            if "download" in yaml_data:  # stale coco8
+                return False
+
+            names = yaml_data.get("names", {})
+            if not names:
+                return False
+            nc = yaml_data.get("nc", 0)
+            if nc != len(names):
+                return False
+
+            # Check train/val paths exist with images
+            for split in ("train", "val"):
+                img_dir = os.path.join(ds, "images", split)
+                lbl_dir = os.path.join(ds, "labels", split)
+                if not os.path.isdir(img_dir):
+                    return False
+                images = set(os.path.splitext(f)[0] for f in os.listdir(img_dir)
+                             if f.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp')))
+                if not os.path.isdir(lbl_dir):
+                    return False
+                labels = set(os.path.splitext(f)[0] for f in os.listdir(lbl_dir)
+                             if f.endswith('.txt') and os.path.getsize(os.path.join(lbl_dir, f)) > 0)
+                if not images:
+                    return False
+                # Each image must have a label with content
+                for stem in images:
+                    if stem not in labels:
+                        return False
+
+            # Validate all class_ids in labels are in range
+            for split in ("train", "val"):
+                lbl_dir = os.path.join(ds, "labels", split)
+                for f in os.listdir(lbl_dir):
+                    fp = os.path.join(lbl_dir, f)
+                    if os.path.getsize(fp) == 0:
+                        continue
+                    with open(fp, "r") as fh:
+                        for line in fh:
+                            parts = line.strip().split()
+                            if parts:
+                                try:
+                                    cid = int(float(parts[0]))
+                                    if cid < 0 or cid >= nc:
+                                        return False
+                                except ValueError:
+                                    return False
+
+            return True
+        except Exception:
+            return False
+
+    def _merge_class_mapping(self, existing: dict, new_labels: list) -> dict:
+        """Merge new labels into existing mapping, preserving existing IDs."""
+        next_id = max(existing.values()) + 1 if existing else 0
+        merged = dict(existing)  # preserve old IDs
+        for lbl in new_labels:
+            if lbl not in merged:
+                merged[lbl] = next_id
+                next_id += 1
+        return merged
+
+    # ── UI actions ───────────────────────────────────────────────────
+
     def _rebuild_dataset(self):
         """Force rebuild dataset on next prepare."""
         self._force_rebuild_dataset = True
         self._prepared_dataset_dir = None
         self._prepared_yaml_path = None
         self._update_dataset_status(None)
-        self.append_training_log(self.tr("Dataset cache cleared. Will rebuild on next Start."))
+        self.append_training_log(self.tr("Will rebuild dataset on next Start."))
         if not self._prepare_dataset():
             self.append_training_log(self.tr("Dataset rebuild failed."))
+
+    def _clear_dataset_cache(self):
+        """Delete all cached datasets for current task type from disk."""
+        try:
+            from anylabeling.services.auto_training.ultralytics.config import get_dataset_path
+            import shutil
+            task_dir = os.path.join(get_dataset_path(), (self.selected_task_type or "detect").lower())
+            if os.path.isdir(task_dir):
+                shutil.rmtree(task_dir)
+            self._prepared_dataset_dir = None
+            self._prepared_yaml_path = None
+            self._update_dataset_status(None)
+            self.append_training_log(self.tr("Dataset cache cleared from disk."))
+        except Exception as e:
+            self.append_training_log(f"Failed to clear cache: {e}")
 
     def _update_dataset_status(self, manifest: dict | None):
         """Update the dataset status label on the Train page."""
@@ -2869,6 +3005,10 @@ class GuidedTrainingWidget(QWidget):
         self.rebuild_dataset_button = SecondaryButton(self.tr("Rebuild Dataset"))
         self.rebuild_dataset_button.clicked.connect(self._rebuild_dataset)
         actions_layout.addWidget(self.rebuild_dataset_button)
+
+        self.clear_cache_button = SecondaryButton(self.tr("Clear Cache"))
+        self.clear_cache_button.clicked.connect(self._clear_dataset_cache)
+        actions_layout.addWidget(self.clear_cache_button)
 
         actions_layout.addStretch()
 
