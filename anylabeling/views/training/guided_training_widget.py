@@ -2440,6 +2440,9 @@ class GuidedTrainingWidget(QWidget):
         output_dir = os.path.join(project, name) if project and name else project
         # Use prepared YAML if available, else config field
         dataset_yaml = self._prepared_yaml_path or config["basic"].get("data", "")
+        # Verify YAML still exists; don't use deleted paths
+        if dataset_yaml and not os.path.isfile(dataset_yaml):
+            dataset_yaml = ""
         return GuidedPreflightContext(
             task_type=self.selected_task_type or "",
             model_path=config["basic"].get("model", ""),
@@ -2731,6 +2734,19 @@ class GuidedTrainingWidget(QWidget):
                 shutil.rmtree(task_dir)
             self._prepared_dataset_dir = None
             self._prepared_yaml_path = None
+            self._preflight_result = None
+            self._force_rebuild_dataset = True
+            # Clear config["basic"]["data"] if it points into the deleted cache
+            config = self.get_current_config()
+            data_val = config["basic"].get("data", "")
+            if data_val:
+                cache_root = os.path.abspath(get_dataset_path())
+                try:
+                    if os.path.abspath(data_val).startswith(cache_root):
+                        if hasattr(self, 'config_widgets') and self.config_widgets and "data" in self.config_widgets:
+                            self.config_widgets["data"].setText("")
+                except Exception:
+                    pass
             self._update_dataset_status(None)
             self.append_training_log(self.tr("Dataset cache cleared from disk."))
         except Exception as e:
@@ -2755,6 +2771,11 @@ class GuidedTrainingWidget(QWidget):
         """Run preflight background check and show result dialog."""
         if self._preflight_running:
             return  # Prevent double-click
+
+        # Ensure dataset is prepared (may have been cleared)
+        if not self._prepared_dataset_dir:
+            if not self._prepare_dataset():
+                return  # Preparation failed — don't run preflight
 
         ctx = self._build_guided_preflight_context()
         is_active = self.job_manager.get_current_job() is not None

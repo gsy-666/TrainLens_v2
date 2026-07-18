@@ -180,14 +180,19 @@ def check_disk_space(result: PreflightResult, output_dir: str):
         checked = parent
 
     try:
-        usage = os.statvfs(str(path))
-        free_bytes = usage.f_frsize * usage.f_bavail
+        if hasattr(os, 'statvfs'):
+            usage = os.statvfs(str(checked))
+            free_bytes = usage.f_frsize * usage.f_bavail
+        else:
+            # Windows: use shutil.disk_usage
+            import shutil as _shutil
+            free_bytes = _shutil.disk_usage(str(checked)).free
     except (OSError, AttributeError):
         result.add(PreflightIssue(
             code="DISK_SPACE_UNKNOWN", severity=PreflightSeverity.WARNING,
             title="Cannot determine disk space",
             message="Unable to query free disk space on the output volume.",
-            path=str(path),
+            path=str(checked),
         ))
         return
 
@@ -198,7 +203,7 @@ def check_disk_space(result: PreflightResult, output_dir: str):
             code="DISK_SPACE_LOW", severity=PreflightSeverity.ERROR,
             title="Insufficient disk space",
             message=f"Only {free_gb:.1f} GB free. At least 1 GB required.",
-            path=str(path),
+            path=str(checked),
             suggestion="Free up disk space or choose a different output location.",
         ))
     elif free_bytes < DISK_SPACE_WARNING_BYTES:
@@ -206,7 +211,7 @@ def check_disk_space(result: PreflightResult, output_dir: str):
             code="DISK_SPACE_MODERATE", severity=PreflightSeverity.WARNING,
             title="Disk space is low",
             message=f"Only {free_gb:.1f} GB free. Training may run out of space.",
-            path=str(path),
+            path=str(checked),
             suggestion=f"Ensure at least 5 GB free. Currently {free_gb:.1f} GB.",
         ))
     else:
@@ -214,7 +219,7 @@ def check_disk_space(result: PreflightResult, output_dir: str):
             code="DISK_SPACE_OK", severity=PreflightSeverity.PASS,
             title="Sufficient disk space",
             message=f"{free_gb:.1f} GB free on output volume.",
-            path=str(path),
+            path=str(checked),
         ))
 
 
@@ -238,7 +243,14 @@ def check_config_not_empty(result: PreflightResult, field_name: str, value: Opti
 
 def check_positive_int(result: PreflightResult, field_name: str, value: int):
     """Check an integer config value is > 0."""
-    if value <= 0:
+    if value is None:
+        result.add(PreflightIssue(
+            code=f"{field_name.upper()}_EMPTY", severity=PreflightSeverity.ERROR,
+            title=f"{field_name} is not set",
+            message=f"The {field_name} field must be set.",
+            field_name=field_name,
+        ))
+    elif value <= 0:
         result.add(PreflightIssue(
             code=f"{field_name.upper()}_INVALID", severity=PreflightSeverity.ERROR,
             title=f"{field_name} must be positive",

@@ -5,7 +5,7 @@ from enum import Enum
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from . import PreflightResult, PreflightSeverity
+from . import PreflightIssue, PreflightResult, PreflightSeverity
 from .common_checks import (
     check_active_job, check_config_not_empty, check_disk_space,
     check_output_directory, check_positive_int,
