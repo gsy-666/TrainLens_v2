@@ -69,15 +69,16 @@ class TestGuidedTrainingWidgetBasics:
         assert hasattr(widget, 'tab_widget')
         assert widget.tab_widget is not None
 
-    def test_widget_has_three_tabs(self, qapp):
-        """GuidedTrainingWidget has Data, Config, Train tabs"""
+    def test_widget_has_tabs_with_metrics_hidden(self, qapp):
+        """GuidedTrainingWidget has Data, Config, Train, Metrics tabs (Metrics hidden)."""
         widget = GuidedTrainingWidget(
             parent=None,
             image_list=[],
             output_dir="/tmp/test",
             supported_shape=[]
         )
-        assert widget.tab_widget.count() == 3
+        assert widget.tab_widget.count() == 4
+        assert not widget.tab_widget.isTabVisible(3)
         assert widget.tab_widget.tabText(0) in ["Data", "数据"]
         assert widget.tab_widget.tabText(1) in ["Config", "配置"]
         assert widget.tab_widget.tabText(2) in ["Train", "训练"]

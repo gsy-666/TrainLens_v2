@@ -70,6 +70,13 @@ class TrainingJob:
     python_executable: Optional[Path] = None
     command: Optional[list] = None
 
+    # Training config (for Guided history display)
+    task: Optional[str] = None
+    model: Optional[str] = None
+    data: Optional[str] = None
+    project: Optional[str] = None
+    name: Optional[str] = None
+
     # Additional data
     metadata: Dict[str, Any] = field(default_factory=dict)
     error_message: Optional[str] = None

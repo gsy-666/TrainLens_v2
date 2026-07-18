@@ -56,6 +56,11 @@ class JobHistoryRecord:
     results_path: Optional[str] = None
     export_path: Optional[str] = None
 
+    # Training config (for Guided display)
+    task: Optional[str] = None
+    model: Optional[str] = None
+    data: Optional[str] = None
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization"""
         return asdict(self)
@@ -225,6 +230,11 @@ class HistoryStore:
 
             if error_message:
                 record.error_message = error_message
+
+            # Write back real output directory
+            output_directory = metrics.pop('output_directory', None)
+            if output_directory:
+                record.output_directory = str(output_directory)
 
             # Calculate duration
             if record.started_at and record.ended_at:

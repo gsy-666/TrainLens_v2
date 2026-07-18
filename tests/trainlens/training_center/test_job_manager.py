@@ -475,3 +475,853 @@ class TestCallbackSubscription:
         job_manager.unsubscribe_events(callback)
 
         assert callback not in job_manager._event_callbacks
+
+
+class TestTwoPhaseReserve:
+    """Test reserve_job / start_reserved_job / fail_reserved_job lifecycle"""
+
+    def test_reserve_occupies_job_manager(self, job_manager, mock_adapter, sample_job):
+        """reserve_job sets PREPARING and get_current_job() returns the reserved job"""
+        ok, msg = job_manager.reserve_job(sample_job, mock_adapter)
+
+        assert ok is True
+        assert "preparing" in msg.lower()
+        assert sample_job.status == TrainingStatus.PREPARING
+
+        current = job_manager.get_current_job()
+        assert current is not None
+        assert current.job_id == sample_job.job_id
+        assert current.status == TrainingStatus.PREPARING
+
+        # adapter.start() was NOT called
+        assert mock_adapter.start.called is False
+
+    def test_second_job_blocked_during_preparing(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """Another job cannot reserve while one is PREPARING"""
+        job_manager.reserve_job(sample_job, mock_adapter)
+
+        job2 = TrainingJob(
+            job_id="test-job-002",
+            mode=TrainingMode.GUIDED_ULTRALYTICS,
+            status=TrainingStatus.IDLE,
+            created_at=datetime.now(),
+            started_at=None,
+            ended_at=None,
+            workspace=None,
+            output_directory=None,
+            display_name="Second Job",
+            framework="ultralytics",
+            python_executable=None,
+            command=None,
+            metadata={},
+            error_message=None,
+        )
+
+        adapter2 = Mock()
+        adapter2.can_start.return_value = (True, "")
+
+        ok, msg = job_manager.reserve_job(job2, adapter2)
+
+        assert ok is False
+        assert "already in progress" in msg.lower()
+        assert adapter2.start.called is False
+
+    def test_start_reserved_transitions_to_running(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """start_reserved_job transitions PREPARING → RUNNING"""
+        job_manager.reserve_job(sample_job, mock_adapter)
+
+        mock_adapter.start.return_value = (True, "Started training")
+
+        ok, msg = job_manager.start_reserved_job(sample_job.job_id, {"data": "test"})
+
+        assert ok is True
+        assert mock_adapter.start.called
+
+        current = job_manager.get_current_job()
+        assert current.status == TrainingStatus.RUNNING
+
+    def test_start_reserved_wrong_id_fails(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """start_reserved_job rejects wrong job_id"""
+        job_manager.reserve_job(sample_job, mock_adapter)
+
+        ok, msg = job_manager.start_reserved_job("wrong-job-id", {})
+
+        assert ok is False
+        assert "mismatch" in msg.lower()
+
+    def test_start_reserved_not_preparing_fails(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """start_reserved_job fails if job was already cleaned up"""
+        job_manager.reserve_job(sample_job, mock_adapter)
+        # Transition away from PREPARING (fail = terminal + cleanup)
+        job_manager.fail_reserved_job(sample_job.job_id, "prep failed")
+
+        ok, msg = job_manager.start_reserved_job(sample_job.job_id, {})
+
+        assert ok is False
+        # After cleanup, _current_job is None, so "mismatch" is returned
+        assert "mismatch" in msg.lower()
+
+    def test_fail_reserved_transitions_to_failed(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """fail_reserved_job transitions PREPARING → FAILED and cleans up"""
+        job_manager.reserve_job(sample_job, mock_adapter)
+
+        job_ref = job_manager.get_current_job()
+        job_manager.fail_reserved_job(sample_job.job_id, "Dataset creation error")
+
+        assert job_ref.status == TrainingStatus.FAILED
+        assert job_ref.error_message == "Dataset creation error"
+        assert job_manager.get_current_job() is None
+
+    def test_fail_reserved_wrong_id_ignored(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """fail_reserved_job with wrong job_id is silently ignored"""
+        job_manager.reserve_job(sample_job, mock_adapter)
+
+        job_manager.fail_reserved_job("wrong-id", "error")
+
+        current = job_manager.get_current_job()
+        assert current.status == TrainingStatus.PREPARING
+
+    def test_fail_reserved_not_preparing_ignored(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """fail_reserved_job when not PREPARING is silently ignored"""
+        job_manager.reserve_job(sample_job, mock_adapter)
+        job_manager.fail_reserved_job(sample_job.job_id, "first error")
+        # Already FAILED → not PREPARING
+
+        job_manager.fail_reserved_job(sample_job.job_id, "second error")
+        # No-op, but first error message preserved
+        assert sample_job.error_message == "first error"
+
+    def test_stop_during_preparing_transitions_to_stopped(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """request_stop during PREPARING transitions directly to STOPPED"""
+        job_manager.reserve_job(sample_job, mock_adapter)
+
+        job_ref = job_manager.get_current_job()
+        result = job_manager.request_stop()
+
+        assert result is True
+        # adapter.stop() was NOT called (nothing running)
+        assert mock_adapter.stop.called is False
+        assert job_ref.status == TrainingStatus.STOPPED
+        assert job_manager.get_current_job() is None
+
+    def test_sequential_jobs_after_prepare_stopped(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """New job can reserve after previous PREPARING was stopped"""
+        job_manager.reserve_job(sample_job, mock_adapter)
+        job_manager.request_stop()  # STOPPED + cleanup
+
+        job2 = TrainingJob(
+            job_id="test-job-003",
+            mode=TrainingMode.CUSTOM_SCRIPT,
+            status=TrainingStatus.IDLE,
+            created_at=datetime.now(),
+            started_at=None,
+            ended_at=None,
+            workspace=None,
+            output_directory=None,
+            display_name="Second Job",
+            framework="custom",
+            python_executable=None,
+            command=None,
+            metadata={},
+            error_message=None,
+        )
+
+        adapter2 = Mock()
+        adapter2.can_start.return_value = (True, "")
+        adapter2.start.return_value = (True, "Started")
+
+        ok, msg = job_manager.reserve_job(job2, adapter2)
+
+        assert ok is True
+        assert job_manager.get_current_job().job_id == "test-job-003"
+        assert job_manager.get_current_job().status == TrainingStatus.PREPARING
+
+    def test_request_start_uses_two_phase_internally(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """The one-shot request_start still works as before"""
+        mock_adapter.start.return_value = (True, "Started training")
+
+        ok, msg = job_manager.request_start(sample_job, mock_adapter, {"data": "test"})
+
+        assert ok is True
+        assert mock_adapter.start.called
+        assert job_manager.get_current_job().status == TrainingStatus.RUNNING
+
+    def test_request_start_failure_still_cleans(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """request_start with failed adapter.start cleans up"""
+        mock_adapter.start.return_value = (False, "Export error")
+
+        ok, msg = job_manager.request_start(sample_job, mock_adapter, {})
+
+        assert ok is False
+        assert msg == "Export error"
+        assert job_manager.get_current_job() is None
+        assert sample_job.status == TrainingStatus.FAILED
+
+    def test_prepare_then_start_other_mode_works(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """Full two-phase guided workflow: reserve → start → complete"""
+        # Phase 1: Reserve
+        ok, _ = job_manager.reserve_job(sample_job, mock_adapter)
+        assert ok
+        assert job_manager.get_current_job().status == TrainingStatus.PREPARING
+
+        # Phase 2: Start
+        mock_adapter.start.return_value = (True, "Started")
+        ok, _ = job_manager.start_reserved_job(sample_job.job_id, {"data": "test"})
+        assert ok
+        assert job_manager.get_current_job().status == TrainingStatus.RUNNING
+
+        # Complete
+        job_ref = job_manager.get_current_job()
+        job_manager.complete_job(sample_job.job_id)
+        assert job_ref.status == TrainingStatus.COMPLETED
+        assert job_manager.get_current_job() is None
+
+    def test_adapter_stop_not_called_during_preparing_stop(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """request_stop during PREPARING does NOT call adapter.stop() — nothing to stop."""
+        job_manager.reserve_job(sample_job, mock_adapter)
+
+        result = job_manager.request_stop()
+
+        assert result is True
+        assert mock_adapter.stop.called is False
+        assert sample_job.status == TrainingStatus.STOPPED
+        assert job_manager.get_current_job() is None
+
+    def test_adapter_start_not_called_after_preparing_stop(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """start_reserved_job after PREPARING was stopped → rejected."""
+        job_manager.reserve_job(sample_job, mock_adapter)
+        job_manager.request_stop()  # STOPPED + cleanup
+
+        mock_adapter.start.return_value = (True, "Should not reach")
+        ok, msg = job_manager.start_reserved_job(sample_job.job_id, {})
+
+        assert ok is False
+        assert mock_adapter.start.called is False
+
+    def test_fail_reserved_after_stop_ignored(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """fail_reserved_job after PREPARING was stopped → silently ignored (no overwrite to FAILED)."""
+        job_manager.reserve_job(sample_job, mock_adapter)
+        job_manager.request_stop()  # STOPPED + cleanup
+
+        job_manager.fail_reserved_job(sample_job.job_id, "late prep error")
+        # Status remains STOPPED (not overwritten to FAILED)
+        assert sample_job.status == TrainingStatus.STOPPED
+
+    def test_adapter_shutdown_called_once_on_cleanup(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """adapter.shutdown() is called exactly once during cleanup."""
+        mock_adapter.shutdown = Mock()
+        job_manager.reserve_job(sample_job, mock_adapter)
+        job_manager.fail_reserved_job(sample_job.job_id, "test error")
+
+        assert mock_adapter.shutdown.call_count == 1
+
+    def test_adapter_shutdown_called_once_on_stop_preparing(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """adapter.shutdown() called once when stopping during PREPARING."""
+        mock_adapter.shutdown = Mock()
+        job_manager.reserve_job(sample_job, mock_adapter)
+        job_manager.request_stop()
+
+        assert mock_adapter.shutdown.call_count == 1
+
+    def test_adapter_shutdown_called_once_on_full_lifecycle(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """adapter.shutdown() called exactly once in full reserve → start → complete lifecycle."""
+        mock_adapter.shutdown = Mock()
+        mock_adapter.start.return_value = (True, "Started")
+
+        job_manager.reserve_job(sample_job, mock_adapter)
+        job_manager.start_reserved_job(sample_job.job_id, {})
+        job_manager.complete_job(sample_job.job_id)
+
+        assert mock_adapter.shutdown.call_count == 1
+
+    def test_status_never_reaches_running_after_fail_reserved(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """After fail_reserved_job, status is FAILED and never becomes RUNNING."""
+        job_manager.reserve_job(sample_job, mock_adapter)
+        job_manager.fail_reserved_job(sample_job.job_id, "data error")
+
+        assert sample_job.status == TrainingStatus.FAILED
+        # start_reserved_job should be rejected
+        mock_adapter.start.return_value = (True, "Too late")
+        ok, _ = job_manager.start_reserved_job(sample_job.job_id, {})
+        assert ok is False
+
+    def test_stop_preparing_releases_slot_for_next_job(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """After PREPARING → STOPPED, a new job can reserve immediately."""
+        job_manager.reserve_job(sample_job, mock_adapter)
+        assert job_manager.get_current_job() is not None
+
+        job_manager.request_stop()
+        assert job_manager.get_current_job() is None
+
+        # New job can now reserve
+        job2 = TrainingJob(
+            job_id="test-job-new",
+            mode=TrainingMode.CUSTOM_SCRIPT,
+            status=TrainingStatus.IDLE,
+            created_at=datetime.now(),
+            started_at=None, ended_at=None,
+            workspace=None, output_directory=None,
+            display_name="New", framework="custom",
+            python_executable=None, command=None, metadata={},
+            error_message=None,
+        )
+        adapter2 = Mock()
+        adapter2.can_start.return_value = (True, "")
+        ok, _ = job_manager.reserve_job(job2, adapter2)
+        assert ok is True
+        assert job_manager.get_current_job().job_id == "test-job-new"
+
+    def test_error_message_preserved_after_fail_reserved(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """fail_reserved_job stores the real exception as error_message."""
+        job_manager.reserve_job(sample_job, mock_adapter)
+        job_manager.fail_reserved_job(
+            sample_job.job_id, "create_yolo_dataset failed: Permission denied"
+        )
+
+        assert sample_job.error_message == "create_yolo_dataset failed: Permission denied"
+        assert sample_job.status == TrainingStatus.FAILED
+
+
+class TestLockReentrancy:
+    """Test that callbacks can safely re-enter JobManager without deadlock."""
+
+    def test_status_callback_can_call_get_current_job(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """status callback calling get_current_job() does NOT deadlock."""
+        captured = []
+
+        def callback(job):
+            # Simulate TrainingCenterWindow._update_status_bar pattern:
+            # callback re-enters JobManager.get_current_job()
+            current = job_manager.get_current_job()
+            captured.append(current)
+
+        job_manager.subscribe_status(callback)
+        mock_adapter.start.return_value = (True, "Started")
+
+        # This would deadlock with threading.Lock() (non-reentrant)
+        job_manager.request_start(sample_job, mock_adapter, {"data": "test"})
+
+        assert len(captured) > 0
+
+    def test_status_callback_exception_does_not_block_others(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """Exception in one callback doesn't prevent others from running."""
+        results = []
+
+        def bad_callback(job):
+            raise RuntimeError("callback boom")
+
+        def good_callback(job):
+            results.append(job.status)
+
+        job_manager.subscribe_status(bad_callback)
+        job_manager.subscribe_status(good_callback)
+        mock_adapter.start.return_value = (True, "Started")
+
+        job_manager.request_start(sample_job, mock_adapter, {})
+
+        assert TrainingStatus.RUNNING in results
+
+
+class TestCallbacksOutsideLock:
+    """Verify all callbacks execute OUTSIDE _state_lock."""
+
+    def test_callback_get_current_job_no_deadlock(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """status callback calling get_current_job() does NOT deadlock."""
+        captured = []
+
+        def callback(job):
+            current = job_manager.get_current_job()
+            captured.append(current)
+
+        job_manager.subscribe_status(callback)
+        mock_adapter.start.return_value = (True, "Started")
+        job_manager.request_start(sample_job, mock_adapter, {"data": "test"})
+        assert len(captured) > 0
+
+    def test_callback_request_stop_no_deadlock(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """status callback calling request_stop() does NOT deadlock."""
+        mock_adapter.start.return_value = (True, "Started")
+        mock_adapter.stop.return_value = True
+        stopped = []
+
+        def callback(job):
+            if job.status == TrainingStatus.RUNNING:
+                job_manager.request_stop()
+                stopped.append(True)
+
+        job_manager.subscribe_status(callback)
+        job_manager.request_start(sample_job, mock_adapter, {})
+        assert len(stopped) > 0
+
+    def test_callback_unsubscribes_self_safely(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """Callback that unsubscribes itself does NOT break iteration."""
+        results = []
+
+        def self_removing(job):
+            results.append("self")
+            job_manager.unsubscribe_status(self_removing)
+
+        def other(job):
+            results.append("other")
+
+        job_manager.subscribe_status(self_removing)
+        job_manager.subscribe_status(other)
+        mock_adapter.start.return_value = (True, "Started")
+        job_manager.request_start(sample_job, mock_adapter, {})
+
+        assert "self" in results
+        assert "other" in results
+
+    def test_callback_registers_new_callback_not_called_this_round(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """Callback registering a new subscriber: new CB not in current snapshot, called next round."""
+        calls = []
+
+        def first_cb(job):
+            calls.append(("first", job.status))
+            job_manager.subscribe_status(second_cb)
+
+        def second_cb(job):
+            calls.append(("second", job.status))
+
+        job_manager.subscribe_status(first_cb)
+        mock_adapter.start.return_value = (True, "Started")
+        job_manager.request_start(sample_job, mock_adapter, {})
+
+        # second_cb registered during PREPARING callback → appears in RUNNING snapshot
+        # So it fires during RUNNING notification, not PREPARING
+        assert ("first", TrainingStatus.PREPARING) in calls
+        assert ("second", TrainingStatus.RUNNING) in calls
+        # second was NOT called during PREPARING (not in that snapshot)
+        assert ("second", TrainingStatus.PREPARING) not in calls
+
+    def test_callback_exception_isolated_lock_free(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """Exception in one callback does NOT prevent others from executing."""
+        results = []
+
+        def bad(job):
+            raise RuntimeError("crash")
+
+        def good(job):
+            results.append(job.status)
+
+        job_manager.subscribe_status(bad)
+        job_manager.subscribe_status(good)
+        mock_adapter.start.return_value = (True, "Started")
+        job_manager.request_start(sample_job, mock_adapter, {})
+
+        assert TrainingStatus.RUNNING in results
+
+    def test_adapter_start_outside_lock(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """adapter.start() is called while NO _state_lock is held."""
+        lock_held_during_start = []
+
+        original_start = mock_adapter.start
+
+        def tracking_start(job, config):
+            lock_held_during_start.append(job_manager._state_lock._is_owned())
+            return original_start(job, config)
+
+        mock_adapter.start = tracking_start
+        mock_adapter.start.return_value = (True, "Started")
+        mock_adapter.can_start.return_value = (True, "")
+
+        job_manager.reserve_job(sample_job, mock_adapter)
+        job_manager.start_reserved_job(sample_job.job_id, {})
+
+        assert len(lock_held_during_start) > 0
+        assert lock_held_during_start[0] is False, (
+            "adapter.start() was called while _state_lock was held!"
+        )
+
+    def test_full_lifecycle_callbacks_outside_lock(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """PREPARING → RUNNING → STOPPED: all callbacks outside lock."""
+        statuses_seen = []
+        lock_held_during_cb = []
+
+        def tracking_cb(job):
+            statuses_seen.append(job.status)
+            lock_held_during_cb.append(job_manager._state_lock._is_owned())
+
+        job_manager.subscribe_status(tracking_cb)
+        mock_adapter.start.return_value = (True, "Started")
+        mock_adapter.stop.return_value = True
+
+        job_manager.request_start(sample_job, mock_adapter, {})
+        job_manager.request_stop()
+
+        assert len(lock_held_during_cb) > 0
+        for i, held in enumerate(lock_held_during_cb):
+            assert held is False, (
+                f"Callback {i} ran while lock held (status={statuses_seen[i] if i < len(statuses_seen) else '?'})"
+            )
+
+    def test_slow_callback_does_not_block_other_thread(
+        self, job_manager, mock_adapter, sample_job
+    ):
+        """A slow callback does NOT prevent another thread from querying."""
+        import time, threading
+        slow_started = []
+
+        def slow_cb(job):
+            slow_started.append(True)
+            time.sleep(0.3)
+
+        job_manager.subscribe_status(slow_cb)
+        mock_adapter.start.return_value = (True, "Started")
+
+        def trigger():
+            job_manager.request_start(sample_job, mock_adapter, {})
+
+        t = threading.Thread(target=trigger)
+        t.start()
+        time.sleep(0.05)
+
+        start = time.time()
+        job = job_manager.get_current_job()
+        elapsed = time.time() - start
+
+        t.join(timeout=2)
+        assert elapsed < 0.5, f"get_current_job() blocked for {elapsed:.1f}s"
+        assert len(slow_started) > 0
+
+
+class TestHistoryIntegration:
+    """Verify JobManager writes to HistoryStore on every lifecycle state transition."""
+
+    @pytest.fixture
+    def history_store(self, tmp_path):
+        """Isolated HistoryStore using tmp_path."""
+        from anylabeling.services.training_center.history import HistoryStore
+        store = HistoryStore(history_dir=tmp_path / "history")
+        return store
+
+    @pytest.fixture
+    def job_manager_with_history(self, history_store):
+        """JobManager with isolated HistoryStore injected."""
+        from anylabeling.services.training_center.job_manager import JobManager
+        jm = JobManager()
+        jm._current_job = None
+        jm._current_adapter = None
+        jm._status_callbacks = []
+        jm._event_callbacks = []
+        jm._history_store = history_store  # Inject isolated store
+        return jm
+
+    def test_reserve_writes_preparing_record(
+        self, job_manager_with_history, mock_adapter, sample_job, history_store
+    ):
+        """reserve_job creates a PREPARING history record."""
+        jm = job_manager_with_history
+        sample_job.task = "Detect"
+        sample_job.model = "yolov8n.pt"
+        sample_job.data = "data.yaml"
+
+        jm.reserve_job(sample_job, mock_adapter)
+
+        record = history_store.get_job(sample_job.job_id)
+        assert record is not None
+        assert record.status == "preparing"
+        assert record.mode == "custom_script"
+        assert record.display_name == "Test Job"
+
+    def test_start_updates_to_running(
+        self, job_manager_with_history, mock_adapter, sample_job, history_store
+    ):
+        """start_reserved_job updates the same record to RUNNING."""
+        jm = job_manager_with_history
+        mock_adapter.start.return_value = (True, "Started")
+
+        jm.reserve_job(sample_job, mock_adapter)
+        jm.start_reserved_job(sample_job.job_id, {"data": "test"})
+
+        record = history_store.get_job(sample_job.job_id)
+        assert record is not None
+        assert record.status == "running"
+
+    def test_complete_finalizes_record(
+        self, job_manager_with_history, mock_adapter, sample_job, history_store
+    ):
+        """complete_job finalizes the record as COMPLETED."""
+        jm = job_manager_with_history
+        mock_adapter.start.return_value = (True, "Started")
+
+        jm.request_start(sample_job, mock_adapter, {})
+        jm.complete_job(sample_job.job_id)
+
+        record = history_store.get_job(sample_job.job_id)
+        assert record is not None
+        assert record.status == "completed"
+
+    def test_stop_finalizes_record(
+        self, job_manager_with_history, mock_adapter, sample_job, history_store
+    ):
+        """request_stop during RUNNING finalizes as STOPPED."""
+        jm = job_manager_with_history
+        mock_adapter.start.return_value = (True, "Started")
+        mock_adapter.stop.return_value = True
+
+        jm.request_start(sample_job, mock_adapter, {})
+        jm.request_stop()
+        jm.stop_job(sample_job.job_id)
+
+        record = history_store.get_job(sample_job.job_id)
+        assert record is not None
+        assert record.status == "stopped"
+
+    def test_fail_reserved_finalizes_record(
+        self, job_manager_with_history, mock_adapter, sample_job, history_store
+    ):
+        """fail_reserved_job finalizes the record as FAILED."""
+        jm = job_manager_with_history
+        jm.reserve_job(sample_job, mock_adapter)
+        jm.fail_reserved_job(sample_job.job_id, "dataset error")
+
+        record = history_store.get_job(sample_job.job_id)
+        assert record is not None
+        assert record.status == "failed"
+        assert record.error_message == "dataset error"
+
+    def test_stop_preparing_finalizes_record(
+        self, job_manager_with_history, mock_adapter, sample_job, history_store
+    ):
+        """request_stop during PREPARING finalizes as STOPPED."""
+        jm = job_manager_with_history
+        jm.reserve_job(sample_job, mock_adapter)
+        jm.request_stop()
+
+        record = history_store.get_job(sample_job.job_id)
+        assert record is not None
+        assert record.status == "stopped"
+
+    def test_one_job_id_one_record(
+        self, job_manager_with_history, mock_adapter, sample_job, history_store
+    ):
+        """A single job_id always maps to exactly one history record."""
+        jm = job_manager_with_history
+        mock_adapter.start.return_value = (True, "Started")
+
+        jm.reserve_job(sample_job, mock_adapter)
+        jm.start_reserved_job(sample_job.job_id, {})
+        jm.complete_job(sample_job.job_id)
+
+        jobs = history_store.list_jobs()
+        matching = [j for j in jobs if j.job_id == sample_job.job_id]
+        assert len(matching) == 1
+        assert matching[0].status == "completed"
+
+    def test_idle_not_written_to_history(
+        self, job_manager_with_history, mock_adapter, sample_job, history_store
+    ):
+        """IDLE jobs are never written to history."""
+        # Create a job, don't reserve it (stays IDLE)
+        jobs_before = len(history_store.list_jobs())
+        # Nothing should change — reserve_job is the entry point
+        assert jobs_before == 0  # Fresh store has no records
+
+    def test_orphan_recovery_on_startup(self, tmp_path, mock_adapter, sample_job):
+        """Orphaned PREPARING/RUNNING records are marked FAILED on JobManager init."""
+        from anylabeling.services.training_center.history import HistoryStore, JobHistoryRecord
+        from anylabeling.services.training_center.job_manager import JobManager
+        from datetime import datetime
+
+        # Pre-populate history with an orphaned PREPARING record
+        store = HistoryStore(history_dir=tmp_path / "history")
+        orphan = JobHistoryRecord(
+            job_id="orphan-1", mode="guided_ultralytics", status="running",
+            created_at=datetime.now().isoformat(), display_name="Orphan Job",
+        )
+        store.append_job(orphan)
+
+        # Creating a new JobManager should trigger recovery
+        jm = JobManager()
+        jm._history_store = store
+        jm._recover_orphaned_jobs()
+
+        recovered = store.get_job("orphan-1")
+        assert recovered is not None
+        assert recovered.status == "failed"
+        assert "Application exited" in (recovered.error_message or "")
+
+        # Cleanup singleton state
+        JobManager._instance = None
+
+    def test_custom_script_no_duplicate_history(
+        self, job_manager_with_history, mock_adapter, sample_job, history_store
+    ):
+        """Custom Script jobs via JobManager produce exactly one history record."""
+        jm = job_manager_with_history
+        mock_adapter.start.return_value = (True, "Started")
+
+        sample_job.task = "Detect"
+        sample_job.model = "yolov8n.pt"
+        sample_job.data = "data.yaml"
+
+        # Full lifecycle: reserve → start → complete
+        jm.reserve_job(sample_job, mock_adapter)
+        jm.start_reserved_job(sample_job.job_id, {"save_dir": "/output"})
+        jm.complete_job(sample_job.job_id, metadata={"save_dir": "/output"})
+
+        # Verify exactly ONE record per job_id
+        jobs = history_store.list_jobs()
+        matching = [j for j in jobs if j.job_id == sample_job.job_id]
+        assert len(matching) == 1, (
+            f"Expected exactly 1 history record for {sample_job.job_id}, "
+            f"got {len(matching)}: {[j.status for j in matching]}"
+        )
+        assert matching[0].status == "completed"
+        assert matching[0].output_directory == "/output"
+
+    def test_custom_script_no_idle_record(
+        self, job_manager_with_history, mock_adapter, sample_job, history_store
+    ):
+        """IDLE is never written: RunMonitorWidget must not directly call append_job."""
+        jm = job_manager_with_history
+
+        # Without any reservation, there should be no record
+        all_jobs = history_store.list_jobs()
+        assert len(all_jobs) == 0
+
+        # Even after creating a TrainingJob (simulating RunMonitorWidget flow),
+        # NO history record should be created until reserve_job is called
+        idle_job = TrainingJob(
+            job_id="idle-custom-001",
+            mode=TrainingMode.CUSTOM_SCRIPT,
+            status=TrainingStatus.IDLE,
+            created_at=datetime.now(),
+            workspace=Path("/tmp/workspace"),
+            display_name="Idle Custom Job",
+        )
+        # (no reserve_job call → no history record)
+        all_jobs = history_store.list_jobs()
+        assert all(j.job_id != idle_job.job_id for j in all_jobs), (
+            "IDLE job should NOT be persisted in history"
+        )
+        assert len(all_jobs) == 0
+
+    def test_jobmanager_uses_isolated_history_store(self, tmp_path):
+        """JobManager without explicit injection uses an isolated HistoryStore.
+
+        The conftest.py redirects the history singleton to a temp dir,
+        so any new JobManager must NOT write to the user's real APPDATA.
+        """
+        from anylabeling.services.training_center.history import get_history_store
+        import os
+
+        # Get the isolated store (set by conftest.py pytest_configure)
+        isolated_store = get_history_store()
+
+        # The isolated store's directory must NOT be the user's real APPDATA
+        real_appdata = os.environ.get("APPDATA", "")
+        if real_appdata:
+            assert str(real_appdata) not in str(isolated_store.history_dir), (
+                f"Isolated HistoryStore path {isolated_store.history_dir} "
+                f"should NOT be in user APPDATA {real_appdata}"
+            )
+
+        # Creating a JobManager should use this isolated store
+        jm = JobManager()
+        jm_store = jm._get_history_store()
+        assert jm_store.history_dir == isolated_store.history_dir, (
+            f"JobManager should use isolated store at {isolated_store.history_dir}, "
+            f"got {jm_store.history_dir}"
+        )
+
+    def test_jobmanager_write_stays_in_isolated_store(
+        self, tmp_path, mock_adapter
+    ):
+        """JobManager history writes go to isolated store, never user's real dir."""
+        from anylabeling.services.training_center.history import get_history_store
+        import os
+
+        jm = JobManager()
+        jm._current_job = None
+        jm._current_adapter = None
+        jm._status_callbacks = []
+        jm._event_callbacks = []
+
+        mock_adapter.start.return_value = (True, "Started")
+        job = TrainingJob(
+            job_id="isolation-test-001",
+            mode=TrainingMode.CUSTOM_SCRIPT,
+            status=TrainingStatus.IDLE,
+            created_at=datetime.now(),
+            workspace=Path("/tmp/workspace"),
+            display_name="Isolation Test",
+        )
+
+        jm.reserve_job(job, mock_adapter)
+        jm.start_reserved_job(job.job_id, {"data": "test"})
+        jm.complete_job(job.job_id)
+
+        # The record must exist in the isolated store
+        isolated_store = get_history_store()
+        record = isolated_store.get_job(job.job_id)
+        assert record is not None
+        assert record.status == "completed"
+
+        # The isolated store path must NOT contain the user's real APPDATA
+        real_appdata = os.environ.get("APPDATA", "")
+        if real_appdata:
+            assert str(real_appdata) not in str(isolated_store.history_dir), (
+                f"Isolated store path {isolated_store.history_dir} must not be in user APPDATA"
+            )

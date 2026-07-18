@@ -36,9 +36,10 @@ class UltralyticsAdapter(TrainingAdapter):
         self._callbacks: List[Callable] = []
         self._current_job_id: str = None
         self._original_callbacks = self.manager.callbacks.copy()
+        self._registered_callback = self._on_training_event
 
         # Register our event mapper
-        self.manager.callbacks.append(self._on_training_event)
+        self.manager.callbacks.append(self._registered_callback)
 
     def can_start(self) -> Tuple[bool, str]:
         """Check if Ultralytics training can start"""
@@ -121,6 +122,7 @@ class UltralyticsAdapter(TrainingAdapter):
                 timestamp=timestamp,
                 source="ultralytics",
                 results=data.get("results"),
+                save_dir=data.get("save_dir", ""),
             )
 
         elif event_type == "training_error":
@@ -129,6 +131,7 @@ class UltralyticsAdapter(TrainingAdapter):
                 timestamp=timestamp,
                 error=data.get("error", "Unknown error"),
                 source="ultralytics",
+                save_dir=data.get("save_dir", ""),
             )
 
         elif event_type == "training_stopped":
@@ -136,6 +139,7 @@ class UltralyticsAdapter(TrainingAdapter):
                 job_id=self._current_job_id,
                 timestamp=timestamp,
                 source="ultralytics",
+                save_dir=data.get("save_dir", ""),
             )
 
         if unified_event:
@@ -150,7 +154,20 @@ class UltralyticsAdapter(TrainingAdapter):
                 # Silently ignore callback exceptions to prevent breaking other callbacks
                 pass
 
+    def shutdown(self):
+        """Clean up: remove registered callback from TrainingManager.
+
+        Must be called explicitly — do NOT rely on __del__.
+        Idempotent: safe to call multiple times.
+        """
+        if hasattr(self, 'manager') and hasattr(self, '_registered_callback'):
+            try:
+                if self._registered_callback in self.manager.callbacks:
+                    self.manager.callbacks.remove(self._registered_callback)
+            except (ValueError, AttributeError):
+                pass
+        self._callbacks.clear()
+
     def __del__(self):
-        """Cleanup: restore original callbacks"""
-        if hasattr(self, 'manager') and hasattr(self, '_original_callbacks'):
-            self.manager.callbacks = self._original_callbacks
+        """Fallback cleanup — prefer explicit shutdown()."""
+        self.shutdown()

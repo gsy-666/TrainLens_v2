@@ -6,6 +6,7 @@ Enforces mutual exclusion and manages job lifecycle.
 
 import threading
 import time
+from datetime import datetime
 from typing import Optional, Tuple, Dict, Any, Callable, List
 from pathlib import Path
 
@@ -41,12 +42,89 @@ class JobManager:
         if self._initialized:
             return
 
-        self._state_lock = threading.Lock()
+        self._state_lock = threading.RLock()
         self._current_job: Optional[TrainingJob] = None
         self._current_adapter: Optional[TrainingAdapter] = None
         self._status_callbacks: List[Callable[[TrainingJob], None]] = []
         self._event_callbacks: List[Callable[[TrainingEvent], None]] = []
+        self._history_store = None  # Lazy-init on first use
         self._initialized = True
+        self._recover_orphaned_jobs()
+
+    def _get_history_store(self):
+        """Lazy-init HistoryStore singleton."""
+        if self._history_store is None:
+            from .history import get_history_store
+            self._history_store = get_history_store()
+        return self._history_store
+
+    def _recover_orphaned_jobs(self):
+        """On startup, mark any PREPARING/RUNNING records as FAILED (interrupted)."""
+        try:
+            store = self._get_history_store()
+        except Exception:
+            return
+        store._ensure_loaded()
+        orphaned = []
+        for job_id, record in list(store._cache.items()):
+            try:
+                status = TrainingStatus(record.status)
+            except ValueError:
+                continue
+            if status in (TrainingStatus.PREPARING, TrainingStatus.RUNNING):
+                orphaned.append(job_id)
+        for job_id in orphaned:
+            try:
+                store.finalize_job(
+                    job_id,
+                    TrainingStatus.FAILED,
+                    error_message="Application exited before the training job reached a terminal state.",
+                )
+            except Exception:
+                pass
+
+    def _history_append(self, job: TrainingJob):
+        """Write job to history with PREPARING status (called from reserve_job)."""
+        try:
+            store = self._get_history_store()
+            from .history import JobHistoryRecord
+            record = JobHistoryRecord(
+                job_id=job.job_id,
+                mode=job.mode.value,
+                status=TrainingStatus.PREPARING.value,
+                created_at=(job.created_at or datetime.now()).isoformat(),
+                workspace=str(job.workspace) if job.workspace else None,
+                output_directory=str(job.output_directory) if job.output_directory else None,
+                display_name=job.display_name,
+                framework=job.framework,
+                python_executable=str(job.python_executable) if job.python_executable else None,
+                command=job.command,
+                metadata=dict(job.metadata),
+                task=getattr(job, 'task', None),
+                model=getattr(job, 'model', None),
+                data=getattr(job, 'data', None),
+            )
+            store.append_job(record)
+        except Exception:
+            pass
+
+    def _history_update(self, job_id: str, **updates):
+        """Update history record in-place."""
+        try:
+            self._get_history_store().update_job(job_id, **updates)
+        except Exception:
+            pass
+
+    def _history_finalize(self, job_id: str, status: TrainingStatus, error_message=None, **kwargs):
+        """Finalize history record with terminal status."""
+        try:
+            self._get_history_store().finalize_job(
+                job_id, status,
+                error_message=error_message,
+                **kwargs,
+            )
+        except Exception:
+            pass
 
     def request_start(
         self,
@@ -54,12 +132,28 @@ class JobManager:
         adapter: TrainingAdapter,
         config: Dict[str, Any]
     ) -> Tuple[bool, str]:
-        """Request to start a new training job
+        """Request to start a new training job (one-shot: reserve + start).
 
-        Args:
-            job: TrainingJob with initial metadata
-            adapter: Training adapter for this mode
-            config: System-specific configuration
+        For two-phase (reserve then start), use reserve_job() + start_reserved_job().
+
+        Returns:
+            (success, message)
+        """
+        ok, msg = self.reserve_job(job, adapter)
+        if not ok:
+            return False, msg
+        return self.start_reserved_job(job.job_id, config)
+
+    def reserve_job(
+        self,
+        job: TrainingJob,
+        adapter: TrainingAdapter,
+    ) -> Tuple[bool, str]:
+        """Phase 1: reserve the job manager slot (PREPARING state).
+
+        Does NOT call adapter.start(). The caller is responsible for
+        doing background preparation, then calling start_reserved_job()
+        or fail_reserved_job().
 
         Returns:
             (success, message)
@@ -78,58 +172,119 @@ class JobManager:
             self._current_adapter = adapter
 
             adapter.subscribe(self._on_adapter_event)
-            self._notify_status_change(job)
+            cbs = list(self._status_callbacks)
+
+        self._notify_status_change(job, cbs)
+        self._history_append(job)
+        return True, "Job reserved, preparing..."
+
+    def start_reserved_job(
+        self,
+        job_id: str,
+        config: Dict[str, Any],
+    ) -> Tuple[bool, str]:
+        """Phase 2: start the actual training for a previously reserved job.
+
+        Requires that reserve_job() was called first and the job_id
+        matches the current reserved job.
+
+        Returns:
+            (success, message)
+        """
+        with self._state_lock:
+            if not self._validate_job_id(job_id):
+                return False, "Job ID mismatch or no reserved job"
+            if self._current_job.status != TrainingStatus.PREPARING:
+                return False, f"Job is not in PREPARING state (current: {self._current_job.status.value})"
+
+            adapter = self._current_adapter
+            job = self._current_job
 
         success, message = adapter.start(job, config)
 
         if success:
             with self._state_lock:
-                if self._current_job and self._current_job.job_id == job.job_id:
+                if self._current_job and self._current_job.job_id == job_id:
                     self._current_job.status = TrainingStatus.RUNNING
-                    self._notify_status_change(self._current_job)
+                    self._current_job.started_at = datetime.now()
+                    cbs = list(self._status_callbacks)
+            self._notify_status_change(self._current_job, cbs)
+            self._history_update(job_id, status=TrainingStatus.RUNNING.value,
+                                 started_at=self._current_job.started_at.isoformat() if self._current_job.started_at else None)
         else:
             with self._state_lock:
-                if self._current_job and self._current_job.job_id == job.job_id:
+                if self._current_job and self._current_job.job_id == job_id:
                     self._current_job.status = TrainingStatus.FAILED
                     self._current_job.error_message = message
-                    self._notify_status_change(self._current_job)
+                    cbs = list(self._status_callbacks)
                     self._cleanup_job()
+            self._notify_status_change(job, cbs)
 
         return success, message
 
+    def fail_reserved_job(self, job_id: str, error: str):
+        """Fail a job that is in PREPARING state (e.g., background prep failed)."""
+        with self._state_lock:
+            if not self._validate_job_id(job_id):
+                return
+            if self._current_job.status != TrainingStatus.PREPARING:
+                return
+
+            self._current_job.status = TrainingStatus.FAILED
+            self._current_job.error_message = error
+            job_ref = self._current_job
+            cbs = list(self._status_callbacks)
+            self._cleanup_job()
+
+        self._notify_status_change(job_ref, cbs)
+        self._history_finalize(job_id, TrainingStatus.FAILED, error_message=error)
+
     def request_stop(self) -> bool:
-        """Request to stop the current training job
+        """Request to stop the current training job.
+
+        For PREPARING state: cancels the reservation directly (STOPPED).
+        For RUNNING state: signals adapter.stop() and transitions to STOPPING.
 
         Returns:
-            True if stop signal sent successfully, False if already stopping or no job
+            True if stop initiated, False if nothing to stop.
         """
+        status_cbs = []
+        job_ref = None
+
         with self._state_lock:
             if self._current_job is None:
                 return False
 
-            # If already STOPPING, don't call adapter.stop again (idempotent)
             if self._current_job.status == TrainingStatus.STOPPING:
                 return False
 
-            # Only PREPARING or RUNNING can transition to STOPPING
             if not self._current_job.status.is_active():
                 return False
 
+            # PREPARING → STOPPED (no adapter activity to interrupt)
+            if self._current_job.status == TrainingStatus.PREPARING:
+                self._current_job.status = TrainingStatus.STOPPED
+                job_ref = self._current_job
+                status_cbs = list(self._status_callbacks)
+                self._cleanup_job()
+                self._notify_status_change(job_ref, status_cbs)
+                self._history_finalize(job_ref.job_id, TrainingStatus.STOPPED)
+                return True
+
+            # RUNNING → STOPPING (adapter.stop() will handle the rest)
             self._current_job.status = TrainingStatus.STOPPING
             adapter = self._current_adapter
-            self._notify_status_change(self._current_job)
+            status_cbs = list(self._status_callbacks)
 
+        self._notify_status_change(self._current_job, status_cbs)
         if adapter:
             return adapter.stop()
         return False
 
     def complete_job(self, job_id: str, **kwargs):
-        """Mark job as completed (idempotent)
-
-        Args:
-            job_id: Job ID to validate
-            **kwargs: Additional metadata to store
-        """
+        """Mark job as completed (idempotent)"""
+        job_ref = None
+        cbs = []
         with self._state_lock:
             if not self._validate_job_id(job_id):
                 return
@@ -142,18 +297,24 @@ class JobManager:
 
             if 'metadata' in kwargs:
                 self._current_job.metadata.update(kwargs['metadata'])
+                save_dir = kwargs['metadata'].get('save_dir', '')
+                if save_dir:
+                    self._current_job.output_directory = Path(save_dir)
 
-            self._notify_status_change(self._current_job)
+            job_ref = self._current_job
+            cbs = list(self._status_callbacks)
             self._cleanup_job()
 
-    def fail_job(self, job_id: str, error: str, **kwargs):
-        """Mark job as failed (idempotent)
+        self._notify_status_change(job_ref, cbs)
+        save_dir = kwargs.get('metadata', {}).get('save_dir', '')
+        self._history_finalize(job_id, TrainingStatus.COMPLETED,
+                               output_directory=save_dir or None,
+                               ended_at=kwargs.get('ended_at'))
 
-        Args:
-            job_id: Job ID to validate
-            error: Error message
-            **kwargs: Additional metadata to store
-        """
+    def fail_job(self, job_id: str, error: str, **kwargs):
+        """Mark job as failed (idempotent)"""
+        job_ref = None
+        cbs = []
         with self._state_lock:
             if not self._validate_job_id(job_id):
                 return
@@ -167,17 +328,24 @@ class JobManager:
 
             if 'metadata' in kwargs:
                 self._current_job.metadata.update(kwargs['metadata'])
+                save_dir = kwargs['metadata'].get('save_dir', '')
+                if save_dir:
+                    self._current_job.output_directory = Path(save_dir)
 
-            self._notify_status_change(self._current_job)
+            job_ref = self._current_job
+            cbs = list(self._status_callbacks)
             self._cleanup_job()
 
-    def stop_job(self, job_id: str, **kwargs):
-        """Mark job as stopped (idempotent)
+        self._notify_status_change(job_ref, cbs)
+        save_dir = kwargs.get('metadata', {}).get('save_dir', '')
+        self._history_finalize(job_id, TrainingStatus.FAILED, error_message=error,
+                               output_directory=save_dir or None,
+                               ended_at=kwargs.get('ended_at'))
 
-        Args:
-            job_id: Job ID to validate
-            **kwargs: Additional metadata to store
-        """
+    def stop_job(self, job_id: str, **kwargs):
+        """Mark job as stopped (idempotent)"""
+        job_ref = None
+        cbs = []
         with self._state_lock:
             if not self._validate_job_id(job_id):
                 return
@@ -190,9 +358,19 @@ class JobManager:
 
             if 'metadata' in kwargs:
                 self._current_job.metadata.update(kwargs['metadata'])
+                save_dir = kwargs['metadata'].get('save_dir', '')
+                if save_dir:
+                    self._current_job.output_directory = Path(save_dir)
 
-            self._notify_status_change(self._current_job)
+            job_ref = self._current_job
+            cbs = list(self._status_callbacks)
             self._cleanup_job()
+
+        self._notify_status_change(job_ref, cbs)
+        save_dir = kwargs.get('metadata', {}).get('save_dir', '')
+        self._history_finalize(job_id, TrainingStatus.STOPPED,
+                               output_directory=save_dir or None,
+                               ended_at=kwargs.get('ended_at'))
 
     def get_current_job(self) -> Optional[TrainingJob]:
         """Get current job (thread-safe read)"""
@@ -201,23 +379,27 @@ class JobManager:
 
     def subscribe_status(self, callback: Callable[[TrainingJob], None]):
         """Subscribe to job status changes"""
-        if callback not in self._status_callbacks:
-            self._status_callbacks.append(callback)
+        with self._state_lock:
+            if callback not in self._status_callbacks:
+                self._status_callbacks.append(callback)
 
     def unsubscribe_status(self, callback: Callable[[TrainingJob], None]):
         """Unsubscribe from job status changes"""
-        if callback in self._status_callbacks:
-            self._status_callbacks.remove(callback)
+        with self._state_lock:
+            if callback in self._status_callbacks:
+                self._status_callbacks.remove(callback)
 
     def subscribe_events(self, callback: Callable[[TrainingEvent], None]):
         """Subscribe to training events"""
-        if callback not in self._event_callbacks:
-            self._event_callbacks.append(callback)
+        with self._state_lock:
+            if callback not in self._event_callbacks:
+                self._event_callbacks.append(callback)
 
     def unsubscribe_events(self, callback: Callable[[TrainingEvent], None]):
         """Unsubscribe from training events"""
-        if callback in self._event_callbacks:
-            self._event_callbacks.remove(callback)
+        with self._state_lock:
+            if callback in self._event_callbacks:
+                self._event_callbacks.remove(callback)
 
     def _validate_job_id(self, job_id: str) -> bool:
         """Validate job_id matches current job"""
@@ -228,15 +410,34 @@ class JobManager:
         return True
 
     def _cleanup_job(self):
-        """Cleanup after job reaches terminal state"""
+        """Cleanup after job reaches terminal state.
+
+        Caller MUST hold _state_lock. Adapter shutdown is deferred
+        outside the lock to avoid blocking other threads.
+        """
+        adapter_to_shutdown = None
         if self._current_adapter:
             self._current_adapter.unsubscribe(self._on_adapter_event)
+            if hasattr(self._current_adapter, 'shutdown'):
+                adapter_to_shutdown = self._current_adapter
 
         self._current_adapter = None
         self._current_job = None
 
+        # Shutdown adapter outside lock to avoid blocking
+        if adapter_to_shutdown is not None:
+            try:
+                adapter_to_shutdown.shutdown()
+            except Exception:
+                pass
+
     def _on_adapter_event(self, event: TrainingEvent):
-        """Forward adapter events to subscribers"""
+        """Forward adapter events to subscribers — NO lock held for dispatch.
+
+        Terminal events (COMPLETED/FAILED/STOPPED) update job state
+        and notify status callbacks (lock-free). Event callbacks are
+        dispatched lock-free with a snapshot.
+        """
         if event.event_type == TrainingEventType.COMPLETED:
             self.complete_job(
                 event.job_id,
@@ -257,17 +458,31 @@ class JobManager:
                 metadata=event.payload
             )
 
-        for callback in self._event_callbacks[:]:
+        self._notify_event_callbacks(event)
+
+    def _notify_status_change(self, job: TrainingJob, callbacks: list):
+        """Notify subscribers of status change — NO lock held.
+
+        Args:
+            job: The job with updated status (caller's snapshot).
+            callbacks: Pre-snapshotted list of status callbacks.
+        """
+        for callback in callbacks:
             try:
-                callback(event)
+                callback(job)
             except Exception:
                 pass
 
-    def _notify_status_change(self, job: TrainingJob):
-        """Notify subscribers of status change"""
-        for callback in self._status_callbacks[:]:
+    def _notify_event_callbacks(self, event: TrainingEvent):
+        """Dispatch event to subscribers — NO lock held.
+
+        Snapshots event callbacks under lock, then dispatches outside.
+        """
+        with self._state_lock:
+            cbs = list(self._event_callbacks)
+        for callback in cbs:
             try:
-                callback(job)
+                callback(event)
             except Exception:
                 pass
 

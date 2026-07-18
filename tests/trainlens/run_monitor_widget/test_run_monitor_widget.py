@@ -53,7 +53,7 @@ class TestRunMonitorWidgetCreation:
         assert widget.envs_label is not None
         assert widget.status_label is not None
         assert widget.script_combo is not None
-        assert widget.python_combo is not None
+        assert widget.python_path_edit is not None
         assert widget.args_edit is not None
         assert widget.console_output is not None
         assert widget.resources_label is not None
@@ -98,6 +98,7 @@ class TestRunMonitorWidgetCallbacks:
         callback = Mock()
         widget.on_run_start = callback
 
+        import sys as _sys
         # Mock workspace and environment
         widget.workspace = Mock(spec=Workspace)
         widget.workspace.path = Path("/tmp/workspace")
@@ -105,15 +106,15 @@ class TestRunMonitorWidgetCallbacks:
         widget.workspace.detected_environments = []
 
         # Simulate successful start
-        with patch('anylabeling.services.run_monitor.process_manager.ProcessManager.start', return_value=True):
-            with patch('anylabeling.services.training_center.job_manager.JobManager.request_start', return_value=(True, "Started")):
-                widget.script_combo.addItem("train.py", Mock(spec=DetectedScript, path=Path("/tmp/workspace/train.py"), framework="test"))
-                widget.python_combo.addItem("Python 3.12", Mock(spec=PythonEnvironment, python_path=Path("/usr/bin/python3")))
-                widget.script_combo.setEnabled(True)
-                widget.python_combo.setEnabled(True)
-                widget.start_btn.setEnabled(True)
+        with patch('subprocess.run', return_value=Mock(returncode=0)):
+            with patch('anylabeling.services.run_monitor.process_manager.ProcessManager.start', return_value=True):
+                with patch('anylabeling.services.training_center.job_manager.JobManager.request_start', return_value=(True, "Started")):
+                    widget.script_combo.addItem("train.py", Mock(spec=DetectedScript, path=Path("/tmp/workspace/train.py"), framework="test"))
+                    widget.python_path_edit.setText(_sys.executable)
+                    widget.script_combo.setEnabled(True)
+                    widget._update_start_button()
 
-                widget._on_start_training()
+                    widget._on_start_training()
 
         assert callback.called
         assert callback.call_count == 1
@@ -141,18 +142,16 @@ class TestRunMonitorWidgetCallbacks:
             framework="custom"
         )
 
-        # Mock history_store.finalize_job to avoid KeyError
-        with patch.object(widget.history_store, 'finalize_job'):
-            # Simulate COMPLETED event
-            event = TrainingEvent(
-                schema_version=1,
-                job_id="test-run-001",
-                event_type=TrainingEventType.COMPLETED,
-                timestamp=time.time(),
-                payload={'exit_code': 0},
-                source='test'
-            )
-            widget._on_training_event(event)
+        # Simulate COMPLETED event
+        event = TrainingEvent(
+            schema_version=1,
+            job_id="test-run-001",
+            event_type=TrainingEventType.COMPLETED,
+            timestamp=time.time(),
+            payload={'exit_code': 0},
+            source='test'
+        )
+        widget._on_training_event(event)
 
         assert callback.called
         assert callback.call_args[0][0] == 0

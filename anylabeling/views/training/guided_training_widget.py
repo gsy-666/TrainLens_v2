@@ -6,26 +6,28 @@ import platform
 import re
 import shutil
 import subprocess
+from pathlib import Path
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QObject, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtWidgets import (
-    QVBoxLayout,
-    QHBoxLayout,
-    QTabWidget,
-    QWidget,
-    QPushButton,
-    QLabel,
-    QMessageBox,
-    QScrollArea,
-    QGroupBox,
+    QApplication,
+    QDialog,
     QFileDialog,
     QFormLayout,
     QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QMessageBox,
     QProgressBar,
-    QTextEdit,
-    QApplication,
+    QPushButton,
+    QScrollArea,
     QSizePolicy,
+    QTabWidget,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
 )
 
 from anylabeling.config import get_config
@@ -52,12 +54,47 @@ from anylabeling.services.auto_training.ultralytics.trainer import (
     TrainingLogRedirector,
     get_training_manager,
 )
+from anylabeling.views.training.metrics import TrainingMetricsDashboard
+from anylabeling.services.training_center.preflight.models import (
+    GuidedPreflightContext,
+)
+from anylabeling.services.training_center.preflight.worker import PreflightWorker
+from anylabeling.views.training.preflight_dialog import PreflightDialog
 from anylabeling.services.auto_training.ultralytics.utils import *
 from anylabeling.services.auto_training.ultralytics.validators import (
     validate_basic_config,
     validate_data_file,
     validate_task_requirements,
 )
+from anylabeling.services.training_center.job_manager import get_job_manager
+from anylabeling.services.training_center.models import TrainingJob, TrainingMode, TrainingStatus
+from anylabeling.services.training_center.adapters.ultralytics_adapter import UltralyticsAdapter
+from anylabeling.services.training_center.event_protocol import TrainingEventType
+
+
+class _TrainingPrepWorker(QObject):
+    """Background worker for dataset creation + training args preparation.
+
+    Runs on a QThread to keep the GUI responsive during
+    create_yolo_dataset() — which copies images, parses labels,
+    and writes YAML — all of which are synchronous file I/O.
+    """
+
+    finished = pyqtSignal(dict)   # train_args on success
+    error = pyqtSignal(str)       # error message on failure
+
+    def __init__(self, widget, config):
+        super().__init__()
+        self.widget = widget
+        self.config = config
+
+    def run(self):
+        """Execute get_training_args() on background thread."""
+        try:
+            train_args = self.widget.get_training_args(self.config)
+            self.finished.emit(train_args)
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 class GuidedTrainingWidget(QWidget):
@@ -67,23 +104,16 @@ class GuidedTrainingWidget(QWidget):
         image_list=None,
         output_dir=None,
         supported_shape=None,
-        job_manager=None,
-        ultralytics_adapter=None,
-        history_store=None
+        open_folder_callback=None,
+        image_list_getter=None,
     ):
         super().__init__(parent)
 
-        # Dependency injection - use provided or get singletons
-        from anylabeling.services.training_center.job_manager import get_job_manager
-        from anylabeling.services.training_center.adapters.ultralytics_adapter import UltralyticsAdapter
-        from anylabeling.services.training_center.history import get_history_store
+        # Store callbacks for explicit dependency injection (no parent() chain)
+        self._open_folder_callback = open_folder_callback
+        self._image_list_getter = image_list_getter
 
-        self.job_manager = job_manager if job_manager is not None else get_job_manager()
-        self.ultralytics_adapter = ultralytics_adapter if ultralytics_adapter is not None else UltralyticsAdapter()
-        self.history_store = history_store if history_store is not None else get_history_store()
-        self._current_job_id = None
-
-        # Accept parameters directly or from parent
+        # Accept parameters directly or from parent (backward compat)
         if parent is not None and hasattr(parent, 'image_list'):
             self.image_list = parent.image_list
             self.output_dir = parent.output_dir
@@ -117,8 +147,18 @@ class GuidedTrainingWidget(QWidget):
             self.event_redirector.emit_training_event
         ]
 
-        # Subscribe to unified training events from JobManager
-        self.job_manager.subscribe_events(self._on_unified_training_event)
+        # Integrated JobManager for mutual exclusion with Run Monitor
+        self.job_manager = get_job_manager()
+        self.job_manager.subscribe_events(self._on_training_event_from_job)
+        self.job_manager.subscribe_status(self._on_job_status_change)
+
+        # Two-phase prepare start (background dataset creation)
+        self._prep_thread = None
+        self._prep_worker = None
+        self._prep_job_id = None
+        self._prep_adapter = None
+        self._pending_project_path = None
+        self._pending_name = None
 
         # Export related attributes
         self.export_log_redirector = ExportLogRedirector()
@@ -139,6 +179,15 @@ class GuidedTrainingWidget(QWidget):
         self.image_timer = QTimer()
         self.image_timer.timeout.connect(self.update_training_images)
         self.current_project_path = None
+
+        # Metrics dashboard (lazy-init on first use)
+        self._metrics_dashboard = None  # TrainingMetricsDashboard
+
+        # Preflight state
+        self._preflight_worker: Optional[PreflightWorker] = None
+        self._preflight_thread: Optional[QThread] = None
+        self._preflight_result = None
+        self._preflight_running = False
         self.training_status = "idle"  # idle, training, completed, error
         self.current_epochs = 0
 
@@ -147,11 +196,11 @@ class GuidedTrainingWidget(QWidget):
             self.project_readonly = (
                 app_config.get("training", {})
                 .get("ultralytics", {})
-                .get("project_readonly", True)
+                .get("project_readonly", False)
             )
         except Exception:
             # Fallback for tests or when config is unavailable
-            self.project_readonly = True
+            self.project_readonly = False
 
         self.init_ui()
         self.setStyleSheet(get_ultralytics_dialog_style())
@@ -162,16 +211,40 @@ class GuidedTrainingWidget(QWidget):
         self.data_tab = QWidget()
         self.config_tab = QWidget()
         self.train_tab = QWidget()
+        self.metrics_tab = QWidget()  # placeholder, dashboard lazy-init
 
         self.tab_widget = QTabWidget()
         self.tab_widget.addTab(self.data_tab, self.tr("Data"))
         self.tab_widget.addTab(self.config_tab, self.tr("Config"))
         self.tab_widget.addTab(self.train_tab, self.tr("Train"))
-        self.tab_widget.tabBar().setEnabled(False)
+        self.tab_widget.addTab(self.metrics_tab, self.tr("Metrics"))
+        self.tab_widget.setTabVisible(3, False)  # hidden until training starts
+
+        # Stage gating: Data starts enabled, Config/Train require data check
+        self._data_check_passed = False
+        self._config_completed = False
+        self._update_stage_gates()
+
+        # Config controls: disabled during PREPARING / RUNNING / STOPPING
+        self._training_config_controls = []  # populated on first use
         main_layout = QVBoxLayout(self)
         main_layout.addWidget(self.tab_widget)
 
         self.init_data_tab()
+
+    def _update_stage_gates(self):
+        """Enable/disable tabs based on current stage.
+
+        Data tab always enabled. Config enabled after Data Check passes.
+        Train enabled after Config is completed. Metrics shown during training.
+        Next button always enabled — navigation is gated by click handler.
+        """
+        data_ok = self._data_check_passed
+        config_ok = self._config_completed
+
+        self.tab_widget.setTabEnabled(0, True)   # Data always enabled
+        self.tab_widget.setTabEnabled(1, data_ok)  # Config: data must pass
+        self.tab_widget.setTabEnabled(2, data_ok and config_ok)  # Train: both
 
     def ensure_config_tab_initialized(self):
         if self._config_tab_initialized:
@@ -184,6 +257,68 @@ class GuidedTrainingWidget(QWidget):
             return
         self.init_train_tab()
         self._train_tab_initialized = True
+
+    # ── Config control management ───────────────────────────────────
+
+    def _gather_config_controls(self) -> list:
+        """Return all controls that modify training config (cached after first call)."""
+        if self._training_config_controls:
+            return self._training_config_controls
+
+        controls = []
+
+        # Data tab: task type buttons
+        for btn in getattr(self, 'task_type_buttons', {}).values():
+            if hasattr(btn, 'isEnabled'):
+                controls.append(btn)
+
+        # Data tab: load images button
+        if hasattr(self, 'load_images_button'):
+            controls.append(self.load_images_button)
+
+        # Config tab: all config_widgets
+        for w in getattr(self, 'config_widgets', {}).values():
+            if hasattr(w, 'isEnabled'):
+                controls.append(w)
+
+        # Config tab: import/save buttons
+        for attr in ('_import_btn', '_save_config_btn', '_previous_btn', '_train_btn'):
+            w = getattr(self, attr, None)
+            if w is not None and hasattr(w, 'isEnabled'):
+                controls.append(w)
+
+        # Train tab: start button, previous button
+        for attr in ('start_training_button', 'previous_button'):
+            w = getattr(self, attr, None)
+            if w is not None and hasattr(w, 'isEnabled'):
+                controls.append(w)
+
+        self._training_config_controls = [c for c in controls if c is not None]
+        return self._training_config_controls
+
+    def _set_config_controls_enabled(self, enabled: bool):
+        """Enable/disable only configuration-changing controls.
+
+        Does NOT touch: tab bar, stop button, console, metrics dashboard,
+        export button, or Training Center top-level tabs.
+        """
+        for control in self._gather_config_controls():
+            try:
+                control.setEnabled(enabled)
+            except RuntimeError:
+                pass  # control was deleted
+
+    def _ensure_metrics_dashboard(self) -> TrainingMetricsDashboard:
+        """Lazy-init the metrics dashboard on the Metrics tab."""
+        if self._metrics_dashboard is not None:
+            return self._metrics_dashboard
+        from anylabeling.views.training.metrics import TrainingMetricsDashboard
+
+        self._metrics_dashboard = TrainingMetricsDashboard()
+        layout = QVBoxLayout(self.metrics_tab)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.addWidget(self._metrics_dashboard)
+        return self._metrics_dashboard
 
     def save_training_logs_to_file(self):
         """Save training logs to a local file with timestamp"""
@@ -226,18 +361,17 @@ class GuidedTrainingWidget(QWidget):
 
     def shutdown(self) -> None:
         """Shutdown widget and cleanup resources (idempotent)"""
-        # Unsubscribe from job manager events
-        try:
-            self.job_manager.unsubscribe_events(self._on_unified_training_event)
-        except Exception:
-            pass
-
-        # Only stop training if it belongs to guided mode
-        current_job = self.job_manager.get_current_job()
-        if current_job and current_job.job_id == self._current_job_id:
-            from anylabeling.services.training_center.models import TrainingMode
-            if current_job.mode == TrainingMode.GUIDED_ULTRALYTICS:
-                self.job_manager.request_stop()
+        # Stop background prep thread if running
+        if hasattr(self, '_prep_thread') and self._prep_thread is not None:
+            try:
+                self._prep_thread.quit()
+                self._prep_thread.wait(1000)
+            except Exception:
+                pass
+            self._prep_thread = None
+            self._prep_worker = None
+            self._prep_job_id = None
+            self._prep_adapter = None
 
         # Save logs if needed
         if self.training_status in ["completed", "error", "stop"]:
@@ -277,6 +411,7 @@ class GuidedTrainingWidget(QWidget):
             self.ensure_config_tab_initialized()
         if index >= 2:
             self.ensure_train_tab_initialized()
+        self._update_stage_gates()  # refresh gate state before switching
         self.tab_widget.setCurrentIndex(index)
 
     # Data Tab
@@ -338,6 +473,7 @@ class GuidedTrainingWidget(QWidget):
 
         self.refresh_dataset_summary()
         self.update_labeled_images_hint()
+        self._invalidate_data_check()
 
     def create_task_handler(self, task_type):
         def handler():
@@ -466,13 +602,155 @@ class GuidedTrainingWidget(QWidget):
         self._detection_cache = None
         self._valid_image_count_cache.clear()
         self._summary_view_mode = None
+        self._invalidate_data_check()
+
+    def _invalidate_data_check(self):
+        """Invalidate Data Check result when data/task changes."""
+        if hasattr(self, '_data_check_passed') and self._data_check_passed:
+            self._data_check_passed = False
+            self._config_completed = False
+            self._update_stage_gates()
+
+    def _run_data_check(self):
+        """Run Data Check — only data-related checks (no model/device/output).
+
+        Stores result in _preflight_result and updates stage gates.
+        Shows a non-blocking summary via QMessageBox if UI is interactive.
+        """
+        from anylabeling.services.training_center.preflight.models import (
+            PreflightResult, PreflightIssue, PreflightSeverity, GuidedPreflightContext,
+        )
+        from anylabeling.services.training_center.preflight.guided_yaml import (
+            check_yaml_dataset_paths, check_yaml_structure, read_yaml_safe,
+        )
+        from anylabeling.services.training_center.preflight.guided_detect_labels import (
+            check_detect_labels,
+        )
+
+        task_type = self.selected_task_type or ""
+        image_count = len(self.image_list) if self.image_list else 0
+
+        result = PreflightResult(mode="data_check")
+
+        # Image count
+        if image_count == 0:
+            result.add(PreflightIssue(
+                code="NO_IMAGES_LOADED", severity=PreflightSeverity.ERROR,
+                title="No images loaded",
+                message="Please load images before checking the dataset.",
+            ))
+
+        # Valid labeled images
+        if task_type and image_count > 0:
+            from anylabeling.services.auto_training.ultralytics.config import MIN_LABELED_IMAGES_THRESHOLD
+            from anylabeling.services.auto_training.ultralytics.validators import get_task_valid_images
+            valid = get_task_valid_images(self.image_list, task_type, self.output_dir)
+            if valid < MIN_LABELED_IMAGES_THRESHOLD:
+                result.add(PreflightIssue(
+                    code="INSUFFICIENT_VALID_IMAGES", severity=PreflightSeverity.ERROR,
+                    title=f"Only {valid} valid labeled images found",
+                    message=f"At least {MIN_LABELED_IMAGES_THRESHOLD} valid labeled images required. Found: {valid}.",
+                    suggestion="Add more labeled images or check label format.",
+                ))
+            else:
+                result.add(PreflightIssue(
+                    code="VALID_IMAGES_OK", severity=PreflightSeverity.PASS,
+                    title=f"{valid} valid labeled images",
+                    message=f"Valid labeled images: {valid} (required: {MIN_LABELED_IMAGES_THRESHOLD}).",
+                ))
+
+        # Dataset YAML + label checks (if config available)
+        if hasattr(self, 'config_widgets') and self.config_widgets:
+            config = self.get_current_config()
+            yaml_path = config.get("basic", {}).get("data", "")
+            if yaml_path and os.path.isfile(yaml_path):
+                yaml_data, yaml_error = read_yaml_safe(yaml_path)
+                if yaml_error:
+                    result.add(PreflightIssue(
+                        code="YAML_READ_ERROR", severity=PreflightSeverity.ERROR,
+                        title="Cannot read dataset YAML",
+                        message=yaml_error, path=yaml_path,
+                    ))
+                elif yaml_data:
+                    check_yaml_structure(result, yaml_path, yaml_data)
+                    check_yaml_dataset_paths(result, yaml_path, yaml_data)
+                    check_detect_labels(result, yaml_path, yaml_data, task_type)
+
+        self._preflight_result = result
+
+        # Update gates
+        if result.can_start:
+            self._data_check_passed = True
+            self._update_stage_gates()
+            QMessageBox.information(
+                self, self.tr("Data Check Passed"),
+                self.tr(f"Data check completed successfully.\n{result.summary()}"),
+            )
+        else:
+            self._data_check_passed = False
+            self._update_stage_gates()
+            # Show errors as QMessageBox
+            error_msgs = "\n".join(
+                f"• [{i.severity.value.upper()}] {i.title}" for i in result.errors()
+            )
+            if error_msgs:
+                QMessageBox.critical(
+                    self, self.tr("Data Check Failed"),
+                    self.tr(f"Data check found issues:\n\n{error_msgs}\n\n"
+                            f"Please fix these issues and re-run Check Dataset."),
+                )
 
     def load_images(self):
-        self.parent().open_folder_dialog()
-        self.image_list = self.parent().image_list
+        """Load images via the host's folder dialog callback.
+
+        Uses explicit callback injection — no parent() chain traversal.
+        """
+        if not callable(self._open_folder_callback):
+            QMessageBox.information(
+                self,
+                self.tr("Load Images"),
+                self.tr("Image loading is not available in standalone mode."),
+            )
+            return
+
+        previous_images = list(self.image_list) if self.image_list else []
+
+        # Invoke the host's folder dialog
+        self._open_folder_callback()
+
+        # Sync latest image list from host
+        if callable(self._image_list_getter):
+            latest_images = self._image_list_getter()
+            if latest_images:
+                self.image_list = list(latest_images)
+            elif previous_images:
+                # User cancelled — restore previous list
+                self.image_list = previous_images
+        elif previous_images:
+            self.image_list = previous_images
+
         self.clear_cache()
         self.refresh_dataset_summary()
         self.update_labeled_images_hint()
+
+    def sync_image_list_from_host(self):
+        """Pull latest image_list from the host via image_list_getter.
+
+        Returns:
+            True if sync succeeded, False otherwise.
+        """
+        if not callable(self._image_list_getter):
+            return False
+
+        images = self._image_list_getter()
+        if images is None:
+            return False
+
+        self.image_list = list(images)
+        self.clear_cache()
+        self.refresh_dataset_summary()
+        self.update_labeled_images_hint()
+        return True
 
     def init_dataset_summary(self, parent_layout):
         summary_widget = QWidget()
@@ -484,23 +762,91 @@ class GuidedTrainingWidget(QWidget):
         parent_layout.addWidget(summary_widget, 1)
 
     def proceed_to_config(self):
+        """Handle Next button click with clear feedback for each state.
+
+        Gating order:
+        1. No images loaded → tell user to load images
+        2. Images loaded but < required → show current vs required count
+        3. Data Check not done → prompt to run Check Dataset
+        4. Data Check has ERROR → re-show last result
+        5. Data Check PASS → navigate to Config
+        """
+        from anylabeling.services.auto_training.ultralytics.config import MIN_LABELED_IMAGES_THRESHOLD
+
+        task_type = self.selected_task_type or ""
+
+        # 1. No images loaded
+        if not self.image_list:
+            self._show_data_gate_message(
+                self.tr("No Images Loaded"),
+                self.tr("Load images before continuing.\n\n"
+                        f"At least {MIN_LABELED_IMAGES_THRESHOLD} valid labeled images are required."),
+            )
+            return
+
+        # 2. Count valid images
+        from anylabeling.services.auto_training.ultralytics.validators import get_task_valid_images
+        if task_type:
+            valid = get_task_valid_images(self.image_list, task_type, self.output_dir)
+        else:
+            valid = 0
+
+        if valid < MIN_LABELED_IMAGES_THRESHOLD:
+            self._show_data_gate_message(
+                self.tr("Not Enough Valid Images"),
+                self.tr(f"Current valid images: {valid}\n"
+                        f"Required valid images: {MIN_LABELED_IMAGES_THRESHOLD}\n\n"
+                        f"Load or label more images before continuing."),
+            )
+            return
+
+        # 3. Data Check not performed yet
+        if not self._data_check_passed:
+            # Auto-run Data Check
+            self._run_data_check()
+            if self._data_check_passed:
+                # Check passed → proceed
+                pass  # Fall through to navigation
+            elif self._preflight_result and self._preflight_result.has_errors:
+                # ERROR → re-show last result
+                self._show_data_gate_message(
+                    self.tr("Data Check Failed"),
+                    self.tr("The dataset check found errors:\n\n") +
+                    "\n".join(f"• {i.title}" for i in self._preflight_result.errors()),
+                )
+                return
+            else:
+                # Warnings or cancelled → let user try again
+                return
+
+        # 4. Navigate to Config
         is_valid, error_message = validate_task_requirements(
             self.selected_task_type, self.image_list, self.output_dir
         )
         if not is_valid:
-            QMessageBox.warning(
-                self, self.tr("Validation Error"), error_message
+            self._show_data_gate_message(
+                self.tr("Validation Error"), error_message,
             )
             return
 
         self.ensure_config_tab_initialized()
-        project = os.path.join(
-            get_default_project_dir(), self.selected_task_type.lower()
-        )
-        self.config_widgets["project"].setText(project)
+        current_project = self.config_widgets["project"].text().strip()
+        if not current_project:
+            current_project = os.path.join(
+                get_default_project_dir(), self.selected_task_type.lower()
+            )
+            self.config_widgets["project"].setText(current_project)
         self.config_widgets["project"].setReadOnly(self.project_readonly)
 
         self.go_to_specific_tab(1)
+
+    def _show_data_gate_message(self, title: str, message: str):
+        """Show a data gate message to the user.
+
+        Production: uses QMessageBox.warning.
+        Tests can patch this method to avoid modal dialogs blocking.
+        """
+        QMessageBox.warning(self, title, message)
 
     def init_actions(self, parent_layout):
         actions_layout = QHBoxLayout()
@@ -508,6 +854,11 @@ class GuidedTrainingWidget(QWidget):
         self.load_images_button = SecondaryButton(self.tr("Load Images"))
         self.load_images_button.clicked.connect(self.load_images)
         actions_layout.addWidget(self.load_images_button)
+
+        self.check_dataset_button = SecondaryButton(self.tr("Check Dataset"))
+        self.check_dataset_button.clicked.connect(self._run_data_check)
+        actions_layout.addWidget(self.check_dataset_button)
+
         actions_layout.addStretch()
 
         self.next_button = PrimaryButton(self.tr("Next"))
@@ -542,6 +893,13 @@ class GuidedTrainingWidget(QWidget):
         )
         if file_path:
             self.config_widgets["model"].setText(file_path)
+
+    def browse_project_dir(self):
+        dir_path = QFileDialog.getExistingDirectory(
+            self, self.tr("Select Project Directory"), ""
+        )
+        if dir_path:
+            self.config_widgets["project"].setText(dir_path)
 
     def browse_data_file(self):
         if self.selected_task_type == "Classify":
@@ -634,6 +992,7 @@ class GuidedTrainingWidget(QWidget):
         )
         layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
 
+        project_layout = QHBoxLayout()
         self.config_widgets["project"] = CustomLineEdit()
         selected_task_type = (
             self.selected_task_type.lower()
@@ -644,7 +1003,11 @@ class GuidedTrainingWidget(QWidget):
             get_default_project_dir(), selected_task_type
         )
         self.config_widgets["project"].setText(text_project)
-        layout.addRow("Project:", self.config_widgets["project"])
+        project_browse_btn = SecondaryButton("Browse")
+        project_browse_btn.clicked.connect(self.browse_project_dir)
+        project_layout.addWidget(self.config_widgets["project"])
+        project_layout.addWidget(project_browse_btn)
+        layout.addRow("Project:", project_layout)
 
         self.config_widgets["name"] = CustomLineEdit()
         self.config_widgets["name"].setText("exp")
@@ -1238,10 +1601,10 @@ class GuidedTrainingWidget(QWidget):
 
         config = {
             "basic": {
-                "project": get_widget_value("project"),
-                "name": get_widget_value("name"),
-                "model": get_widget_value("model").strip('"'),
-                "data": get_widget_value("data").strip('"'),
+                "project": get_widget_value("project") or "",
+                "name": get_widget_value("name") or "",
+                "model": (get_widget_value("model") or "").strip('"'),
+                "data": (get_widget_value("data") or "").strip('"'),
                 "device": get_widget_value("device"),
                 "dataset_ratio": (
                     get_widget_value("dataset_ratio") / 100.0
@@ -1257,7 +1620,7 @@ class GuidedTrainingWidget(QWidget):
                 "workers": get_widget_value("workers"),
                 "single_cls": get_widget_value("single_cls"),
                 "classes": parse_string_to_digit_list(
-                    get_widget_value("classes")
+                    get_widget_value("classes") or ""
                 ),
             },
             "strategy": {
@@ -1442,27 +1805,29 @@ class GuidedTrainingWidget(QWidget):
             self.training_status == "idle"
 
         save_config(config)
+        self._config_completed = True
+        self._update_stage_gates()
         self.go_to_specific_tab(2)
 
     def init_config_buttons(self, parent_layout):
         button_layout = QHBoxLayout()
 
-        import_btn = SecondaryButton(self.tr("Import Config"))
-        import_btn.clicked.connect(self.import_config)
-        button_layout.addWidget(import_btn)
+        self._import_btn = SecondaryButton(self.tr("Import Config"))
+        self._import_btn.clicked.connect(self.import_config)
+        button_layout.addWidget(self._import_btn)
 
-        save_btn = SecondaryButton(self.tr("Save Config"))
-        save_btn.clicked.connect(self.save_current_config)
-        button_layout.addWidget(save_btn)
+        self._save_config_btn = SecondaryButton(self.tr("Save Config"))
+        self._save_config_btn.clicked.connect(self.save_current_config)
+        button_layout.addWidget(self._save_config_btn)
         button_layout.addStretch()
 
-        previous_btn = SecondaryButton(self.tr("Previous"))
-        previous_btn.clicked.connect(lambda: self.go_to_specific_tab(0))
-        button_layout.addWidget(previous_btn)
+        self._previous_btn = SecondaryButton(self.tr("Previous"))
+        self._previous_btn.clicked.connect(lambda: self.go_to_specific_tab(0))
+        button_layout.addWidget(self._previous_btn)
 
-        train_btn = PrimaryButton(self.tr("Next"))
-        train_btn.clicked.connect(self.start_training)
-        button_layout.addWidget(train_btn)
+        self._train_btn = PrimaryButton(self.tr("Next"))
+        self._train_btn.clicked.connect(self.start_training)
+        button_layout.addWidget(self._train_btn)
 
         parent_layout.addLayout(button_layout)
 
@@ -1490,6 +1855,8 @@ class GuidedTrainingWidget(QWidget):
 
     # Train tab
     def update_training_status_display(self):
+        if not hasattr(self, 'status_label'):
+            return
         color = TRAINING_STATUS_COLORS.get(self.training_status, "#6c757d")
         text = self.tr(
             TRAINING_STATUS_TEXTS.get(self.training_status, "Unknown status")
@@ -1611,9 +1978,14 @@ class GuidedTrainingWidget(QWidget):
             self.training_status = "training"
             self.total_epochs = data["total_epochs"]
             self.current_epochs = 0
-            self.progress_bar.setValue(0)
-            self.progress_bar.setFormat(f"0/{self.total_epochs}")
+            # Guard: train tab may not be initialized yet (off-screen tests)
+            if hasattr(self, 'progress_bar'):
+                self.progress_bar.setValue(0)
+                self.progress_bar.setFormat(f"0/{self.total_epochs}")
             self.update_training_status_display()
+
+            # Disable ONLY config-changing controls, NOT tabs/metrics/console/stop
+            self._set_config_controls_enabled(False)
             self.start_training_button.setVisible(False)
             self.stop_training_button.setVisible(True)
             self.export_button.setVisible(False)
@@ -1621,8 +1993,24 @@ class GuidedTrainingWidget(QWidget):
             self.progress_timer.start(1000)
             self.image_timer.start(5000)
             self.append_training_log(self.tr("Training is about to start..."))
+
+            # Show Metrics tab and bind dashboard
+            dashboard = self._ensure_metrics_dashboard()
+            self.tab_widget.setTabVisible(3, True)
+            save_dir = data.get("save_dir") or self.current_project_path
+            dashboard.bind_job("guided", save_dir)
+            # Auto-switch to Train tab so user sees progress
+            self.tab_widget.setCurrentIndex(2)
+
         elif event_type == "training_completed":
             self.training_status = "completed"
+            real_save_dir = data.get("save_dir", "")
+            if real_save_dir and os.path.isdir(real_save_dir):
+                self.current_project_path = real_save_dir
+                # Update dashboard with real save_dir (may differ from predicted path)
+                if self._metrics_dashboard:
+                    self._metrics_dashboard.update_output_dir("guided", real_save_dir)
+            self._set_config_controls_enabled(True)
             self.update_training_status_display()
             self.stop_training_button.setVisible(False)
             self.start_training_button.setVisible(False)
@@ -1635,8 +2023,17 @@ class GuidedTrainingWidget(QWidget):
             self.append_training_log(
                 self.tr("Training completed successfully!")
             )
+            if self._metrics_dashboard:
+                self._metrics_dashboard.on_run_completed("guided")
+
         elif event_type == "training_error":
             self.training_status = "error"
+            real_save_dir = data.get("save_dir", "")
+            if real_save_dir and os.path.isdir(real_save_dir):
+                self.current_project_path = real_save_dir
+                if self._metrics_dashboard:
+                    self._metrics_dashboard.update_output_dir("guided", real_save_dir)
+            self._set_config_controls_enabled(True)
             self.update_training_status_display()
             self.start_training_button.setVisible(False)
             self.previous_button.setVisible(True)
@@ -1646,16 +2043,34 @@ class GuidedTrainingWidget(QWidget):
             self.image_timer.stop()
             error_msg = data.get("error", "Unknown error occurred")
             self.append_training_log(f"ERROR: {error_msg}")
+            if self._metrics_dashboard:
+                self._metrics_dashboard.on_run_stopped("guided")
+
         elif event_type == "training_stopped":
             self.training_status = "stop"
+            real_save_dir = data.get("save_dir", "")
+            if real_save_dir and os.path.isdir(real_save_dir):
+                self.current_project_path = real_save_dir
+                if self._metrics_dashboard:
+                    self._metrics_dashboard.update_output_dir("guided", real_save_dir)
+            self._set_config_controls_enabled(True)
             self.update_training_status_display()
-            self.start_training_button.setVisible(False)
+            self.start_training_button.setVisible(True)
+            self.start_training_button.setEnabled(True)
             self.previous_button.setVisible(True)
             self.stop_training_button.setVisible(False)
             self.export_button.setVisible(False)
             self.progress_timer.stop()
             self.image_timer.stop()
             self.append_training_log(self.tr("Training stopped by user"))
+            if self._metrics_dashboard:
+                self._metrics_dashboard.on_run_stopped("guided")
+
+        elif event_type == "epoch_metrics":
+            # Forward structured metrics to dashboard (real-time)
+            if self._metrics_dashboard:
+                self._metrics_dashboard.on_metric_event("guided", data)
+
         elif event_type == "training_log":
             log_message = data.get("message", "")
             if log_message:
@@ -1669,6 +2084,29 @@ class GuidedTrainingWidget(QWidget):
         if hasattr(self, "log_display"):
             text = clean_ansi_codes(text)
             self.log_display.append(text.strip())
+
+    def _on_training_event_from_job(self, event):
+        """Handle unified training events from JobManager."""
+        if event.event_type == TrainingEventType.CONSOLE_OUTPUT:
+            log_message = event.payload.get("message", "")
+            if log_message:
+                self.append_training_log(log_message)
+
+    def _on_job_status_change(self, job):
+        """Handle job status changes from JobManager."""
+        if job.status == TrainingStatus.RUNNING:
+            self.training_status = "training"
+            self.start_training_button.setVisible(False)
+            self.stop_training_button.setVisible(True)
+            self.export_button.setVisible(False)
+            self.previous_button.setVisible(False)
+        elif job.status.is_terminal():
+            self.start_training_button.setVisible(True)
+            self.start_training_button.setEnabled(True)
+            self.stop_training_button.setVisible(False)
+            self.previous_button.setVisible(True)
+            if job.status != TrainingStatus.FAILED:
+                self.export_button.setVisible(True)
 
     def init_training_status(self, parent_layout):
         status_group = QGroupBox(self.tr("Training Status"))
@@ -1856,6 +2294,11 @@ class GuidedTrainingWidget(QWidget):
         )
 
         if reply == QMessageBox.StandardButton.Yes:
+            # For PREPARING: cancel the background prep thread first
+            current = self.job_manager.get_current_job()
+            if current is not None and current.status == TrainingStatus.PREPARING:
+                self._cancel_prep_thread()
+
             success = self.job_manager.request_stop()
             if success:
                 if hasattr(self, 'stop_training_button'):
@@ -1863,6 +2306,23 @@ class GuidedTrainingWidget(QWidget):
                 self.append_training_log(self.tr("Stopping training..."))
             else:
                 self.append_training_log(self.tr("Cancel to stop training"))
+
+    def _cancel_prep_thread(self):
+        """Cancel the background preparation thread and invalidate the reservation."""
+        if self._prep_thread is None:
+            return
+        # Clear job_id first so late queued signals are dropped
+        self._prep_job_id = None
+        # Disconnect signals so finished/error don't fire after stop
+        if self._prep_worker is not None:
+            self._prep_worker.finished.disconnect(self._on_prep_finished)
+            self._prep_worker.error.disconnect(self._on_prep_error)
+        self._prep_thread.quit()
+        if not self._prep_thread.wait(3000):
+            self._prep_thread.terminate()
+            self._prep_thread.wait()
+        self._prep_thread = None
+        self._prep_worker = None
 
     def get_training_args(self, config):
         try:
@@ -1952,57 +2412,253 @@ class GuidedTrainingWidget(QWidget):
             )
             raise
 
-    def start_training_from_train_tab(self):
-        import time
-        from anylabeling.services.training_center.models import TrainingJob, TrainingMode, TrainingStatus
+    # ── Preflight ───────────────────────────────────────────────────
 
+    def _build_guided_preflight_context(self) -> GuidedPreflightContext:
+        """Build immutable preflight snapshot from current UI state."""
         config = self.get_current_config()
+        project = config["basic"].get("project", "")
+        name = config["basic"].get("name", "")
+        output_dir = os.path.join(project, name) if project and name else project
+        return GuidedPreflightContext(
+            task_type=self.selected_task_type or "",
+            model_path=config["basic"].get("model", ""),
+            dataset_yaml=config["basic"].get("data", ""),
+            epochs=config["train"].get("epochs", 100),
+            batch=config["train"].get("batch", 16),
+            imgsz=config["train"].get("imgsz", 640),
+            device=str(config["basic"].get("device", "cpu")),
+            output_dir=output_dir,
+            job_name=name,
+        )
+
+    def _run_full_preflight(self):
+        """Run preflight background check and show result dialog."""
+        if self._preflight_running:
+            return  # Prevent double-click
+
+        ctx = self._build_guided_preflight_context()
+        is_active = self.job_manager.get_current_job() is not None
+
+        self._preflight_running = True
+        self._preflight_result = None
+
+        # Create worker + thread
+        self._preflight_worker = PreflightWorker()
+        self._preflight_thread = QThread()
+        self._preflight_worker.moveToThread(self._preflight_thread)
+
+        # Dialog (shown immediately in "checking" mode)
+        from anylabeling.services.training_center.preflight import PreflightResult
+        dialog = PreflightDialog(PreflightResult(mode="guided"), self)
+        dialog.set_checking(True)
+
+        # Wire signals
+        self._preflight_worker.progress.connect(dialog.set_progress)
+        self._preflight_worker.finished.connect(
+            lambda result: self._on_preflight_finished(result, dialog)
+        )
+        self._preflight_thread.started.connect(
+            lambda: self._preflight_worker.run_guided(ctx, is_active)
+        )
+
+        # Internal lifecycle
+        self._preflight_worker.finished.connect(self._preflight_thread.quit)
+        self._preflight_thread.finished.connect(self._preflight_thread.deleteLater)
+
+        self._preflight_thread.start()
+        dialog.exec()
+
+        # Dialog closed
+        if self._preflight_worker:
+            self._preflight_worker.cancel()
+
+    def _on_preflight_finished(self, result, dialog):
+        """Handle preflight completion — update dialog and store result."""
+        self._preflight_running = False
+        self._preflight_result = result
+        dialog.update_result(result)
+
+        # Re-enable start button state
+        if hasattr(self, 'start_training_button'):
+            self.start_training_button.setEnabled(True)
+
+    def start_training_from_train_tab(self, skip_preflight: bool = False):
+        # Ensure config and train tabs are initialized
+        self.ensure_config_tab_initialized()
+        self.ensure_train_tab_initialized()
+
+        if self._preflight_running:
+            return
+
+        # Gate: must have passed Data Check
+        if not self._data_check_passed:
+            QMessageBox.warning(
+                self, self.tr("Check Required"),
+                self.tr("Please complete 'Check Dataset' on the Data page first."),
+            )
+            return
+
+        # Gate: config must be completed
+        if not self._config_completed:
+            QMessageBox.warning(
+                self, self.tr("Config Required"),
+                self.tr("Please complete the Config page first."),
+            )
+            return
+
+        # Run full preflight unless skipped
+        if not skip_preflight:
+            self._run_full_preflight()
+            if self._preflight_result is None:
+                return  # Dialog cancelled
+            if self._preflight_result.has_errors:
+                return  # Cannot start with errors
+            if self._preflight_result.has_warnings and not self._preflight_result.can_start:
+                return  # User didn't confirm
+        
+        # Fall through to original start logic
+        # Ensure config and train tabs are initialized
+        self.ensure_config_tab_initialized()
+        self.ensure_train_tab_initialized()
+
+        # ── Read UI config (GUI thread, fast) ──
+        try:
+            config = self.get_current_config()
+        except Exception as e:
+            QMessageBox.critical(self, self.tr("Config Error"), str(e))
+            return
+
         project_path = config["basic"]["project"]
         name = config["basic"]["name"]
         self.current_project_path = os.path.join(project_path, name)
 
-        try:
-            self.append_training_log(self.tr("Preparing training..."))
-            train_args = self.get_training_args(config)
+        # ── Phase 1: Reserve job manager slot atomically ──
+        job_id = f"guided_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        self.current_job = TrainingJob(
+            job_id=job_id,
+            mode=TrainingMode.GUIDED_ULTRALYTICS,
+            status=TrainingStatus.IDLE,  # reserve_job will set PREPARING
+            created_at=datetime.datetime.now(),
+            started_at=None,
+            ended_at=None,
+            workspace=project_path,
+            output_directory=Path(self.current_project_path),
+            display_name=f"Guided: {name}",
+            framework="ultralytics",
+            command=[],
+            metadata={},
+            error_message=None,
+            task=self.selected_task_type or "",
+            model=config["basic"].get("model", ""),
+            data=config["basic"].get("data", ""),
+            project=project_path,
+            name=name,
+        )
 
-            # Create TrainingJob with GUIDED_ULTRALYTICS mode
-            job_id = f"guided_{int(time.time() * 1000)}"
-            self._current_job_id = job_id
+        adapter = UltralyticsAdapter()
+        ok, msg = self.job_manager.reserve_job(self.current_job, adapter)
+        if not ok:
+            self.append_training_log(f"Failed to reserve job: {msg}")
+            QMessageBox.critical(self, self.tr("Training Busy"), msg)
+            self.current_job = None
+            return
 
-            job = TrainingJob(
-                job_id=job_id,
-                mode=TrainingMode.GUIDED_ULTRALYTICS,
-                status=TrainingStatus.IDLE,
-                display_name=f"{self.selected_task_type} - {name}",
-                framework="ultralytics",
-                metadata={
-                    "task": self.selected_task_type,
-                    "model": train_args.get("model", ""),
-                    "project": project_path,
-                    "name": name,
-                }
-            )
+        # Store for prep thread / late signal validation
+        self._prep_job_id = job_id
+        self._prep_adapter = adapter
 
-            # Request start through JobManager
-            success, message = self.job_manager.request_start(
-                job=job,
-                adapter=self.ultralytics_adapter,
-                config=train_args
-            )
+        # ── UI: preparing state ──
+        self.training_status = "preparing"
+        self.update_training_status_display()
+        self.append_training_log(self.tr("Preparing training..."))
+        self.start_training_button.setEnabled(False)
+        self.stop_training_button.setVisible(True)
+        self.export_button.setVisible(False)
+        self.previous_button.setVisible(False)
 
-            if not success:
-                self.append_training_log(
-                    f"Failed to start training: {message}"
-                )
-                QMessageBox.critical(self, self.tr("Training Error"), message)
-                self._current_job_id = None
-                return
+        # ── Phase 2: Run dataset creation in background thread ──
+        self._prep_thread = QThread(self)
+        self._prep_worker = _TrainingPrepWorker(self, config)
+        self._prep_worker.moveToThread(self._prep_thread)
 
-        except Exception as e:
-            error_msg = f"Failed to start training: {str(e)}"
-            self.append_training_log(f"ERROR: {error_msg}")
-            QMessageBox.critical(self, self.tr("Training Error"), error_msg)
-            self._current_job_id = None
+        self._prep_thread.started.connect(self._prep_worker.run)
+        self._prep_worker.finished.connect(self._on_prep_finished)
+        self._prep_worker.error.connect(self._on_prep_error)
+        self._prep_thread.finished.connect(self._prep_thread.deleteLater)
+
+        # Store config for adapter creation later
+        self._pending_project_path = project_path
+        self._pending_name = name
+
+        self._prep_thread.start()
+
+    def _on_prep_finished(self, train_args):
+        """Called on GUI thread after background preparation completes.
+
+        Validates that the job is still in PREPARING state (handles late
+        signals from cancelled threads) before starting via JobManager.
+        """
+        self._prep_thread.quit()
+        self._prep_thread.wait()
+        self._prep_thread = None
+        self._prep_worker = None
+
+        # Late-signal guard: only proceed if still reserved
+        if self._prep_job_id is None:
+            return
+
+        current = self.job_manager.get_current_job()
+        if current is None or current.job_id != self._prep_job_id:
+            self._prep_job_id = None
+            return
+        if current.status != TrainingStatus.PREPARING:
+            self._prep_job_id = None
+            return
+
+        success, message = self.job_manager.start_reserved_job(
+            job_id=self._prep_job_id,
+            config=train_args,
+        )
+        self._prep_job_id = None
+
+        if not success:
+            self.append_training_log(f"Failed to start training: {message}")
+            QMessageBox.critical(self, self.tr("Training Error"), message)
+            self._reset_start_ui()
+            return
+
+        self.append_training_log(self.tr(f"Training started: {message}"))
+
+    def _on_prep_error(self, error_msg):
+        """Called on GUI thread when background preparation fails."""
+        self._prep_thread.quit()
+        self._prep_thread.wait()
+        self._prep_thread = None
+        self._prep_worker = None
+
+        # Late-signal guard
+        if self._prep_job_id is None:
+            return
+
+        current = self.job_manager.get_current_job()
+        if current is not None and current.job_id == self._prep_job_id:
+            self.job_manager.fail_reserved_job(self._prep_job_id, error_msg)
+        self._prep_job_id = None
+
+        self.append_training_log(f"ERROR: {error_msg}")
+        QMessageBox.critical(self, self.tr("Training Error"), error_msg)
+        self._reset_start_ui()
+
+    def _reset_start_ui(self):
+        """Restore Start button state after preparation/startup failure."""
+        self.training_status = "idle"
+        self.update_training_status_display()
+        self.start_training_button.setEnabled(True)
+        self.start_training_button.setVisible(True)
+        self.stop_training_button.setVisible(False)
+        self.export_button.setVisible(False)
+        self.previous_button.setVisible(True)
 
     def init_training_actions(self, parent_layout):
         actions_layout = QHBoxLayout()
@@ -2010,6 +2666,11 @@ class GuidedTrainingWidget(QWidget):
         self.open_dir_button = SecondaryButton(self.tr("Open Directory"))
         self.open_dir_button.clicked.connect(self.open_training_directory)
         actions_layout.addWidget(self.open_dir_button)
+
+        self.run_check_button = SecondaryButton(self.tr("Run Check"))
+        self.run_check_button.clicked.connect(self._run_full_preflight)
+        actions_layout.addWidget(self.run_check_button)
+
         actions_layout.addStretch()
 
         self.stop_training_button = SecondaryButton(self.tr("Stop Training"))

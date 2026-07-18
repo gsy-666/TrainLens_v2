@@ -1158,13 +1158,11 @@ class LabelingWidget(LabelDialog):
             icon="ultralytics",
         )
 
-        # Run Monitor action
-        run_monitor = action(
-            self.tr("Run Monitor"),
-            self.open_run_monitor,
-            shortcuts.get("run_monitor", "Ctrl+Shift+R"),
-            "run",
-            self.tr("Open Run Monitor for training script execution and monitoring"),
+        # Ultralytics training action
+        ultralytics_train = action(
+            "Ultralytics",
+            lambda: self.start_training("ultralytics"),
+            icon="ultralytics",
         )
 
         zoom = QtWidgets.QWidgetAction(self)
@@ -2019,7 +2017,6 @@ class LabelingWidget(LabelDialog):
             export=self.menu(self.tr("Export")),
             tool=self.menu(self.tr("Tool")),
             train=self.menu(self.tr("Train")),
-            run=self.menu(self.tr("Run")),
             help=self.menu(self.tr("Help")),
             recent_files=QtWidgets.QMenu(self.tr("Open Recent")),
         )
@@ -2053,7 +2050,6 @@ class LabelingWidget(LabelDialog):
             ),
         )
         utils.add_actions(self.menus.train, (ultralytics_train,))
-        utils.add_actions(self.menus.run, (run_monitor,))
         utils.add_actions(
             self.menus.tool,
             (
@@ -3257,17 +3253,20 @@ class LabelingWidget(LabelDialog):
 
     # Trainer
     def start_training(self, mode):
+        """Open unified TrainingCenterWindow (non-modal).
+
+        Kept for backward-compatible toolbar action binding.
+        """
         if mode == "ultralytics":
-            dialog = UltralyticsDialog(self)
+            from anylabeling.views.training.training_center_window import open_training_center
+            open_training_center(
+                parent=self,
+                tab="guided",
+                open_folder_callback=self.open_folder_dialog,
+                image_list_getter=lambda: self.image_list,
+            )
         else:
             return
-
-        try:
-            _ = dialog.exec()
-        except Exception as e:
-            self.error_message(
-                "Start Error", f"Failed to start training dialog: {str(e)}"
-            )
 
     # Tools
     def overview(self):
@@ -3325,25 +3324,6 @@ class LabelingWidget(LabelDialog):
         self.vqa_window.show()
         self.vqa_window.raise_()
         self.vqa_window.activateWindow()
-
-    def open_run_monitor(self):
-        """Open Run Monitor window for training script execution and monitoring"""
-        from anylabeling.views.run_monitor import RunMonitorWindow
-
-        # Singleton pattern: reuse window if exists and valid
-        if not hasattr(self, 'run_monitor_window') or self.run_monitor_window is None:
-            self.run_monitor_window = RunMonitorWindow(parent=self)
-        else:
-            # Check if window was destroyed (C++ object deleted)
-            try:
-                self.run_monitor_window.isVisible()
-            except RuntimeError:
-                # Window was destroyed, recreate it
-                self.run_monitor_window = RunMonitorWindow(parent=self)
-
-        self.run_monitor_window.show()
-        self.run_monitor_window.raise_()
-        self.run_monitor_window.activateWindow()
 
     def open_paddleocr(self):
         if not hasattr(self, "ppocr_window") or self.ppocr_window is None:
