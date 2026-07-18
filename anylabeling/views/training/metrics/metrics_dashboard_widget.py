@@ -144,15 +144,49 @@ class TrainingMetricsDashboard(QWidget):
         self._schedule_refresh()
 
     def on_run_completed(self, job_id: str):
+        """Training completed — do final CSV read BEFORE stopping polling."""
         if job_id != self._current_job_id:
             return
-        self._poll_timer.stop()
-        self._store.finish_run(job_id)
+        # 1. Final poll while still active
         data = self._store.poll_csv()
+        if not data:
+            # Fallback: load directly from stored output_dir
+            run = self._store.get_run(job_id)
+            if run and run.output_dir:
+                data = self._store.load_from_output_dir(job_id, run.output_dir)
+        # 2. Stop live polling (data preserved)
+        self._poll_timer.stop()
+        # 3. Mark finished (clears active_job_id but keeps data + csv_path)
+        self._store.finish_run(job_id)
+        # 4. Refresh UI
         self._schedule_refresh()
 
     def on_run_stopped(self, job_id: str):
-        self.on_run_completed(job_id)
+        """Training stopped — same as completed: final read, stop poll, keep data."""
+        if job_id != self._current_job_id:
+            return
+        # Same flow as completed
+        data = self._store.poll_csv()
+        if not data:
+            run = self._store.get_run(job_id)
+            if run and run.output_dir:
+                data = self._store.load_from_output_dir(job_id, run.output_dir)
+        self._poll_timer.stop()
+        self._store.finish_run(job_id)
+        self._schedule_refresh()
+
+    def update_output_dir(self, job_id: str, output_dir: str):
+        """Update the output directory after training starts (real save_dir callback).
+
+        Called when the real ultralytics save_dir becomes known (differs from
+        the predicted project/name path). Re-binds the store's CSV path.
+        """
+        if job_id != self._current_job_id:
+            return
+        self._store.update_csv_path(job_id, output_dir)
+        # Force a poll immediately
+        self._poll_csv()
+        self._schedule_refresh()
 
     def load_history(self, job_id: str, output_dir: str):
         self.clear()

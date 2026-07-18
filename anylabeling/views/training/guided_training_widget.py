@@ -1800,6 +1800,9 @@ class GuidedTrainingWidget(QWidget):
             real_save_dir = data.get("save_dir", "")
             if real_save_dir and os.path.isdir(real_save_dir):
                 self.current_project_path = real_save_dir
+                # Update dashboard with real save_dir (may differ from predicted path)
+                if self._metrics_dashboard:
+                    self._metrics_dashboard.update_output_dir("guided", real_save_dir)
             self._set_config_controls_enabled(True)
             self.update_training_status_display()
             self.stop_training_button.setVisible(False)
@@ -1821,6 +1824,8 @@ class GuidedTrainingWidget(QWidget):
             real_save_dir = data.get("save_dir", "")
             if real_save_dir and os.path.isdir(real_save_dir):
                 self.current_project_path = real_save_dir
+                if self._metrics_dashboard:
+                    self._metrics_dashboard.update_output_dir("guided", real_save_dir)
             self._set_config_controls_enabled(True)
             self.update_training_status_display()
             self.start_training_button.setVisible(False)
@@ -1839,6 +1844,8 @@ class GuidedTrainingWidget(QWidget):
             real_save_dir = data.get("save_dir", "")
             if real_save_dir and os.path.isdir(real_save_dir):
                 self.current_project_path = real_save_dir
+                if self._metrics_dashboard:
+                    self._metrics_dashboard.update_output_dir("guided", real_save_dir)
             self._set_config_controls_enabled(True)
             self.update_training_status_display()
             self.start_training_button.setVisible(True)

@@ -35,10 +35,10 @@ class MetricStore:
                 self._runs[job_id] = MetricRunData(job_id=job_id)
             if output_dir:
                 self._runs[job_id].output_dir = output_dir
+                # Always save csv_path and set last_size=-1 so first poll picks up existing CSV
                 csv_path = Path(output_dir) / "results.csv"
-                if csv_path.exists():
-                    self._csv_paths[job_id] = csv_path
-                    self._csv_last_sizes[job_id] = 0
+                self._csv_paths[job_id] = csv_path
+                self._csv_last_sizes[job_id] = -1
 
     def add_sample(self, sample: MetricSample):
         """Add a metric sample (from event or parsing)."""
@@ -61,18 +61,21 @@ class MetricStore:
         """Poll results.csv for changes. Returns updated data or None.
 
         Only polls when there's an active job with a known output_dir.
+        Checks file existence on every poll (CSV may appear mid-training).
         """
         job_id = self._active_job_id
         if not job_id:
             return None
         csv_path = self._csv_paths.get(job_id)
-        if not csv_path or not csv_path.exists():
+        if not csv_path:
             return None
+        if not csv_path.exists():
+            return None  # CSV not created yet (epoch 0)
 
         try:
             current_size = csv_path.stat().st_size
             if current_size <= self._csv_last_sizes.get(job_id, -1):
-                return None
+                return None  # no new data
             self._csv_last_sizes[job_id] = current_size
         except OSError:
             return None
@@ -121,10 +124,25 @@ class MetricStore:
             if self._active_job_id == job_id:
                 self._active_job_id = None
 
+    def update_csv_path(self, job_id: str, output_dir: str):
+        """Update CSV path for an already-bound job (real save_dir callback).
+
+        Called when the actual training output directory becomes known,
+        which may differ from the predicted project/name path.
+        Sets last_sizes=-1 to force re-read on next poll.
+        """
+        csv_path = Path(output_dir) / "results.csv"
+        with self._lock:
+            self._csv_paths[job_id] = csv_path
+            self._csv_last_sizes[job_id] = -1  # force re-read
+            if job_id in self._runs:
+                self._runs[job_id].output_dir = output_dir
+
     def finish_run(self, job_id: str):
-        """Mark run as finished. Stops polling. Data preserved for history."""
+        """Mark run as finished. Stops live polling. Data preserved for history.
+
+        Does NOT clear csv_paths — caller may need one final poll first.
+        """
         with self._lock:
             if self._active_job_id == job_id:
                 self._active_job_id = None
-            self._csv_paths.pop(job_id, None)
-            self._csv_last_sizes.pop(job_id, None)
