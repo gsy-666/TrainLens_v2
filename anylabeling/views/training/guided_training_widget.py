@@ -195,6 +195,7 @@ class GuidedTrainingWidget(QWidget):
         # Prepared dataset (generated from loaded images)
         self._prepared_dataset_dir: Optional[str] = None
         self._prepared_yaml_path: Optional[str] = None
+        self._dataset_preparing = False
         self.training_status = "idle"  # idle, training, completed, error
         self.current_epochs = 0
 
@@ -2445,9 +2446,19 @@ class GuidedTrainingWidget(QWidget):
         """Create YOLO dataset from loaded images (synchronous, before preflight).
         
         Returns True on success, False on failure.
+        Prevents concurrent runs via _dataset_preparing flag.
         """
+        if self._dataset_preparing:
+            return False  # Already preparing
         if not self.image_list or not self.selected_task_type:
             return False
+
+        self._dataset_preparing = True
+        # Disable start/check buttons during preparation
+        if hasattr(self, 'start_training_button'):
+            self.start_training_button.setEnabled(False)
+        if hasattr(self, 'run_check_button'):
+            self.run_check_button.setEnabled(False)
 
         config = self.get_current_config()
         try:
@@ -2459,7 +2470,7 @@ class GuidedTrainingWidget(QWidget):
                 config["basic"]["data"],
                 self.output_dir,
                 config["basic"].get("pose_config"),
-                skip_empty_files=True,  # Prepared dataset: only valid images
+                skip_empty_files=True,
                 only_checked_files=config["checkpoint"].get("only_checked_files", False),
             )
             self._prepared_dataset_dir = temp_dir
@@ -2472,12 +2483,21 @@ class GuidedTrainingWidget(QWidget):
             )
             return True
         except Exception as e:
+            self._prepared_dataset_dir = None
+            self._prepared_yaml_path = None
             self.append_training_log(f"Dataset preparation failed: {e}")
             QMessageBox.critical(
                 self, self.tr("Dataset Preparation Failed"),
                 self.tr(f"Failed to prepare dataset:\n{e}"),
             )
             return False
+        finally:
+            self._dataset_preparing = False
+            # Re-enable buttons on completion/failure
+            if hasattr(self, 'start_training_button'):
+                self.start_training_button.setEnabled(True)
+            if hasattr(self, 'run_check_button'):
+                self.run_check_button.setEnabled(True)
 
     def _run_full_preflight(self):
         """Run preflight background check and show result dialog."""
@@ -2539,6 +2559,10 @@ class GuidedTrainingWidget(QWidget):
         self.ensure_train_tab_initialized()
 
         if self._preflight_running:
+            return
+
+        # Gate: dataset preparation already in progress
+        if self._dataset_preparing:
             return
 
         # Gate: must have passed Data Check
