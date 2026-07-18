@@ -156,16 +156,28 @@ def check_output_directory(result: PreflightResult, output_dir: str):
 
 
 def check_disk_space(result: PreflightResult, output_dir: str):
-    """Check available disk space on the output directory's volume."""
+    """Check available disk space on the output directory's volume.
+
+    Falls back to nearest existing parent directory.
+    On Windows, can fall back to drive root (e.g. D:\\\\).
+    """
     if not output_dir:
         return
 
     path = Path(output_dir)
-    # Find the mount point
-    while not path.exists():
-        path = path.parent
-        if path == path.parent:
-            return
+    # Find the nearest existing ancestor
+    checked = path
+    while not checked.exists():
+        parent = checked.parent
+        if parent == checked:
+            # Reached root — use drive root on Windows
+            if os.name == 'nt' and len(str(path)) >= 2:
+                drive = str(path)[:2] + '\\'
+                if os.path.exists(drive):
+                    checked = Path(drive)
+                    break
+            return  # Cannot determine
+        checked = parent
 
     try:
         usage = os.statvfs(str(path))

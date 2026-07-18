@@ -106,6 +106,9 @@ class GuidedTrainingWidget(QWidget):
         supported_shape=None,
         open_folder_callback=None,
         image_list_getter=None,
+        job_manager=None,           # Accepted for compat, unused (singleton)
+        ultralytics_adapter=None,   # Accepted for compat, unused
+        history_store=None,         # Accepted for compat, unused (singleton)
     ):
         super().__init__(parent)
 
@@ -188,6 +191,10 @@ class GuidedTrainingWidget(QWidget):
         self._preflight_thread: Optional[QThread] = None
         self._preflight_result = None
         self._preflight_running = False
+
+        # Prepared dataset (generated from loaded images)
+        self._prepared_dataset_dir: Optional[str] = None
+        self._prepared_yaml_path: Optional[str] = None
         self.training_status = "idle"  # idle, training, completed, error
         self.current_epochs = 0
 
@@ -2420,10 +2427,12 @@ class GuidedTrainingWidget(QWidget):
         project = config["basic"].get("project", "")
         name = config["basic"].get("name", "")
         output_dir = os.path.join(project, name) if project and name else project
+        # Use prepared YAML if available, else config field
+        dataset_yaml = self._prepared_yaml_path or config["basic"].get("data", "")
         return GuidedPreflightContext(
             task_type=self.selected_task_type or "",
             model_path=config["basic"].get("model", ""),
-            dataset_yaml=config["basic"].get("data", ""),
+            dataset_yaml=dataset_yaml,
             epochs=config["train"].get("epochs", 100),
             batch=config["train"].get("batch", 16),
             imgsz=config["train"].get("imgsz", 640),
@@ -2431,6 +2440,44 @@ class GuidedTrainingWidget(QWidget):
             output_dir=output_dir,
             job_name=name,
         )
+
+    def _prepare_dataset(self) -> bool:
+        """Create YOLO dataset from loaded images (synchronous, before preflight).
+        
+        Returns True on success, False on failure.
+        """
+        if not self.image_list or not self.selected_task_type:
+            return False
+
+        config = self.get_current_config()
+        try:
+            self.append_training_log(self.tr("Preparing dataset..."))
+            temp_dir = create_yolo_dataset(
+                self.image_list,
+                self.selected_task_type,
+                config["basic"]["dataset_ratio"],
+                config["basic"]["data"],
+                self.output_dir,
+                config["basic"].get("pose_config"),
+                config["checkpoint"].get("skip_empty_files", False),
+                config["checkpoint"].get("only_checked_files", False),
+            )
+            self._prepared_dataset_dir = temp_dir
+            if self.selected_task_type == "Classify":
+                self._prepared_yaml_path = temp_dir
+            else:
+                self._prepared_yaml_path = os.path.join(temp_dir, "data.yaml")
+            self.append_training_log(
+                self.tr(f"Dataset prepared: {self._prepared_yaml_path}")
+            )
+            return True
+        except Exception as e:
+            self.append_training_log(f"Dataset preparation failed: {e}")
+            QMessageBox.critical(
+                self, self.tr("Dataset Preparation Failed"),
+                self.tr(f"Failed to prepare dataset:\n{e}"),
+            )
+            return False
 
     def _run_full_preflight(self):
         """Run preflight background check and show result dialog."""
@@ -2507,7 +2554,12 @@ class GuidedTrainingWidget(QWidget):
             )
             return
 
-        # Run full preflight unless skipped
+        # Step 1: Prepare dataset from loaded images (before preflight)
+        if not self._prepared_dataset_dir:
+            if not self._prepare_dataset():
+                return  # Preparation failed
+
+        # Step 2: Run full preflight
         if not skip_preflight:
             self._run_full_preflight()
             if self._preflight_result is None:
