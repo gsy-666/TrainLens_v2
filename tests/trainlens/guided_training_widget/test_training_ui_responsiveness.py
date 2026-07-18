@@ -30,7 +30,9 @@ def qapp():
 
 
 def _simulate_guided_running(widget):
-    """Navigate to Train tab and send training_started event."""
+    """Navigate to Train tab and send training_started event (bypass gates for test)."""
+    widget._data_check_passed = True
+    widget._config_completed = True
     widget.go_to_specific_tab(2)  # init train tab (creates buttons)
     widget.on_training_event("training_started", {
         "total_epochs": 5,

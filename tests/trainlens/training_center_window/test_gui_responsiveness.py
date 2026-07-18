@@ -38,6 +38,8 @@ class TestEarlyBusyCheck:
             display_name="Custom: train.py", workspace=Path("/tmp"), command=[],
         )
         widget.job_manager._current_job = active_job
+        widget._data_check_passed = True
+        widget._config_completed = True
 
         # Mock both QMessageBox.critical (for config error path) and
         # reserve_job's rejection via QMessageBox.critical
@@ -56,6 +58,8 @@ class TestEarlyBusyCheck:
 
         widget = GuidedTrainingWidget(parent=None, image_list=[], output_dir="/tmp")
         widget.selected_task_type = "Detect"
+        widget._data_check_passed = True
+        widget._config_completed = True
 
         start = time.time()
         with patch('anylabeling.views.training.guided_training_widget.QMessageBox.critical'):

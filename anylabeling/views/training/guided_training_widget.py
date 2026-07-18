@@ -219,12 +219,35 @@ class GuidedTrainingWidget(QWidget):
         self.tab_widget.addTab(self.metrics_tab, self.tr("Metrics"))
         self.tab_widget.setTabVisible(3, False)  # hidden until training starts
 
+        # Stage gating: Data starts enabled, Config/Train require data check
+        self._data_check_passed = False
+        self._config_completed = False
+        self._update_stage_gates()
+
         # Config controls: disabled during PREPARING / RUNNING / STOPPING
         self._training_config_controls = []  # populated on first use
         main_layout = QVBoxLayout(self)
         main_layout.addWidget(self.tab_widget)
 
         self.init_data_tab()
+
+    def _update_stage_gates(self):
+        """Enable/disable tabs and Next button based on current stage.
+
+        Data tab always enabled. Config enabled after Data Check passes.
+        Train enabled after Config is completed. Metrics shown during training.
+        Never uses tabBar().setEnabled(False) — only per-tab setTabEnabled.
+        """
+        data_ok = self._data_check_passed
+        config_ok = self._config_completed
+
+        self.tab_widget.setTabEnabled(0, True)   # Data always enabled
+        self.tab_widget.setTabEnabled(1, data_ok)  # Config: data must pass
+        self.tab_widget.setTabEnabled(2, data_ok and config_ok)  # Train: both
+
+        # Next button
+        if hasattr(self, 'next_button'):
+            self.next_button.setEnabled(data_ok)
 
     def ensure_config_tab_initialized(self):
         if self._config_tab_initialized:
@@ -391,6 +414,7 @@ class GuidedTrainingWidget(QWidget):
             self.ensure_config_tab_initialized()
         if index >= 2:
             self.ensure_train_tab_initialized()
+        self._update_stage_gates()  # refresh gate state before switching
         self.tab_widget.setCurrentIndex(index)
 
     # Data Tab
@@ -452,6 +476,7 @@ class GuidedTrainingWidget(QWidget):
 
         self.refresh_dataset_summary()
         self.update_labeled_images_hint()
+        self._invalidate_data_check()
 
     def create_task_handler(self, task_type):
         def handler():
@@ -580,6 +605,103 @@ class GuidedTrainingWidget(QWidget):
         self._detection_cache = None
         self._valid_image_count_cache.clear()
         self._summary_view_mode = None
+        self._invalidate_data_check()
+
+    def _invalidate_data_check(self):
+        """Invalidate Data Check result when data/task changes."""
+        if hasattr(self, '_data_check_passed') and self._data_check_passed:
+            self._data_check_passed = False
+            self._config_completed = False
+            self._update_stage_gates()
+
+    def _run_data_check(self):
+        """Run Data Check — only data-related checks (no model/device/output).
+
+        Stores result in _preflight_result and updates stage gates.
+        Shows a non-blocking summary via QMessageBox if UI is interactive.
+        """
+        from anylabeling.services.training_center.preflight.models import (
+            PreflightResult, PreflightIssue, PreflightSeverity, GuidedPreflightContext,
+        )
+        from anylabeling.services.training_center.preflight.guided_yaml import (
+            check_yaml_dataset_paths, check_yaml_structure, read_yaml_safe,
+        )
+        from anylabeling.services.training_center.preflight.guided_detect_labels import (
+            check_detect_labels,
+        )
+
+        task_type = self.selected_task_type or ""
+        image_count = len(self.image_list) if self.image_list else 0
+
+        result = PreflightResult(mode="data_check")
+
+        # Image count
+        if image_count == 0:
+            result.add(PreflightIssue(
+                code="NO_IMAGES_LOADED", severity=PreflightSeverity.ERROR,
+                title="No images loaded",
+                message="Please load images before checking the dataset.",
+            ))
+
+        # Valid labeled images
+        if task_type and image_count > 0:
+            from anylabeling.services.auto_training.ultralytics.config import MIN_LABELED_IMAGES_THRESHOLD
+            from anylabeling.services.auto_training.ultralytics.validators import get_task_valid_images
+            valid = get_task_valid_images(self.image_list, task_type, self.output_dir)
+            if valid < MIN_LABELED_IMAGES_THRESHOLD:
+                result.add(PreflightIssue(
+                    code="INSUFFICIENT_VALID_IMAGES", severity=PreflightSeverity.ERROR,
+                    title=f"Only {valid} valid labeled images found",
+                    message=f"At least {MIN_LABELED_IMAGES_THRESHOLD} valid labeled images required. Found: {valid}.",
+                    suggestion="Add more labeled images or check label format.",
+                ))
+            else:
+                result.add(PreflightIssue(
+                    code="VALID_IMAGES_OK", severity=PreflightSeverity.PASS,
+                    title=f"{valid} valid labeled images",
+                    message=f"Valid labeled images: {valid} (required: {MIN_LABELED_IMAGES_THRESHOLD}).",
+                ))
+
+        # Dataset YAML + label checks (if config available)
+        if hasattr(self, 'config_widgets') and self.config_widgets:
+            config = self.get_current_config()
+            yaml_path = config.get("basic", {}).get("data", "")
+            if yaml_path and os.path.isfile(yaml_path):
+                yaml_data, yaml_error = read_yaml_safe(yaml_path)
+                if yaml_error:
+                    result.add(PreflightIssue(
+                        code="YAML_READ_ERROR", severity=PreflightSeverity.ERROR,
+                        title="Cannot read dataset YAML",
+                        message=yaml_error, path=yaml_path,
+                    ))
+                elif yaml_data:
+                    check_yaml_structure(result, yaml_path, yaml_data)
+                    check_yaml_dataset_paths(result, yaml_path, yaml_data)
+                    check_detect_labels(result, yaml_path, yaml_data, task_type)
+
+        self._preflight_result = result
+
+        # Update gates
+        if result.can_start:
+            self._data_check_passed = True
+            self._update_stage_gates()
+            QMessageBox.information(
+                self, self.tr("Data Check Passed"),
+                self.tr(f"Data check completed successfully.\n{result.summary()}"),
+            )
+        else:
+            self._data_check_passed = False
+            self._update_stage_gates()
+            # Show errors as QMessageBox
+            error_msgs = "\n".join(
+                f"• [{i.severity.value.upper()}] {i.title}" for i in result.errors()
+            )
+            if error_msgs:
+                QMessageBox.critical(
+                    self, self.tr("Data Check Failed"),
+                    self.tr(f"Data check found issues:\n\n{error_msgs}\n\n"
+                            f"Please fix these issues and re-run Check Dataset."),
+                )
 
     def load_images(self):
         """Load images via the host's folder dialog callback.
@@ -643,6 +765,13 @@ class GuidedTrainingWidget(QWidget):
         parent_layout.addWidget(summary_widget, 1)
 
     def proceed_to_config(self):
+        if not self._data_check_passed:
+            QMessageBox.warning(
+                self, self.tr("Check Required"),
+                self.tr("Please run 'Check Dataset' first to verify your data."),
+            )
+            return
+
         is_valid, error_message = validate_task_requirements(
             self.selected_task_type, self.image_list, self.output_dir
         )
@@ -669,10 +798,16 @@ class GuidedTrainingWidget(QWidget):
         self.load_images_button = SecondaryButton(self.tr("Load Images"))
         self.load_images_button.clicked.connect(self.load_images)
         actions_layout.addWidget(self.load_images_button)
+
+        self.check_dataset_button = SecondaryButton(self.tr("Check Dataset"))
+        self.check_dataset_button.clicked.connect(self._run_data_check)
+        actions_layout.addWidget(self.check_dataset_button)
+
         actions_layout.addStretch()
 
         self.next_button = PrimaryButton(self.tr("Next"))
         self.next_button.clicked.connect(self.proceed_to_config)
+        self.next_button.setEnabled(False)  # disabled until Data Check passes
         actions_layout.addWidget(self.next_button)
         parent_layout.addLayout(actions_layout)
 
@@ -1615,6 +1750,8 @@ class GuidedTrainingWidget(QWidget):
             self.training_status == "idle"
 
         save_config(config)
+        self._config_completed = True
+        self._update_stage_gates()
         self.go_to_specific_tab(2)
 
     def init_config_buttons(self, parent_layout):
@@ -2234,7 +2371,7 @@ class GuidedTrainingWidget(QWidget):
             job_name=name,
         )
 
-    def _run_preflight_check(self):
+    def _run_full_preflight(self):
         """Run preflight background check and show result dialog."""
         if self._preflight_running:
             return  # Prevent double-click
@@ -2293,19 +2430,32 @@ class GuidedTrainingWidget(QWidget):
         if self._preflight_running:
             return
 
-        # Run preflight unless skipped
+        # Gate: must have passed Data Check
+        if not self._data_check_passed:
+            QMessageBox.warning(
+                self, self.tr("Check Required"),
+                self.tr("Please complete 'Check Dataset' on the Data page first."),
+            )
+            return
+
+        # Gate: config must be completed
+        if not self._config_completed:
+            QMessageBox.warning(
+                self, self.tr("Config Required"),
+                self.tr("Please complete the Config page first."),
+            )
+            return
+
+        # Run full preflight unless skipped
         if not skip_preflight:
-            self._run_preflight_check()
+            self._run_full_preflight()
             if self._preflight_result is None:
-                return  # Dialog cancelled or closed
+                return  # Dialog cancelled
             if self._preflight_result.has_errors:
                 return  # Cannot start with errors
-            if self._preflight_result.has_warnings:
-                # User must confirm
-                choice = self._preflight_result  # result already handles warn/start logic
-                # The dialog already asked — if they chose Start Anyway, result is stored
-                if not self._preflight_result.can_start:
-                    return
+            if self._preflight_result.has_warnings and not self._preflight_result.can_start:
+                return  # User didn't confirm
+        
         # Fall through to original start logic
         # Ensure config and train tabs are initialized
         self.ensure_config_tab_initialized()
@@ -2457,7 +2607,7 @@ class GuidedTrainingWidget(QWidget):
         actions_layout.addWidget(self.open_dir_button)
 
         self.run_check_button = SecondaryButton(self.tr("Run Check"))
-        self.run_check_button.clicked.connect(self._run_preflight_check)
+        self.run_check_button.clicked.connect(self._run_full_preflight)
         actions_layout.addWidget(self.run_check_button)
 
         actions_layout.addStretch()

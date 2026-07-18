@@ -183,6 +183,9 @@ class TestEarlyMutualExclusion:
         )
         jm._current_job = active_job
 
+        gw = training_center.guided_widget
+        gw._data_check_passed = True
+        gw._config_completed = True
         with patch('anylabeling.views.training.guided_training_widget.QMessageBox.critical') as mock_msg:
             training_center.guided_widget.start_training_from_train_tab(skip_preflight=True)
             mock_msg.assert_called_once()
