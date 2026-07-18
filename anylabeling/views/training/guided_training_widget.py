@@ -1,6 +1,7 @@
 import csv
 import datetime
 import glob
+import json
 import os
 import platform
 import re
@@ -613,11 +614,15 @@ class GuidedTrainingWidget(QWidget):
         self._invalidate_data_check()
 
     def _invalidate_data_check(self):
-        """Invalidate Data Check result when data/task changes."""
+        """Invalidate Data Check result AND dataset cache when data/task changes."""
         if hasattr(self, '_data_check_passed') and self._data_check_passed:
             self._data_check_passed = False
             self._config_completed = False
             self._update_stage_gates()
+        # Invalidate cached dataset (source changed)
+        self._prepared_dataset_dir = None
+        self._prepared_yaml_path = None
+        self._update_dataset_status(None)
 
     def _run_data_check(self):
         """Run Data Check — only data-related checks (no model/device/output).
@@ -2133,6 +2138,11 @@ class GuidedTrainingWidget(QWidget):
         self.progress_bar.setStyleSheet(get_progress_bar_style())
         progress_layout.addWidget(self.progress_bar)
         status_layout.addLayout(progress_layout)
+
+        self.dataset_status_label = QLabel(self.tr("Dataset: Not prepared"))
+        self.dataset_status_label.setStyleSheet("color: gray;")
+        status_layout.addWidget(self.dataset_status_label)
+
         parent_layout.addWidget(status_group)
 
     def clear_training_logs(self):
@@ -2443,18 +2453,17 @@ class GuidedTrainingWidget(QWidget):
         )
 
     def _prepare_dataset(self) -> bool:
-        """Create YOLO dataset from loaded images (synchronous, before preflight).
-        
+        """Create (or reuse) YOLO dataset from loaded images.
+
         Returns True on success, False on failure.
-        Prevents concurrent runs via _dataset_preparing flag.
+        Cache: checks dataset_manifest.json fingerprint before re-creating.
         """
         if self._dataset_preparing:
-            return False  # Already preparing
+            return False
         if not self.image_list or not self.selected_task_type:
             return False
 
         self._dataset_preparing = True
-        # Disable start/check buttons during preparation
         if hasattr(self, 'start_training_button'):
             self.start_training_button.setEnabled(False)
         if hasattr(self, 'run_check_button'):
@@ -2462,29 +2471,40 @@ class GuidedTrainingWidget(QWidget):
 
         config = self.get_current_config()
         try:
+            # Check for cached manifest
+            ratio = config["basic"].get("dataset_ratio", 0.8)
+            fp = self._compute_source_fingerprint()
+            manifest = self._find_cached_manifest(fp, ratio)
+            if manifest and not getattr(self, '_force_rebuild_dataset', False):
+                self._prepared_dataset_dir = manifest["dataset_dir"]
+                self._prepared_yaml_path = manifest["yaml_path"]
+                self._update_dataset_status(manifest)
+                self.append_training_log(self.tr("Reusing prepared dataset."))
+                self._force_rebuild_dataset = False
+                return True
+
             self.append_training_log(self.tr("Preparing dataset..."))
             temp_dir = create_yolo_dataset(
-                self.image_list,
-                self.selected_task_type,
-                config["basic"]["dataset_ratio"],
-                config["basic"]["data"],
-                self.output_dir,
+                self.image_list, self.selected_task_type, ratio,
+                config["basic"]["data"], self.output_dir,
                 config["basic"].get("pose_config"),
                 skip_empty_files=True,
                 only_checked_files=config["checkpoint"].get("only_checked_files", False),
             )
             self._prepared_dataset_dir = temp_dir
-            if self.selected_task_type == "Classify":
-                self._prepared_yaml_path = temp_dir
-            else:
-                self._prepared_yaml_path = os.path.join(temp_dir, "data.yaml")
-            self.append_training_log(
-                self.tr(f"Dataset prepared: {self._prepared_yaml_path}")
-            )
+            yaml_path = os.path.join(temp_dir, "data.yaml") if self.selected_task_type != "Classify" else temp_dir
+            self._prepared_yaml_path = yaml_path
+            self._force_rebuild_dataset = False
+
+            # Save manifest
+            manifest = self._save_manifest(temp_dir, yaml_path, fp, ratio)
+            self._update_dataset_status(manifest)
+            self.append_training_log(self.tr(f"Dataset prepared: {yaml_path}"))
             return True
         except Exception as e:
             self._prepared_dataset_dir = None
             self._prepared_yaml_path = None
+            self._update_dataset_status(None)
             self.append_training_log(f"Dataset preparation failed: {e}")
             QMessageBox.critical(
                 self, self.tr("Dataset Preparation Failed"),
@@ -2493,11 +2513,107 @@ class GuidedTrainingWidget(QWidget):
             return False
         finally:
             self._dataset_preparing = False
-            # Re-enable buttons on completion/failure
             if hasattr(self, 'start_training_button'):
                 self.start_training_button.setEnabled(True)
             if hasattr(self, 'run_check_button'):
                 self.run_check_button.setEnabled(True)
+
+    # ── Manifest / caching helpers ───────────────────────────────────
+
+    def _compute_source_fingerprint(self) -> str:
+        """SHA256 of source image paths + JSON mtimes (fast, no file content)."""
+        import hashlib
+        parts = [self.selected_task_type or ""]
+        for img in sorted(self.image_list):
+            parts.append(img)
+            json_path = os.path.splitext(img)[0] + ".json"
+            if os.path.isfile(json_path):
+                try:
+                    st = os.stat(json_path)
+                    parts.append(f"{json_path}:{st.st_mtime}:{st.st_size}")
+                except OSError:
+                    parts.append(f"{json_path}:missing")
+            else:
+                parts.append(f"{json_path}:none")
+        raw = "|".join(parts)
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+    def _find_cached_manifest(self, fingerprint: str, ratio: float):
+        """Find a cached manifest matching the fingerprint and ratio."""
+        try:
+            from anylabeling.services.auto_training.ultralytics.config import get_dataset_path
+            base = get_dataset_path()
+            task_dir = os.path.join(base, (self.selected_task_type or "detect").lower())
+            if not os.path.isdir(task_dir):
+                return None
+            for entry in os.listdir(task_dir):
+                mf = os.path.join(task_dir, entry, "dataset_manifest.json")
+                if os.path.isfile(mf):
+                    try:
+                        with open(mf, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                        if (data.get("fingerprint") == fingerprint
+                                and abs(data.get("split_ratio", 0.8) - ratio) < 0.001
+                                and os.path.isdir(data.get("dataset_dir", ""))
+                                and os.path.isfile(data.get("yaml_path", ""))):
+                            return data
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return None
+
+    def _save_manifest(self, dataset_dir: str, yaml_path: str,
+                       fingerprint: str, ratio: float) -> dict:
+        """Save dataset_manifest.json next to data.yaml."""
+        yaml_data = {}
+        if os.path.isfile(yaml_path):
+            try:
+                from anylabeling.services.auto_training.ultralytics._io import load_yaml_config
+                yaml_data = load_yaml_config(yaml_path) or {}
+            except Exception:
+                pass
+        names = yaml_data.get("names", {})
+        manifest = {
+            "dataset_dir": dataset_dir,
+            "yaml_path": yaml_path,
+            "fingerprint": fingerprint,
+            "split_ratio": ratio,
+            "task_type": self.selected_task_type or "detect",
+            "classes": list(names.values()) if isinstance(names, dict) else list(names),
+            "class_to_id": {v: k for k, v in names.items()} if isinstance(names, dict) else {},
+            "valid_images": len(self.image_list),
+            "created_at": datetime.datetime.now().isoformat(),
+        }
+        mf_path = os.path.join(dataset_dir, "dataset_manifest.json")
+        with open(mf_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2, ensure_ascii=False)
+        return manifest
+
+    def _rebuild_dataset(self):
+        """Force rebuild dataset on next prepare."""
+        self._force_rebuild_dataset = True
+        self._prepared_dataset_dir = None
+        self._prepared_yaml_path = None
+        self._update_dataset_status(None)
+        self.append_training_log(self.tr("Dataset cache cleared. Will rebuild on next Start."))
+        if not self._prepare_dataset():
+            self.append_training_log(self.tr("Dataset rebuild failed."))
+
+    def _update_dataset_status(self, manifest: dict | None):
+        """Update the dataset status label on the Train page."""
+        if not hasattr(self, 'dataset_status_label'):
+            return
+        if manifest is None:
+            self.dataset_status_label.setText(self.tr("Dataset: Not prepared"))
+            self.dataset_status_label.setStyleSheet("color: gray;")
+        else:
+            classes = manifest.get("classes", [])
+            self.dataset_status_label.setText(
+                self.tr(f"Dataset: Ready | Classes: {len(classes)} | "
+                        f"Valid: {manifest.get('valid_images', '?')}")
+            )
+            self.dataset_status_label.setStyleSheet("color: green; font-weight: bold;")
 
     def _run_full_preflight(self):
         """Run preflight background check and show result dialog."""
@@ -2749,6 +2865,10 @@ class GuidedTrainingWidget(QWidget):
         self.run_check_button = SecondaryButton(self.tr("Run Check"))
         self.run_check_button.clicked.connect(self._run_full_preflight)
         actions_layout.addWidget(self.run_check_button)
+
+        self.rebuild_dataset_button = SecondaryButton(self.tr("Rebuild Dataset"))
+        self.rebuild_dataset_button.clicked.connect(self._rebuild_dataset)
+        actions_layout.addWidget(self.rebuild_dataset_button)
 
         actions_layout.addStretch()
 
