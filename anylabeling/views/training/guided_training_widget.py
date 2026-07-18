@@ -2344,7 +2344,16 @@ class GuidedTrainingWidget(QWidget):
 
     def get_training_args(self, config):
         try:
-            if self.selected_task_type == "Classify" and os.path.isdir(
+            # ── Use prepared dataset if available, else create it ──
+            if hasattr(self, '_prepared_yaml_path') and self._prepared_yaml_path:
+                if self.selected_task_type == "Classify":
+                    data_path = self._prepared_dataset_dir or self._prepared_yaml_path
+                else:
+                    data_path = self._prepared_yaml_path
+                self.append_training_log(
+                    f"Using prepared dataset: {data_path}"
+                )
+            elif self.selected_task_type == "Classify" and os.path.isdir(
                 config["basic"]["data"]
             ):
                 data_path = config["basic"]["data"]
@@ -2512,6 +2521,15 @@ class GuidedTrainingWidget(QWidget):
             self._force_rebuild_dataset = False
 
             manifest = self._save_manifest(final_dir, yaml_path, fp, ratio)
+
+            # ── Hard validation: refuse coco8 / stale outputs ──
+            if not self._validate_prepared_output(final_dir, yaml_path, manifest):
+                # Validation failed — clean up and return
+                self._prepared_dataset_dir = None
+                self._prepared_yaml_path = None
+                self._update_dataset_status(None)
+                return False
+
             self._update_dataset_status(manifest)
             self.append_training_log(self.tr(f"Dataset prepared: {yaml_path}"))
             return True
@@ -2613,6 +2631,14 @@ class GuidedTrainingWidget(QWidget):
         """Save dataset_manifest.json."""
         labels = self._extract_labels_from_source()
         class_to_id = {lbl: i for i, lbl in enumerate(labels)}
+        # Count actual valid labeled images (not total loaded images)
+        try:
+            from anylabeling.services.auto_training.ultralytics.validators import get_task_valid_images
+            valid_count = get_task_valid_images(
+                self.image_list, self.selected_task_type or "detect", self.output_dir
+            )
+        except Exception:
+            valid_count = len(self.image_list)
         manifest = {
             "manifest_version": self._MANIFEST_VERSION,
             "converter_version": self._CONVERTER_VERSION,
@@ -2626,13 +2652,133 @@ class GuidedTrainingWidget(QWidget):
             "source_dir": str(self.output_dir) if self.output_dir else "",
             "classes": labels,
             "class_to_id": class_to_id,
-            "valid_images": len(self.image_list),
+            "valid_images": valid_count,
             "created_at": datetime.datetime.now().isoformat(),
         }
         mf_path = os.path.join(dataset_dir, "dataset_manifest.json")
         with open(mf_path, "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2, ensure_ascii=False)
         return manifest
+
+    # ── Output validation ─────────────────────────────────────────────
+
+    def _validate_prepared_output(self, dataset_dir: str, yaml_path: str,
+                                  manifest: dict) -> bool:
+        """Hard validation: refuse coco8 / stale / inconsistent outputs.
+
+        Returns True if output passes all checks.
+        """
+        import re
+
+        dir_basename = os.path.basename(dataset_dir)
+
+        # 1. Reject coco8 directory names
+        if re.match(r'^coco\d+[_\-]', dir_basename):
+            self.append_training_log(
+                self.tr(f"ERROR: Prepared dataset dir is stale coco: {dir_basename}")
+            )
+            return False
+
+        # 2. Manifest must exist
+        mf_path = os.path.join(dataset_dir, "dataset_manifest.json")
+        if not os.path.isfile(mf_path):
+            self.append_training_log(
+                self.tr("ERROR: dataset_manifest.json missing after preparation")
+            )
+            return False
+
+        # 3. YAML must exist and be parseable
+        if not os.path.isfile(yaml_path):
+            self.append_training_log(
+                self.tr(f"ERROR: YAML missing: {yaml_path}")
+            )
+            return False
+
+        try:
+            from anylabeling.services.auto_training.ultralytics._io import load_yaml_config
+            yaml_data = load_yaml_config(yaml_path)
+        except Exception as e:
+            self.append_training_log(f"ERROR: Cannot parse YAML: {e}")
+            return False
+
+        if not yaml_data or not isinstance(yaml_data, dict):
+            self.append_training_log(self.tr("ERROR: YAML is empty or invalid"))
+            return False
+
+        # 4. No stale coco markers
+        if "download" in yaml_data:
+            self.append_training_log(self.tr("ERROR: YAML contains stale 'download' key"))
+            return False
+
+        # 5. nc must match actual classes
+        actual_nc = len(manifest.get("classes", []))
+        yaml_nc = yaml_data.get("nc", 0)
+        if yaml_nc != actual_nc:
+            self.append_training_log(
+                f"ERROR: YAML nc={yaml_nc} does not match actual classes={actual_nc}"
+            )
+            return False
+
+        # 6. names dict must match manifest classes
+        yaml_names = yaml_data.get("names", {})
+        if isinstance(yaml_names, dict):
+            manifest_classes = manifest.get("classes", [])
+            yaml_class_names = [yaml_names[i] for i in sorted(yaml_names.keys())]
+            if yaml_class_names != manifest_classes:
+                self.append_training_log(
+                    f"ERROR: YAML names does not match manifest classes"
+                )
+                return False
+
+            # 7. YAML class IDs must be 0..nc-1
+            expected_ids = set(range(actual_nc))
+            actual_ids = set(yaml_names.keys())
+            if actual_ids != expected_ids:
+                self.append_training_log(
+                    f"ERROR: YAML class IDs {sorted(actual_ids)} != expected {sorted(expected_ids)}"
+                )
+                return False
+
+        # 8. Label TXT class IDs must be in range 0..nc-1
+        for split in ("train", "val"):
+            lbl_dir = os.path.join(dataset_dir, "labels", split)
+            if not os.path.isdir(lbl_dir):
+                continue
+            for f in os.listdir(lbl_dir):
+                fp = os.path.join(lbl_dir, f)
+                if os.path.getsize(fp) == 0:
+                    continue
+                try:
+                    with open(fp, "r") as fh:
+                        for line in fh:
+                            parts = line.strip().split()
+                            if parts:
+                                cid = int(float(parts[0]))
+                                if cid < 0 or cid >= actual_nc:
+                                    self.append_training_log(
+                                        f"ERROR: Label {f} has out-of-range class ID {cid}"
+                                    )
+                                    return False
+                except Exception:
+                    pass
+
+        # 9. Valid image count must match actual exported images
+        expected_valid = manifest.get("valid_images", 0)
+        actual_images = 0
+        for split in ("train", "val"):
+            img_dir = os.path.join(dataset_dir, "images", split)
+            if os.path.isdir(img_dir):
+                actual_images += len([
+                    f for f in os.listdir(img_dir)
+                    if f.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp'))
+                ])
+        if actual_images != expected_valid:
+            self.append_training_log(
+                f"ERROR: Exported images ({actual_images}) != valid count ({expected_valid})"
+            )
+            return False
+
+        return True
 
     # ── Integrity validation ─────────────────────────────────────────
 
