@@ -9,7 +9,7 @@ import sys
 from datetime import datetime
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QPalette
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
@@ -94,6 +94,17 @@ class TrainingHistoryWidget(QWidget):
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
+
+        # Light blue selection via palette (preserves per-cell setForeground)
+        palette = self.table.palette()
+        palette.setColor(QPalette.ColorRole.Highlight, QColor("#DCEBFF"))
+        palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#111111"))
+        self.table.setPalette(palette)
+        # Hover only via stylesheet (doesn't affect selection)
+        self.table.setStyleSheet(
+            "QTableWidget::item:hover { background-color: #F3F8FF; }"
+        )
+
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
