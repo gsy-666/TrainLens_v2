@@ -78,8 +78,9 @@ class PreflightResult:
         return [i for i in self.issues if i.severity == PreflightSeverity.WARNING]
 
     def summary(self) -> str:
+        label = "Data Check" if self.mode == "data_check" else "Preflight"
         return (
-            f"Preflight: {self.pass_count} passed, "
+            f"{label}: {self.pass_count} passed, "
             f"{self.warning_count} warnings, {self.error_count} errors"
         )
 
