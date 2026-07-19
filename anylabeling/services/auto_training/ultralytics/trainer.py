@@ -68,7 +68,7 @@ class TrainingManager:
             except Exception:
                 pass
 
-    def start_training(self, train_args: Dict) -> Tuple[bool, str]:
+    def start_training(self, train_args: Dict, python_executable: str = None) -> Tuple[bool, str]:
         if self.is_training:
             return False, "Training is already in progress"
 
@@ -90,7 +90,7 @@ class TrainingManager:
                         creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
 
                     self.training_process = subprocess.Popen(
-                        build_training_worker_command(payload_path),
+                        build_training_worker_command(payload_path, python_executable=python_executable),
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
                         text=True,
@@ -253,8 +253,9 @@ def build_training_worker_env():
     return env
 
 
-def build_training_worker_command(payload_path: str):
-    command = [sys.executable]
+def build_training_worker_command(payload_path: str, python_executable: str = None):
+    python_exe = python_executable or sys.executable
+    command = [python_exe]
     if getattr(sys, "frozen", False):
         command.extend(
             [
@@ -383,6 +384,8 @@ def resolve_training_model_path(model):
 
 
 def run_training_worker_command(args):
+    import traceback as _tb
+
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     if hasattr(sys.stderr, "reconfigure"):
@@ -395,6 +398,64 @@ def run_training_worker_command(args):
     old_stderr = sys.stderr
     log_stream = TrainingWorkerLogStream(old_stdout)
 
+    # ── Emit worker_ready with runtime diagnostics ──
+    requested_device = train_args.get("device", "cpu")
+    try:
+        import torch as _torch
+        _cuda_available = _torch.cuda.is_available()
+        _gpu_count = _torch.cuda.device_count() if _cuda_available else 0
+        _gpu_names = [_torch.cuda.get_device_name(i) for i in range(_gpu_count)] if _gpu_count > 0 else []
+        _torch_version = _torch.__version__
+        _torch_cuda_version = getattr(_torch.version, "cuda", None)
+    except ImportError:
+        _cuda_available = False
+        _gpu_count = 0
+        _gpu_names = []
+        _torch_version = "N/A"
+        _torch_cuda_version = None
+
+    ready_event = {
+        "event": "worker_ready",
+        "sys_executable": sys.executable,
+        "python_version": sys.version.split()[0],
+        "torch_version": _torch_version,
+        "torch_cuda_version": _torch_cuda_version,
+        "cuda_available": _cuda_available,
+        "gpu_count": _gpu_count,
+        "gpu_name": _gpu_names[0] if _gpu_names else "",
+        "gpu_names": _gpu_names,
+        "requested_device": requested_device,
+        "ultralytics_device": str(train_args.get("device", "cpu")),
+    }
+    emit_training_worker_event("worker_ready", output_stream=old_stdout, **ready_event)
+
+    # ── CUDA hard verification (GPU tasks only) ──
+    requested = str(requested_device)
+    if requested not in ("cpu", "auto", ""):
+        # Determine if GPU was requested
+        _is_gpu_requested = requested.startswith("cuda") or requested.isdigit() or (
+            requested != "cpu"
+        )
+        if _is_gpu_requested and not _cuda_available:
+            emit_training_worker_event(
+                "training_error",
+                error=f"Runtime CUDA mismatch: requested device={requested_device} but torch.cuda.is_available()=False. "
+                      f"sys.executable={sys.executable}, torch={_torch_version}, torch.cuda={_torch_cuda_version}",
+                traceback=f"Runtime: {sys.executable}\nTorch: {_torch_version}\nCUDA available: {_cuda_available}",
+                output_stream=old_stdout,
+            )
+            return
+        if _is_gpu_requested and _gpu_count == 0:
+            emit_training_worker_event(
+                "training_error",
+                error=f"GPU not found: requested device={requested_device} but torch.cuda.device_count()=0. "
+                      f"Check nvidia-smi and CUDA driver.",
+                traceback=f"Torch CUDA version: {_torch_cuda_version}\nGPU count: {_gpu_count}",
+                output_stream=old_stdout,
+            )
+            return
+
+    # ── Proceed with training ──
     try:
         sys.stdout = log_stream
         sys.stderr = log_stream
@@ -415,7 +476,7 @@ def run_training_worker_command(args):
         emit_training_worker_event(
             "training_error",
             error=str(e),
-            traceback=traceback.format_exc(),
+            traceback=_tb.format_exc(),
             output_stream=old_stdout,
         )
         raise SystemExit(1) from e

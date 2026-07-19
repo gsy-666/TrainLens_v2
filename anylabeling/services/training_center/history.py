@@ -42,6 +42,13 @@ class JobHistoryRecord:
     data: Optional[str] = None
     project: Optional[str] = None
 
+    # Runtime (GPU environment)
+    runtime_id: Optional[str] = None
+    runtime_python: Optional[str] = None
+    requested_device: Optional[str] = None
+    resolved_device: Optional[str] = None
+    execution_mode: Optional[str] = None
+
     # Epochs & metrics
     requested_epochs: Optional[int] = None
     completed_epochs: Optional[int] = None

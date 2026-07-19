@@ -51,7 +51,7 @@ class UltralyticsAdapter(TrainingAdapter):
         """Start Ultralytics training
 
         Args:
-            job: TrainingJob with metadata
+            job: TrainingJob with metadata (runtime_python, etc.)
             config: train_args dict expected by TrainingManager.start_training()
 
         Returns:
@@ -61,8 +61,10 @@ class UltralyticsAdapter(TrainingAdapter):
             return False, "Config must be a dict of train_args"
 
         self._current_job_id = job.job_id
+        self._current_runtime_python = getattr(job, 'runtime_python', None) or None
 
-        success, message = self.manager.start_training(config)
+        python_executable = self._current_runtime_python
+        success, message = self.manager.start_training(config, python_executable=python_executable)
         return success, message
 
     def stop(self) -> bool:
@@ -140,6 +142,46 @@ class UltralyticsAdapter(TrainingAdapter):
                 timestamp=timestamp,
                 source="ultralytics",
                 save_dir=data.get("save_dir", ""),
+            )
+
+        elif event_type == "worker_ready":
+            # Emit runtime info as console output
+            worker_info_msg = (
+                f"Runtime Python:\n{data.get('sys_executable', '?')}\n\n"
+                f"Python:\n{data.get('python_version', '?')}\n\n"
+                f"Torch:\n{data.get('torch_version', '?')}\n\n"
+                f"Torch CUDA:\n{data.get('torch_cuda_version', '?')}\n\n"
+                f"CUDA available:\n{data.get('cuda_available')}\n\n"
+                f"GPU:\n{data.get('gpu_name', 'N/A')}"
+            )
+            console_event = create_console_output_event(
+                job_id=self._current_job_id,
+                timestamp=timestamp,
+                message=worker_info_msg,
+                stream="stdout",
+                source="ultralytics",
+            )
+            self._emit_event(console_event)
+
+            # Also emit a dedicated worker_ready event for UI state transitions
+            unified_event = TrainingEvent(
+                schema_version=1,
+                job_id=self._current_job_id,
+                event_type=TrainingEventType.WORKER_READY,
+                timestamp=timestamp,
+                payload={
+                    "sys_executable": data.get("sys_executable", ""),
+                    "python_version": data.get("python_version", ""),
+                    "torch_version": data.get("torch_version", ""),
+                    "torch_cuda_version": data.get("torch_cuda_version"),
+                    "cuda_available": data.get("cuda_available", False),
+                    "gpu_count": data.get("gpu_count", 0),
+                    "gpu_name": data.get("gpu_name", ""),
+                    "gpu_names": data.get("gpu_names", []),
+                    "requested_device": data.get("requested_device", ""),
+                    "ultralytics_device": data.get("ultralytics_device", ""),
+                },
+                source="ultralytics",
             )
 
         if unified_event:

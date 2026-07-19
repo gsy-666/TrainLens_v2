@@ -105,4 +105,18 @@ class TrainingJob:
             "command": self.command,
             "metadata": self.metadata,
             "error_message": self.error_message,
+            "runtime_id": self.runtime_id,
+            "runtime_python": self.runtime_python,
+            "requested_device": self.requested_device,
+            "resolved_device": self.resolved_device,
+            "execution_mode": self.execution_mode,
         }
+
+    @property
+    def python_exe_path(self) -> Optional[Path]:
+        """Resolved Python executable for training subprocess."""
+        if self.runtime_python:
+            return Path(self.runtime_python)
+        if self.python_executable:
+            return self.python_executable
+        return None

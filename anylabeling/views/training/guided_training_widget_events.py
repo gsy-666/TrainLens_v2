@@ -26,6 +26,43 @@ def handle_unified_training_event(widget, event):
         widget.start_training_button.setEnabled(False)
         widget.append_training_log(widget.tr("Preparing training..."))
 
+    elif event_type == TrainingEventType.WORKER_READY:
+        payload = event.payload
+        runtime_py = payload.get("sys_executable", "")
+        torch_ver = payload.get("torch_version", "?")
+        cuda_ver = payload.get("torch_cuda_version", "N/A")
+        gpu_name = payload.get("gpu_name", "")
+        cuda_available = payload.get("cuda_available", False)
+
+        widget.append_training_log(
+            widget.tr(
+                f"Runtime Python:\n{runtime_py}\n\n"
+                f"Python:\n{payload.get('python_version', '?')}\n\n"
+                f"Torch:\n{torch_ver}\n\n"
+                f"Torch CUDA:\n{cuda_ver}\n\n"
+                f"CUDA available:\n{cuda_available}"
+            )
+        )
+        if gpu_name:
+            widget.append_training_log(
+                widget.tr(f"GPU:\n{gpu_name}")
+            )
+        widget.append_training_log(
+            widget.tr(
+                f"Model device:\n{payload.get('ultralytics_device', payload.get('requested_device', '?'))}"
+            )
+        )
+
+        # Now we can say training has truly started
+        widget.append_training_log(widget.tr("Training started successfully"))
+
+        # Show Metrics tab and bind dashboard
+        if hasattr(widget, 'tab_widget'):
+            dashboard = widget._ensure_metrics_dashboard()
+            widget.tab_widget.setTabVisible(3, True)
+            save_dir = getattr(widget, 'current_project_path', '')
+            dashboard.bind_job("guided", save_dir)
+
     elif event_type == TrainingEventType.PROCESS_STARTED:
         widget.training_status = "training"
         total_epochs = event.payload.get("total_epochs", 100)
@@ -41,7 +78,7 @@ def handle_unified_training_event(widget, event):
         widget.previous_button.setVisible(False)
         widget.progress_timer.start(1000)
         widget.image_timer.start(5000)
-        widget.append_training_log(widget.tr("Training started..."))
+        widget.append_training_log(widget.tr("Worker process started"))
 
     elif event_type == TrainingEventType.CONSOLE_OUTPUT:
         message = event.payload.get("message", "")

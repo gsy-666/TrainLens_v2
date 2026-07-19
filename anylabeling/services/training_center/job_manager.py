@@ -108,6 +108,11 @@ class JobManager:
                 project_path=os.path.join(getattr(job, 'project', '') or '', getattr(job, 'name', '') or '') if getattr(job, 'project', None) else None,
                 dataset_yaml=getattr(job, 'data', None),
                 model_name=getattr(job, 'model', None),
+                runtime_id=getattr(job, 'runtime_id', None),
+                runtime_python=getattr(job, 'runtime_python', None),
+                requested_device=getattr(job, 'requested_device', None),
+                resolved_device=getattr(job, 'resolved_device', None),
+                execution_mode=getattr(job, 'execution_mode', None),
             )
             store.append_job(record)
         except Exception:

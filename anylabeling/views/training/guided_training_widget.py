@@ -2936,7 +2936,7 @@ print(json.dumps(result, ensure_ascii=False))
             self.previous_button.setVisible(False)
             self.progress_timer.start(1000)
             self.image_timer.start(5000)
-            self.append_training_log(self.tr("Training is about to start..."))
+            self.append_training_log(self.tr("Worker process started"))
 
             # Show Metrics tab and bind dashboard
             dashboard = self._ensure_metrics_dashboard()
@@ -4213,7 +4213,7 @@ print(json.dumps(result, ensure_ascii=False))
             self._reset_start_ui()
             return
 
-        self.append_training_log(self.tr(f"Training started: {message}"))
+        self.append_training_log(self.tr(f"Worker process started: {message}"))
 
     def _on_prep_error(self, error_msg):
         """Called on GUI thread when background preparation fails."""

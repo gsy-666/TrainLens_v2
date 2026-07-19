@@ -15,6 +15,7 @@ class TrainingEventType(Enum):
     JOB_CREATED = "job_created"
     PREPARING = "preparing"
     PROCESS_STARTED = "process_started"
+    WORKER_READY = "worker_ready"
     CONSOLE_OUTPUT = "console_output"
     RESOURCE_SAMPLE = "resource_sample"
     EPOCH_METRICS = "epoch_metrics"
