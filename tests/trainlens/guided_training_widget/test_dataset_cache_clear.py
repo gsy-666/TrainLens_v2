@@ -742,3 +742,103 @@ class TestConfigChain:
         config2 = w.get_current_config()
         assert config1["basic"]["dataset_ratio"] == config2["basic"]["dataset_ratio"]
         assert config2["train"]["epochs"] == "200"
+
+
+# ── Test 37-42: Training image preview ───────────────────────────────
+
+class TestTrainingImagePreview:
+    """Training image preview shows dataset samples, train_batch, val_pred."""
+
+    def _make_widget_with_images(self, qapp, tmp_path):
+        """Create a widget with image_labels for testing preview methods."""
+        w = _make_widget(image_list=[], task_type="Detect")
+        # Initialize minimal train tab structures
+        from PyQt6.QtWidgets import QLabel
+        w.image_labels = [QLabel() for _ in range(6)]
+        w.image_paths = [None] * 6
+        w.training_status = "idle"
+        w.current_project_path = None
+        return w
+
+    def test_dataset_samples_shows_when_prepared(self, qapp, tmp_path):
+        """_display_dataset_samples shows images from prepared dataset."""
+        w = self._make_widget_with_images(qapp, tmp_path)
+        # Create a fake prepared dataset
+        ds = tmp_path / "auto_dataset_test"
+        train_img = ds / "images" / "train"
+        val_img = ds / "images" / "val"
+        train_img.mkdir(parents=True)
+        val_img.mkdir(parents=True)
+        # Create some dummy images
+        import struct
+        def _make_jpg(path):
+            # Minimal valid JPEG header
+            with open(path, "wb") as f:
+                f.write(b'\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xdb\x00C\x00\x08\x06\x06\x07\x06\x05\x08\x07\x07\x07\t\t\x08\n\x0c\x14\r\x0c\x0b\x0b\x0c\x19\x12\x13\x0f\x14\x1d\x1a\x1f\x1e\x1d\x1a\x1c\x1c $.\' ",#\x1c\x1c(7),01444\x1f\'9=82<.342\xff\xdb\x00C\x01\t\t\t\x0c\x0b\x0c\x18\r\r\x182!\x1c!22222222222222222222222222222222222222222222222222\xff\xc0\x00\x11\x08\x00\x01\x00\x01\x03\x01"\x00\x02\x11\x01\x03\x11\x01\xff\xc4\x00\x1f\x00\x00\x01\x05\x01\x01\x01\x01\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\n\x0b\xff\xc4\x00\xb5\x10\x00\x02\x01\x03\x03\x02\x04\x03\x05\x05\x04\x04\x00\x00\x01}\x01\x02\x03\x00\x04\x11\x05\x12!1A\x06\x13Qa\x07"q\x142\x81\x91\xa1\x08#B\xb1\xc1\x15R\xd1\xf0$3br\x82\t\n\x16\x17\x18\x19\x1a%&\'()*456789:CDEFGHIJSTUVWXYZcdefghijstuvwxyz\x83\x84\x85\x86\x87\x88\x89\x8a\x92\x93\x94\x95\x96\x97\x98\x99\x9a\xa2\xa3\xa4\xa5\xa6\xa7\xa8\xa9\xaa\xb2\xb3\xb4\xb5\xb6\xb7\xb8\xb9\xba\xc2\xc3\xc4\xc5\xc6\xc7\xc8\xc9\xca\xd2\xd3\xd4\xd5\xd6\xd7\xd8\xd9\xda\xe1\xe2\xe3\xe4\xe5\xe6\xe7\xe8\xe9\xea\xf1\xf2\xf3\xf4\xf5\xf6\xf7\xf8\xf9\xfa\xff\xda\x00\x0c\x03\x01\x00\x02\x11\x03\x11\x00?\x00\xf9\xfe\xff\xd9')
+        for i in range(5):
+            _make_jpg(str(train_img / f"img{i}.jpg"))
+        for i in range(3):
+            _make_jpg(str(val_img / f"img{i}.jpg"))
+        w._prepared_dataset_dir = str(ds)
+        w._display_dataset_samples()
+        # First 4 train + 2 val → 6 images should be shown
+        shown = sum(1 for p in w.image_paths if p is not None)
+        assert shown == 6
+        # First 4 should be from train
+        assert "train" in str(w.image_paths[0])
+        assert "train" in str(w.image_paths[3])
+        # Last 2 should be from val
+        assert "val" in str(w.image_paths[4])
+        assert "val" in str(w.image_paths[5])
+
+    def test_dataset_samples_clears_when_no_prepared(self, qapp, tmp_path):
+        """When no prepared dataset, all image slots show 'No image'."""
+        w = self._make_widget_with_images(qapp, tmp_path)
+        w._prepared_dataset_dir = None
+        w._display_dataset_samples()
+        assert all(p is None for p in w.image_paths)
+
+    def test_update_training_images_phase_aware(self, qapp, tmp_path):
+        """update_training_images dispatches to correct phase."""
+        w = self._make_widget_with_images(qapp, tmp_path)
+        ds = tmp_path / "auto_dataset_test"
+        (ds / "images" / "train").mkdir(parents=True)
+        (ds / "images" / "val").mkdir(parents=True)
+        import struct
+        def _make_jpg(path):
+            with open(path, "wb") as f:
+                f.write(b'\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xdb\x00C\x00\x08\x06\x06\x07\x06\x05\x08\x07\x07\x07\t\t\x08\n\x0c\x14\r\x0c\x0b\x0b\x0c\x19\x12\x13\x0f\x14\x1d\x1a\x1f\x1e\x1d\x1a\x1c\x1c $.\' ",#\x1c\x1c(7),01444\x1f\'9=82<.342\xff\xdb\x00C\x01\t\t\t\x0c\x0b\x0c\x18\r\r\x182!\x1c!22222222222222222222222222222222222222222222222222\xff\xc0\x00\x11\x08\x00\x01\x00\x01\x03\x01"\x00\x02\x11\x01\x03\x11\x01\xff\xc4\x00\x1f\x00\x00\x01\x05\x01\x01\x01\x01\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\n\x0b\xff\xc4\x00\xb5\x10\x00\x02\x01\x03\x03\x02\x04\x03\x05\x05\x04\x04\x00\x00\x01}\x01\x02\x03\x00\x04\x11\x05\x12!1A\x06\x13Qa\x07"q\x142\x81\x91\xa1\x08#B\xb1\xc1\x15R\xd1\xf0$3br\x82\t\n\x16\x17\x18\x19\x1a%&\'()*456789:CDEFGHIJSTUVWXYZcdefghijstuvwxyz\x83\x84\x85\x86\x87\x88\x89\x8a\x92\x93\x94\x95\x96\x97\x98\x99\x9a\xa2\xa3\xa4\xa5\xa6\xa7\xa8\xa9\xaa\xb2\xb3\xb4\xb5\xb6\xb7\xb8\xb9\xba\xc2\xc3\xc4\xc5\xc6\xc7\xc8\xc9\xca\xd2\xd3\xd4\xd5\xd6\xd7\xd8\xd9\xda\xe1\xe2\xe3\xe4\xe5\xe6\xe7\xe8\xe9\xea\xf1\xf2\xf3\xf4\xf5\xf6\xf7\xf8\xf9\xfa\xff\xda\x00\x0c\x03\x01\x00\x02\x11\x03\x11\x00?\x00\xf9\xfe\xff\xd9')
+        _make_jpg(str(ds / "images" / "train" / "img0.jpg"))
+        _make_jpg(str(ds / "images" / "val" / "img0.jpg"))
+        w._prepared_dataset_dir = str(ds)
+        w.training_status = "idle"
+        w.update_training_images()
+        # Should dispatch to dataset samples (phase 1)
+        assert w.image_paths[0] is not None
+
+        # Switch to training phase
+        w.training_status = "training"
+        w.current_project_path = str(ds)
+        # No train_batch files exist yet, so should still work but show no images
+        w.update_training_images()
+        # Training phase: should have cleared and looked for train_batch
+
+    def test_go_to_train_tab_shows_samples(self, qapp, tmp_path):
+        """Navigating to Train tab (index=2) shows dataset samples."""
+        w = self._make_widget_with_images(qapp, tmp_path)
+        ds = tmp_path / "auto_dataset_test"
+        (ds / "images" / "train").mkdir(parents=True)
+        (ds / "images" / "val").mkdir(parents=True)
+        import struct
+        def _make_jpg(path):
+            with open(path, "wb") as f:
+                f.write(b'\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xdb\x00C\x00\x08\x06\x06\x07\x06\x05\x08\x07\x07\x07\t\t\x08\n\x0c\x14\r\x0c\x0b\x0b\x0c\x19\x12\x13\x0f\x14\x1d\x1a\x1f\x1e\x1d\x1a\x1c\x1c $.\' ",#\x1c\x1c(7),01444\x1f\'9=82<.342\xff\xdb\x00C\x01\t\t\t\x0c\x0b\x0c\x18\r\r\x182!\x1c!22222222222222222222222222222222222222222222222222\xff\xc0\x00\x11\x08\x00\x01\x00\x01\x03\x01"\x00\x02\x11\x01\x03\x11\x01\xff\xc4\x00\x1f\x00\x00\x01\x05\x01\x01\x01\x01\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\n\x0b\xff\xc4\x00\xb5\x10\x00\x02\x01\x03\x03\x02\x04\x03\x05\x05\x04\x04\x00\x00\x01}\x01\x02\x03\x00\x04\x11\x05\x12!1A\x06\x13Qa\x07"q\x142\x81\x91\xa1\x08#B\xb1\xc1\x15R\xd1\xf0$3br\x82\t\n\x16\x17\x18\x19\x1a%&\'()*456789:CDEFGHIJSTUVWXYZcdefghijstuvwxyz\x83\x84\x85\x86\x87\x88\x89\x8a\x92\x93\x94\x95\x96\x97\x98\x99\x9a\xa2\xa3\xa4\xa5\xa6\xa7\xa8\xa9\xaa\xb2\xb3\xb4\xb5\xb6\xb7\xb8\xb9\xba\xc2\xc3\xc4\xc5\xc6\xc7\xc8\xc9\xca\xd2\xd3\xd4\xd5\xd6\xd7\xd8\xd9\xda\xe1\xe2\xe3\xe4\xe5\xe6\xe7\xe8\xe9\xea\xf1\xf2\xf3\xf4\xf5\xf6\xf7\xf8\xf9\xfa\xff\xda\x00\x0c\x03\x01\x00\x02\x11\x03\x11\x00?\x00\xf9\xfe\xff\xd9')
+        _make_jpg(str(ds / "images" / "train" / "img0.jpg"))
+        _make_jpg(str(ds / "images" / "val" / "img0.jpg"))
+        w._prepared_dataset_dir = str(ds)
+        w.training_status = "idle"
+        # Patch ensure_train_tab_initialized to avoid full init
+        w._train_tab_initialized = True
+        w.go_to_specific_tab(2)
+        # Should have shown dataset samples (at least 1 image_path set)
+        assert w.image_paths[0] is not None

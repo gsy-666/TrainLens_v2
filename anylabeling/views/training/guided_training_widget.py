@@ -422,6 +422,9 @@ class GuidedTrainingWidget(QWidget):
             self.ensure_train_tab_initialized()
         self._update_stage_gates()  # refresh gate state before switching
         self.tab_widget.setCurrentIndex(index)
+        # Refresh dataset samples when navigating to Train tab
+        if index == 2 and self.training_status in ("idle", "completed"):
+            self._display_dataset_samples()
 
     # Data Tab
     def show_pose_config(self):
@@ -1916,6 +1919,89 @@ class GuidedTrainingWidget(QWidget):
                 logger.warning(f"Failed to read results.csv: {e}")
 
     def update_training_images(self):
+        """Phase-aware training image refresh (runs on QTimer, non-blocking).
+
+        Phase 1 (idle/completed, no running job): show dataset samples.
+        Phase 2 (training in progress): show train_batch images.
+        Phase 3 (just completed): show val predictions + curves.
+        """
+        if not self.current_project_path and not self._prepared_dataset_dir:
+            return
+
+        # ── Phase 3: just completed → val predictions ──
+        if self.training_status == "completed":
+            self._display_completed_images()
+            return
+
+        # ── Phase 2: training in progress → train_batch ──
+        if self.training_status == "training" and self.current_project_path:
+            self._display_train_batch_images()
+            return
+
+        # ── Phase 1: idle → dataset samples ──
+        self._display_dataset_samples()
+
+    def _display_dataset_samples(self):
+        """Show sample images from the prepared dataset on the Train tab."""
+        dataset_dir = self._prepared_dataset_dir
+        if not dataset_dir or not os.path.isdir(dataset_dir):
+            # Reset all image slots
+            for i, label in enumerate(self.image_labels):
+                label.clear()
+                label.setText(self.tr("No image"))
+                self.image_paths[i] = None
+            return
+
+        # Collect sample images from train split
+        train_img_dir = os.path.join(dataset_dir, "images", "train")
+        samples = []
+        if os.path.isdir(train_img_dir):
+            for f in sorted(os.listdir(train_img_dir)):
+                if f.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp')):
+                    samples.append(os.path.join(train_img_dir, f))
+        # Take first 4 from train, then 2 from val
+        sample_paths = samples[:4]
+        val_img_dir = os.path.join(dataset_dir, "images", "val")
+        if os.path.isdir(val_img_dir):
+            val_samples = []
+            for f in sorted(os.listdir(val_img_dir)):
+                if f.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp')):
+                    val_samples.append(os.path.join(val_img_dir, f))
+            sample_paths.extend(val_samples[:2])
+
+        # Fill up to 6 slots
+        sample_paths = sample_paths[:6]
+
+        for i, image_label in enumerate(self.image_labels):
+            if i < len(sample_paths):
+                path = sample_paths[i]
+                try:
+                    pixmap = QPixmap(path)
+                    if not pixmap.isNull():
+                        scaled = pixmap.scaled(
+                            150, 150,
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation,
+                        )
+                        image_label.setPixmap(scaled)
+                        image_label.setText("")
+                        image_label.setToolTip(f"[Sample] {os.path.basename(path)}")
+                        self.image_paths[i] = path
+                    else:
+                        image_label.clear()
+                        image_label.setText(self.tr("No image"))
+                        self.image_paths[i] = None
+                except Exception:
+                    image_label.clear()
+                    image_label.setText(self.tr("No image"))
+                    self.image_paths[i] = None
+            else:
+                image_label.clear()
+                image_label.setText(self.tr("No image"))
+                self.image_paths[i] = None
+
+    def _display_train_batch_images(self):
+        """Show train_batch images during active training."""
         if not self.current_project_path:
             return
 
@@ -1931,68 +2017,114 @@ class GuidedTrainingWidget(QWidget):
                     break
             return found_files[:max_count]
 
+        # Train batch images in first 3 slots
+        train_batches = find_images_by_pattern(["train_batch*.jpg"], 3)
+        # Val/curve images in last 3 slots
         if self.selected_task_type == "Classify":
-            image_configs = [
-                {"patterns": ["train_batch*.jpg"], "max_count": 3},
-                {
-                    "patterns": [
-                        "val_batch0_labels.jpg",
-                        "val_batch0_pred.jpg",
-                        "results.png",
-                    ],
-                    "max_count": 3,
-                },
-            ]
+            val_patterns = ["val_batch0_labels.jpg", "val_batch0_pred.jpg", "results.png"]
         else:
-            image_configs = [
-                {"patterns": ["train_batch*.jpg"], "max_count": 3},
-                {
-                    "patterns": [
-                        "*PR_curve.png",
-                        "*F1_curve.png",
-                        "results.png",
-                    ],
-                    "max_count": 3,
-                },
-            ]
+            val_patterns = ["*PR_curve.png", "*F1_curve.png", "results.png"]
+        val_batches = find_images_by_pattern(val_patterns, 3)
 
-        all_images = []
-        for config in image_configs:
-            all_images.extend(
-                find_images_by_pattern(config["patterns"], config["max_count"])
-            )
+        all_paths = train_batches + val_batches
 
         for i, image_label in enumerate(self.image_labels):
-            if i < len(all_images):
-                image_path = all_images[i]
+            if i < len(all_paths):
+                path = all_paths[i]
                 try:
-                    pixmap = QPixmap(image_path)
+                    pixmap = QPixmap(path)
                     if not pixmap.isNull():
-                        scaled_pixmap = pixmap.scaled(
-                            150,
-                            150,
+                        scaled = pixmap.scaled(
+                            150, 150,
                             Qt.AspectRatioMode.KeepAspectRatio,
                             Qt.TransformationMode.SmoothTransformation,
                         )
-                        image_label.setPixmap(scaled_pixmap)
+                        image_label.setPixmap(scaled)
                         image_label.setText("")
-                        image_label.setToolTip(os.path.basename(image_path))
-                        self.image_paths[i] = image_path
+                        image_label.setToolTip(os.path.basename(path))
+                        self.image_paths[i] = path
                     else:
                         image_label.clear()
                         image_label.setText(self.tr("No image"))
-                        image_label.setToolTip("")
                         self.image_paths[i] = None
-                except Exception as e:
-                    logger.warning(f"Failed to load image {image_path}: {e}")
+                except Exception:
                     image_label.clear()
                     image_label.setText(self.tr("No image"))
-                    image_label.setToolTip("")
                     self.image_paths[i] = None
             else:
                 image_label.clear()
                 image_label.setText(self.tr("No image"))
-                image_label.setToolTip("")
+                self.image_paths[i] = None
+
+    def _display_completed_images(self):
+        """Show val predictions and curves after training completes."""
+        if not self.current_project_path:
+            return
+
+        def find_images_by_pattern(patterns, max_count=6):
+            found_files = []
+            for pattern in patterns:
+                matches = glob.glob(
+                    os.path.join(self.current_project_path, pattern)
+                )
+                matches.sort()
+                found_files.extend(matches)
+                if len(found_files) >= max_count:
+                    break
+            return found_files[:max_count]
+
+        # Priority: val_batch pred/labels → curves → results
+        patterns = [
+            "val_batch0_pred.jpg",
+            "val_batch0_labels.jpg",
+            "val_batch1_pred.jpg",
+            "val_batch1_labels.jpg",
+            "train_batch0.jpg",
+            "train_batch1.jpg",
+            "*PR_curve.png",
+            "*F1_curve.png",
+            "results.png",
+            "confusion_matrix.png",
+            "labels.jpg",
+        ]
+        all_paths = find_images_by_pattern(patterns, 6)
+
+        for i, image_label in enumerate(self.image_labels):
+            if i < len(all_paths):
+                path = all_paths[i]
+                try:
+                    pixmap = QPixmap(path)
+                    if not pixmap.isNull():
+                        scaled = pixmap.scaled(
+                            150, 150,
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation,
+                        )
+                        image_label.setPixmap(scaled)
+                        image_label.setText("")
+                        basename = os.path.basename(path)
+                        # Prepend phase tag for clarity
+                        if "pred" in basename:
+                            tag = "[Pred]"
+                        elif "labels" in basename:
+                            tag = "[GT]"
+                        elif "train_batch" in basename:
+                            tag = "[Train]"
+                        else:
+                            tag = ""
+                        image_label.setToolTip(f"{tag} {basename}".strip())
+                        self.image_paths[i] = path
+                    else:
+                        image_label.clear()
+                        image_label.setText(self.tr("No image"))
+                        self.image_paths[i] = None
+                except Exception:
+                    image_label.clear()
+                    image_label.setText(self.tr("No image"))
+                    self.image_paths[i] = None
+            else:
+                image_label.clear()
+                image_label.setText(self.tr("No image"))
                 self.image_paths[i] = None
 
     def _on_unified_training_event(self, event):
@@ -3287,6 +3419,9 @@ class GuidedTrainingWidget(QWidget):
         layout.addWidget(scroll_area)
 
         self.init_training_actions(layout)
+
+        # Show dataset samples immediately if prepared
+        self._display_dataset_samples()
 
     def on_export_event(self, event_type, data):
         if event_type == "export_started":
