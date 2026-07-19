@@ -388,6 +388,11 @@ def resolve_training_model_path(model):
         return model
 
     model_path = Path(model)
+
+    # Normalize to OS-native path separators
+    if os.name == "nt":
+        model = os.path.normpath(model)
+
     if (
         model.startswith(("http://", "https://"))
         or model_path.is_absolute()

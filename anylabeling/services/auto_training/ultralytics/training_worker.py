@@ -133,12 +133,20 @@ def main():
         sys.stdout = log_stream
         sys.stderr = log_stream
 
+        # Normalize model path to OS-native format (Ultralytics may not
+        # recognise forward-slash paths on Windows as local files)
+        model_path = train_args.pop("model")
+        if os.name == "nt":
+            model_path = os.path.normpath(model_path)
+        emit_event("training_log", output_stream=old_stdout,
+                   message=f"Model path (resolved): {model_path}")
+
         import matplotlib
         matplotlib.use("Agg")
 
         from ultralytics import YOLO
 
-        model = YOLO(train_args.pop("model"))
+        model = YOLO(model_path)
         train_args["verbose"] = False
         train_args["show"] = False
         result = model.train(**train_args)
