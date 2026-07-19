@@ -9,7 +9,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QObject, QThread, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QObject, QProcess, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
@@ -1314,57 +1314,269 @@ class GuidedTrainingWidget(QWidget):
             )
 
     def _install_missing_packages(self, env_info):
-        """Install missing packages (ultralytics) into an external environment."""
-        from anylabeling.services.training_center.environment_scanner import (
-            diagnose_python, register_external_env,
-        )
+        """Install missing packages (ultralytics) via QProcess — async, non-blocking."""
+        from PyQt6.QtCore import QProcess
+
         python_exe = env_info.python_path
 
-        msg = (
-            f"Install ultralytics into this environment?\n\n"
-            f"  {env_info.env_name}\n"
-            f"  Python: {python_exe}\n\n"
-            f"Command:\n"
-            f"  {python_exe} -m pip install ultralytics==8.4.96\n\n"
-            f"This will NOT reinstall torch or modify CUDA."
-        )
-        reply = QMessageBox.question(
-            self, "Confirm Install", msg,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
+        # ── Guard: prevent double-install ──
+        if hasattr(self, '_package_install_process') and self._package_install_process is not None:
+            QMessageBox.information(self, "Installation in Progress",
+                                    "Package installation is already running.")
             return
 
+        # ── Create non-modal progress dialog ──
+        self._package_install_dialog = QDialog(self)
+        self._package_install_dialog.setWindowTitle("Installing Missing Packages")
+        self._package_install_dialog.setMinimumSize(550, 350)
+        dlg_layout = QVBoxLayout(self._package_install_dialog)
+
+        info_label = QLabel(
+            f"Environment: {env_info.env_name}\n"
+            f"Python: {python_exe}\n"
+            f"Package: ultralytics==8.4.96\n\n"
+            f"Stage: Installing"
+        )
+        info_label.setWordWrap(True)
+        dlg_layout.addWidget(info_label)
+        self._package_install_info_label = info_label
+
+        self._package_install_log = QTextEdit()
+        self._package_install_log.setReadOnly(True)
+        self._package_install_log.setStyleSheet("font-family: Consolas, monospace; font-size: 11px;")
+        dlg_layout.addWidget(self._package_install_log)
+
+        btn_layout = QHBoxLayout()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self._on_cancel_package_install)
+        btn_layout.addWidget(cancel_btn)
+        btn_layout.addStretch()
+        dlg_layout.addLayout(btn_layout)
+
+        self._package_install_dialog.finished.connect(self._on_package_install_dialog_closed)
+        self._package_install_dialog.show()  # non-modal!
+
+        # ── Disable rescan/install buttons during install ──
+        self.rescan_envs_btn.setEnabled(False)
+        self.enable_gpu_btn.setEnabled(False)
         self.gpu_install_progress.setVisible(True)
         self.gpu_install_progress.setText("Installing ultralytics...")
         self.gpu_install_progress.setStyleSheet("color: #2196F3; font-size: 11px;")
 
-        import subprocess as _sp
+        # ── Create QProcess ──
+        self._package_install_process = QProcess(self)
+        self._package_install_process.setProgram(python_exe)
+        self._package_install_process.setArguments(["-m", "pip", "install", "ultralytics==8.4.96"])
+        self._package_install_process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+
+        self._package_install_process.readyReadStandardOutput.connect(
+            self._on_package_install_output
+        )
+        self._package_install_process.finished.connect(
+            self._on_package_install_finished
+        )
+        self._package_install_process.errorOccurred.connect(
+            self._on_package_install_error
+        )
+
+        self._package_install_log_buffer = []
+        self._package_install_env_info = env_info
+        self._package_install_process.start()
+
+    def _on_package_install_output(self):
+        """Read pip stdout in real-time."""
+        if not hasattr(self, '_package_install_process') or self._package_install_process is None:
+            return
+        data = self._package_install_process.readAllStandardOutput()
         try:
-            result = _sp.run(
-                [python_exe, "-m", "pip", "install", "ultralytics==8.4.96"],
-                capture_output=True, text=True, timeout=120,
-            )
-            if result.returncode == 0:
-                info = diagnose_python(python_exe)
-                if info.is_cuda_ready:
-                    register_external_env(info)
-                    self._populate_device_combo()
-                    self._update_gpu_env_card()
-                    self.gpu_install_progress.setText("✓ Ready!")
-                    self.gpu_install_progress.setStyleSheet("color: green; font-size: 11px; font-weight: bold;")
-                    QMessageBox.information(self, "Success", "Environment is now ready for GPU training.")
-                else:
-                    self.gpu_install_progress.setText("✗ Verification failed.")
-                    self.gpu_install_progress.setStyleSheet("color: red; font-size: 11px;")
-            else:
-                self.gpu_install_progress.setText(f"✗ Install failed.")
-                self.gpu_install_progress.setStyleSheet("color: red; font-size: 11px;")
-                QMessageBox.warning(self, "Install Failed", result.stderr[:500])
-        except Exception as e:
-            self.gpu_install_progress.setText(f"✗ Error: {e}")
+            text = bytes(data).decode(os.getfilesystemencoding(), errors="replace")
+        except Exception:
+            text = bytes(data).decode("utf-8", errors="replace")
+        self._package_install_log_buffer.append(text)
+        if hasattr(self, '_package_install_log'):
+            self._package_install_log.append(text.strip())
+            # Auto-scroll
+            sb = self._package_install_log.verticalScrollBar()
+            sb.setValue(sb.maximum())
+
+    def _on_package_install_finished(self, exit_code: int, exit_status):
+        """Handle pip completion — start async verification."""
+        from PyQt6.QtCore import QProcess
+        from anylabeling.services.training_center.environment_scanner import (
+            register_external_env,
+        )
+
+        proc = self._package_install_process
+        self._package_install_process = None
+        env_info = self._package_install_env_info
+
+        if exit_status != QProcess.ExitStatus.NormalExit or exit_code != 0:
+            # ── Pip failed ──
+            log_text = "\n".join(self._package_install_log_buffer[-20:])
+            if hasattr(self, '_package_install_info_label'):
+                self._package_install_info_label.setText(
+                    f"Stage: FAILED (exit code {exit_code})"
+                )
+            self.gpu_install_progress.setText(f"✗ pip failed (exit {exit_code})")
             self.gpu_install_progress.setStyleSheet("color: red; font-size: 11px;")
+            QMessageBox.warning(
+                self._package_install_dialog or self,
+                "Install Failed",
+                f"pip exited with code {exit_code}.\n\nLast output:\n{log_text[:500]}"
+            )
+            self._finish_package_install(success=False)
+            return
+
+        # ── Pip succeeded → verify ──
+        if hasattr(self, '_package_install_info_label'):
+            self._package_install_info_label.setText("Stage: VERIFYING")
+        self.gpu_install_progress.setText("Verifying CUDA runtime...")
+
+        # Run diagnosis asynchronously via QProcess
+        verify_script = """
+import json, sys, traceback
+result = {"torch_version":"","cuda_version":"","cuda_available":False,"gpu_name":"","tensor_test":"FAIL","ultralytics_version":"","ultralytics_ok":False,"error":""}
+try:
+    import torch
+    result["torch_version"] = torch.__version__
+    result["cuda_version"] = getattr(torch.version,"cuda","") or ""
+    result["cuda_available"] = torch.cuda.is_available()
+    if result["cuda_available"]:
+        result["gpu_name"] = torch.cuda.get_device_name(0)
+        t = torch.randn(100,100,device="cuda:0")
+        t = t @ t.T
+        torch.cuda.synchronize()
+        del t
+        torch.cuda.empty_cache()
+        result["tensor_test"] = "PASS"
+    import ultralytics
+    result["ultralytics_ok"] = True
+    result["ultralytics_version"] = ultralytics.__version__
+except Exception as e:
+    result["error"] = str(e)
+print(json.dumps(result, ensure_ascii=False))
+"""
+        self._package_verify_process = QProcess(self)
+        self._package_verify_process.setProgram(env_info.python_path)
+        self._package_verify_process.setArguments(["-c", verify_script])
+        self._package_verify_process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        self._package_verify_process.finished.connect(self._on_package_verify_finished)
+        self._package_verify_process.errorOccurred.connect(
+            lambda err: self._on_package_verify_error(str(err))
+        )
+        self._package_verify_process.start()
+
+    def _on_package_verify_finished(self, exit_code: int, exit_status):
+        """Handle verification result."""
+        import json
+        from anylabeling.services.training_center.environment_scanner import (
+            register_external_env,
+        )
+        proc = self._package_verify_process
+        self._package_verify_process = None
+
+        if exit_status != QProcess.ExitStatus.NormalExit or exit_code != 0:
+            self.gpu_install_progress.setText("✗ Verification script failed")
+            self.gpu_install_progress.setStyleSheet("color: red; font-size: 11px;")
+            self._finish_package_install(success=False)
+            return
+
+        output = bytes(proc.readAllStandardOutput()).decode("utf-8", errors="replace").strip()
+        try:
+            data = json.loads(output)
+        except json.JSONDecodeError:
+            self.gpu_install_progress.setText("✗ Invalid verification output")
+            self.gpu_install_progress.setStyleSheet("color: red; font-size: 11px;")
+            self._finish_package_install(success=False)
+            return
+
+        tensor_ok = data.get("tensor_test") == "PASS"
+        utl_ok = data.get("ultralytics_ok", False)
+
+        if not tensor_ok or not utl_ok:
+            reason = []
+            if not tensor_ok:
+                reason.append("CUDA tensor test: FAILED")
+            if not utl_ok:
+                reason.append("Ultralytics import: FAILED")
+            self.gpu_install_progress.setText(f"✗ Verification: {', '.join(reason)}")
+            self.gpu_install_progress.setStyleSheet("color: red; font-size: 11px;")
+            QMessageBox.warning(
+                self._package_install_dialog or self,
+                "Verification Failed",
+                f"Installation succeeded but environment is not ready:\n\n"
+                f"  {', '.join(reason)}\n\n"
+                f"Error: {data.get('error', 'N/A')}"
+            )
+            self._finish_package_install(success=False)
+            return
+
+        # ── Success! Register and refresh ──
+        env_info = self._package_install_env_info
+        env_info.ultralytics_installed = True
+        env_info.ultralytics_version = data.get("ultralytics_version", "")
+        env_info.status = "ready"
+        register_external_env(env_info)
+
+        self._populate_device_combo()
+        self._update_gpu_env_card()
+        self.gpu_install_progress.setText("✓ Environment is READY!")
+        self.gpu_install_progress.setStyleSheet("color: green; font-size: 11px; font-weight: bold;")
+        if hasattr(self, '_package_install_info_label'):
+            self._package_install_info_label.setText("Stage: COMPLETED ✓")
+        QMessageBox.information(
+            self._package_install_dialog or self,
+            "Success",
+            f"Ultralytics {data['ultralytics_version']} installed.\n"
+            f"CUDA test: PASS\n"
+            f"Device list has been updated.\n\n"
+            f"GPU: {data.get('gpu_name', 'N/A')}"
+        )
+        self._finish_package_install(success=True)
+
+    def _on_package_verify_error(self, error_str: str):
+        self.gpu_install_progress.setText(f"✗ Verify error: {error_str}")
+        self.gpu_install_progress.setStyleSheet("color: red; font-size: 11px;")
+        self._finish_package_install(success=False)
+
+    def _on_package_install_error(self, error):
+        """QProcess failed to start."""
+        self.gpu_install_progress.setText(f"✗ Failed to start: {error}")
+        self.gpu_install_progress.setStyleSheet("color: red; font-size: 11px;")
+        self._finish_package_install(success=False)
+
+    def _on_cancel_package_install(self):
+        if hasattr(self, '_package_install_process') and self._package_install_process:
+            self._package_install_process.terminate()
+            # If still running after 3s, kill
+            QTimer.singleShot(3000, self._force_kill_install_process)
+        self.gpu_install_progress.setText("Cancelled")
+        self._finish_package_install(success=False)
+
+    def _force_kill_install_process(self):
+        if hasattr(self, '_package_install_process') and self._package_install_process:
+            try:
+                self._package_install_process.kill()
+            except Exception:
+                pass
+
+    def _on_package_install_dialog_closed(self):
+        """Cleanup when dialog is closed."""
+        self._package_install_dialog = None
+        self._finish_package_install(success=False)
+
+    def _finish_package_install(self, success: bool):
+        """Cleanup after package install (success or failure)."""
+        self._package_install_process = None
+        self._package_verify_process = None
+        self._package_install_env_info = None
+        self._package_install_log_buffer = []
+
+        self.rescan_envs_btn.setEnabled(True)
+        self.enable_gpu_btn.setEnabled(True)
+
+        if not success and hasattr(self, 'gpu_install_progress'):
+            self.gpu_install_progress.setVisible(False)
 
     def _start_gpu_install(self):
         from anylabeling.services.training_center.runtime_installer import (
