@@ -981,39 +981,47 @@ class GuidedTrainingWidget(QWidget):
 
         Uses userData to store internal device values, separate from display text.
         """
+        import logging
+        _log = logging.getLogger(__name__)
         from anylabeling.services.training_center.device_service import detect_local_devices
         combo = self.config_widgets["device"]
         current_val = combo.currentData() or "auto"
 
-        # Remember previous selection
         combo.blockSignals(True)
         combo.clear()
 
         # Auto (always first)
         combo.addItem("Auto", "auto")
+        _log.debug("Device combo: added Auto / auto")
 
         # Detected GPUs
         self._detected_gpus = []
         try:
             devices = detect_local_devices()
+            _log.debug("detect_local_devices returned %d devices", len(devices))
             for d in devices:
+                _log.debug("  Device: backend=%s idx=%d name=%s avail=%s",
+                           d.backend, d.index, d.display_name, d.available)
                 if d.backend == "cuda" and d.available:
                     self._detected_gpus.append(d)
                     combo.addItem(d.display_name, d.training_value)
+                    _log.info("Device combo: added %s / %s", d.display_name, d.training_value)
                 elif d.backend == "cpu" and d.available:
                     combo.addItem("CPU", "cpu")
-        except Exception:
-            # Fallback: CPU only
+                    _log.debug("Device combo: added CPU / cpu")
+        except Exception as e:
+            _log.warning("Device detection failed: %s", e)
             combo.addItem("CPU", "cpu")
 
-        # Default to auto if no match
+        # Restore previous selection or default to Auto
         idx = combo.findData(current_val)
         if idx >= 0:
             combo.setCurrentIndex(idx)
         else:
-            combo.setCurrentIndex(0)  # Auto
+            combo.setCurrentIndex(0)
 
         combo.blockSignals(False)
+        _log.info("Device combo: %d items, selected=%s", combo.count(), combo.currentData())
 
     def _on_refresh_devices(self):
         """Re-scan GPUs and refresh the device combo."""

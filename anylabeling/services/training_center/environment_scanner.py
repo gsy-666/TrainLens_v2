@@ -82,6 +82,10 @@ class EnvironmentInfo:
             "torchvision_version": self.torchvision_version,
             "ultralytics_version": self.ultralytics_version,
             "gpu_names": self.gpu_names,
+            "gpu_memory_gb": self.gpu_memory_gb,
+            "gpu_count": self.gpu_count,
+            "cuda_available": self.cuda_available,
+            "tensor_test_passed": self.tensor_test_passed,
             "verification_status": self.status,
             "verified_at": self.verified_at or time.strftime("%Y-%m-%dT%H:%M:%S"),
         }
@@ -333,7 +337,7 @@ def diagnose_python(python_path: str, timeout: float = 20.0) -> EnvironmentInfo:
         info.error = data.get("error", "")
 
         # Determine environment root
-        info.environment_root = str(Path(python_path).parent.parent)
+        info.environment_root = str(Path(python_path).parent)
         info.env_name = Path(info.environment_root).name
         info.source = _guess_env_source(python_path)
 
@@ -389,16 +393,34 @@ def register_external_env(info: EnvironmentInfo):
 
 
 def get_registered_envs() -> list[dict]:
-    """Load all registered external environment metadata."""
+    """Load all registered external environment metadata.
+
+    Normalizes verification_status to lowercase 'ready' for compatibility.
+    """
     envs = []
     if not REGISTERED_DIR.is_dir():
         return envs
     for reg_file in sorted(REGISTERED_DIR.glob("*.json")):
         try:
             with open(reg_file) as f:
-                envs.append(json.load(f))
-        except Exception:
-            pass
+                data = json.load(f)
+            # Normalize: accept 'ready', 'READY', 'EnvironmentStatus.READY', etc.
+            raw_status = str(data.get("verification_status", "")).strip().lower()
+            if raw_status in ("ready", "environmentstatus.ready", "verificationstatus.ready"):
+                data["verification_status"] = "ready"
+            else:
+                data["verification_status"] = raw_status
+            # Ensure python_path is absolute
+            if data.get("python_path"):
+                data["python_path"] = os.path.abspath(data["python_path"])
+            _logger.debug(
+                "Registered runtime: id=%s python=%s root=%s status=%s",
+                data.get("runtime_id"), data.get("python_path"),
+                data.get("environment_root"), data.get("verification_status"),
+            )
+            envs.append(data)
+        except Exception as e:
+            _logger.warning("Failed to load registered env %s: %s", reg_file.name, e)
     return envs
 
 
@@ -443,7 +465,7 @@ class EnvironmentScannerWorker(QObject):
             info = diagnose_python(py_path, timeout=45.0)
             _logger.info(
                 "Env %s: status=%s torch=%s cuda=%s ultralytics=%s error=%s",
-                os.path.basename(os.path.dirname(os.path.dirname(py_path))) or py_path,
+                Path(py_path).parent.name,
                 info.status, info.torch_version, info.torch_cuda_version,
                 info.ultralytics_installed, info.error[:80] if info.error else "",
             )

@@ -266,28 +266,42 @@ def detect_local_devices() -> list[DeviceInfo]:
             except Exception as e:
                 _logger.debug("Runtime scan skipped: %s", e)
 
-            # 2. Try registered external environments
+            # 2. Try registered external environments (fast: use stored GPU info)
             if len(devices) <= 1:
                 try:
                     from anylabeling.services.training_center.environment_scanner import (
-                        get_registered_envs, diagnose_python, EnvStatus,
+                        get_registered_envs,
                     )
                     for reg in get_registered_envs():
-                        if reg.get("verification_status") == EnvStatus.READY:
-                            info = diagnose_python(reg["python_path"], timeout=10.0)
-                            if info.is_cuda_ready and info.gpu_names:
-                                for i, name in enumerate(info.gpu_names):
-                                    mem = info.gpu_memory_gb[i] if i < len(info.gpu_memory_gb) else 0
-                                    devices.append(DeviceInfo(
-                                        backend="cuda", index=i,
-                                        display_name=f"GPU {i} — {name} · {mem:.1f} GB",
-                                        training_value=f"cuda:{i}",
-                                        available=True,
-                                        total_memory_bytes=int(mem * (1024**3)),
-                                        execution_location="local",
-                                    ))
-                                break
+                        status = str(reg.get("verification_status", "")).strip().lower()
+                        if status != "ready":
+                            continue
+                        py = reg.get("python_path", "")
+                        if not py or not os.path.isfile(py):
+                            _logger.debug("Registered env python missing: %s", py)
+                            continue
+                        gpu_names = reg.get("gpu_names", [])
+                        gpu_mem = reg.get("gpu_memory_gb", [])
+                        if not gpu_names:
+                            continue
+                        for i, name in enumerate(gpu_names):
+                            mem = gpu_mem[i] if i < len(gpu_mem) else 0
+                            devices.append(DeviceInfo(
+                                backend="cuda", index=i,
+                                display_name=f"GPU {i} — {name} · {mem:.1f} GB",
+                                training_value=f"cuda:{i}",
+                                available=True,
+                                total_memory_bytes=int(mem * (1024**3)),
+                                execution_location="local",
+                            ))
+                        if devices:
+                            _logger.info(
+                                "Registered env %s provides GPU: %s",
+                                reg.get("runtime_id"), gpu_names,
+                            )
+                            break
                 except Exception as e:
+                    _logger.debug("Registered env scan skipped: %s", e)
                     _logger.debug("Registered env scan skipped: %s", e)
 
     return devices
