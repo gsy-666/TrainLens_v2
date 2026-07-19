@@ -3227,6 +3227,10 @@ class GuidedTrainingWidget(QWidget):
 
         # ── Phase 1: Reserve job manager slot atomically ──
         job_id = f"guided_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        # Use prepared YAML as the actual dataset (not config's coco8.yaml)
+        actual_data = self._prepared_yaml_path or config["basic"].get("data", "")
+        # Normalize task display name
+        task_display = (self.selected_task_type or "").strip().capitalize()
         self.current_job = TrainingJob(
             job_id=job_id,
             mode=TrainingMode.GUIDED_ULTRALYTICS,
@@ -3241,9 +3245,9 @@ class GuidedTrainingWidget(QWidget):
             command=[],
             metadata={},
             error_message=None,
-            task=self.selected_task_type or "",
+            task=task_display,
             model=config["basic"].get("model", ""),
-            data=config["basic"].get("data", ""),
+            data=actual_data,
             project=project_path,
             name=name,
         )

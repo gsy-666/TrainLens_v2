@@ -208,19 +208,23 @@ class TrainingHistoryWidget(QWidget):
 
         # 1. Task
         task_text = job.task or (job.metadata.get("task", "") if isinstance(job.metadata, dict) else "") or ""
-        self.table.setItem(row, 1, QTableWidgetItem(task_text))
+        # Normalize task capitalization
+        if task_text:
+            task_text = task_text.strip().capitalize()
+        self.table.setItem(row, 1, QTableWidgetItem(task_text or "—"))
 
-        # 2. Model
+        # 2. Model — show basename in table, full path in detail
         model_text = job.model_name or job.model or (job.metadata.get("model", "") if isinstance(job.metadata, dict) else "")
         if not model_text and job.command:
-            # Try to extract model from command
             for part in job.command:
                 if part.endswith('.pt') or part.endswith('.yaml'):
-                    model_text = os.path.basename(part)
+                    model_text = part
                     break
-        self.table.setItem(row, 2, QTableWidgetItem(model_text or "—"))
+        # Table: basename only
+        model_basename = os.path.basename(model_text) if model_text else ""
+        self.table.setItem(row, 2, QTableWidgetItem(model_basename or "—"))
 
-        # 3. Dataset
+        # 3. Dataset — show basename in table, full path in detail
         dataset_text = job.dataset_yaml or job.data or (job.metadata.get("data", "") if isinstance(job.metadata, dict) else "")
         if dataset_text:
             dataset_text = os.path.basename(dataset_text)
@@ -297,11 +301,13 @@ class TrainingHistoryWidget(QWidget):
             lines.append(f"Duration: {duration}")
 
         task = job.task or "—"
+        if task:
+            task = task.strip().capitalize()
         lines.append(f"Task: {task}")
-        model = job.model_name or job.model or "—"
-        lines.append(f"Model: {model}")
-        dataset = job.dataset_yaml or job.data or "—"
-        lines.append(f"Dataset: {os.path.basename(dataset) if dataset else '—'}")
+        model_full = job.model_name or job.model or "—"
+        lines.append(f"Model: {model_full}")
+        dataset_full = job.dataset_yaml or job.data or "—"
+        lines.append(f"Dataset: {dataset_full}")
 
         # Epochs
         completed = job.completed_epochs or job.final_epoch

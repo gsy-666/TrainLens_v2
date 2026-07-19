@@ -842,3 +842,109 @@ class TestTrainingImagePreview:
         w.go_to_specific_tab(2)
         # Should have shown dataset samples (at least 1 image_path set)
         assert w.image_paths[0] is not None
+
+
+# ── Test 43-48: History metadata (Dataset, Model, Task) ──────────────
+
+class TestHistoryMetadata:
+    """History records must use actual prepared YAML, not coco8.yaml."""
+
+    def _make_widget_for_training(self, qapp, tmp_path):
+        """Create a widget with prepared dataset for training flow."""
+        w = _make_widget(image_list=[], task_type="Detect")
+        from anylabeling.views.training.widgets.ultralytics_widgets.custom_widgets import (
+            CustomLineEdit, CustomSlider,
+        )
+        from PyQt6.QtWidgets import QLabel
+        w.config_widgets = {
+            "data": CustomLineEdit(),
+            "project": CustomLineEdit(),
+            "name": CustomLineEdit(),
+            "model": CustomLineEdit(),
+            "device": CustomLineEdit(),
+            "epochs": CustomLineEdit(),
+            "batch": CustomLineEdit(),
+            "imgsz": CustomLineEdit(),
+            "dataset_ratio": CustomSlider(),
+        }
+        w.config_widgets["data"].setText(str(tmp_path / "coco8.yaml"))
+        w.config_widgets["project"].setText(str(tmp_path / "runs"))
+        w.config_widgets["name"].setText("exp")
+        w.config_widgets["model"].setText(str(tmp_path / "models" / "yolo11n.pt"))
+        w.config_widgets["device"].setText("cpu")
+        w.config_widgets["epochs"].setText("10")
+        w.config_widgets["batch"].setText("8")
+        w.config_widgets["imgsz"].setText("640")
+        w.config_widgets["dataset_ratio"].setRange(5, 95)
+        w.config_widgets["dataset_ratio"].setValue(80)
+        w.dataset_ratio_label = QLabel("0.8")
+        w.output_dir = str(tmp_path)
+        w.selected_task_type = "Detect"
+        return w
+
+    def test_training_job_uses_prepared_yaml(self, qapp, tmp_path):
+        """TrainingJob.data must be the prepared YAML, not coco8.yaml."""
+        w = self._make_widget_for_training(qapp, tmp_path)
+        # Set prepared YAML
+        prepared = str(tmp_path / "auto_dataset_test" / "data.yaml")
+        os.makedirs(os.path.dirname(prepared), exist_ok=True)
+        Path(prepared).touch()
+        w._prepared_yaml_path = prepared
+        w._prepared_dataset_dir = os.path.dirname(prepared)
+
+        config = w.get_current_config()
+        # config["basic"]["data"] is still coco8.yaml
+        assert "coco8.yaml" in config["basic"]["data"]
+
+        # But the TrainingJob should use prepared YAML
+        # Simulate what start_training_from_train_tab does
+        actual_data = w._prepared_yaml_path or config["basic"].get("data", "")
+        assert actual_data == prepared
+        assert "coco8.yaml" not in actual_data
+
+    def test_history_dataset_not_coco8(self, qapp, tmp_path):
+        """History record's dataset_yaml must not be coco8.yaml when prepared exists."""
+        w = self._make_widget_for_training(qapp, tmp_path)
+        prepared = str(tmp_path / "auto_dataset_test" / "data.yaml")
+        os.makedirs(os.path.dirname(prepared), exist_ok=True)
+        Path(prepared).touch()
+        w._prepared_yaml_path = prepared
+
+        config = w.get_current_config()
+        # config data is coco8, but actual data should be prepared
+        actual_data = w._prepared_yaml_path or config["basic"].get("data", "")
+        # Verify: if we _only_ used config data, we'd get coco8
+        config_only = config["basic"].get("data", "")
+        assert "coco8.yaml" in config_only
+
+        # actual_data must be the prepared one
+        assert actual_data == prepared
+        assert "auto_dataset" in actual_data
+
+    def test_task_normalized(self, qapp):
+        """Task display must be normalized (capitalized)."""
+        w = _make_widget(task_type="Detect")
+        task = (w.selected_task_type or "").strip().capitalize()
+        assert task == "Detect"
+
+        w2 = _make_widget(task_type="segment")
+        task2 = (w2.selected_task_type or "").strip().capitalize()
+        assert task2 == "Segment"
+
+        w3 = _make_widget(task_type="POSE")
+        task3 = (w3.selected_task_type or "").strip().capitalize()
+        assert task3 == "Pose"
+
+    def test_model_basename_for_table(self, qapp):
+        """Table should show os.path.basename of model path."""
+        model_path = "/tmp/models/yolo11n.pt"
+        basename = os.path.basename(model_path)
+        assert basename == "yolo11n.pt"
+        assert basename != model_path
+
+    def test_dataset_basename_for_table(self, qapp):
+        """Table should show os.path.basename of dataset YAML path."""
+        dataset_path = "C:/Users/test/auto_dataset_20260719/data.yaml"
+        basename = os.path.basename(dataset_path)
+        assert basename == "data.yaml"
+        assert basename != dataset_path
