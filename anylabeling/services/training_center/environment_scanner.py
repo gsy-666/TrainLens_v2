@@ -170,8 +170,25 @@ def find_candidate_pythons() -> list[str]:
 
 
 def _get_conda_env_dirs() -> list[str]:
-    """Get conda environment directories via 'conda env list'."""
+    """Get conda environment directories via 'conda env list --json'."""
     dirs: list[str] = []
+    # Try JSON format first
+    try:
+        result = subprocess.run(
+            ["conda", "env", "list", "--json"], capture_output=True, text=True, timeout=15
+        )
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            envs = data.get("envs", [])
+            for env_path in envs:
+                if os.path.isdir(env_path):
+                    dirs.append(env_path)
+            _logger.debug("conda env list --json: found %d envs", len(dirs))
+            return dirs
+    except Exception:
+        pass
+
+    # Fallback: text parsing
     try:
         result = subprocess.run(
             ["conda", "env", "list"], capture_output=True, text=True, timeout=10
@@ -181,7 +198,6 @@ def _get_conda_env_dirs() -> list[str]:
                 line = line.strip()
                 if not line or line.startswith("#"):
                     continue
-                # Format: env_name  /path/to/env
                 parts = line.split()
                 if len(parts) >= 2:
                     env_path = parts[-1]
@@ -189,6 +205,25 @@ def _get_conda_env_dirs() -> list[str]:
                         dirs.append(env_path)
     except Exception:
         pass
+
+    # Also query conda info for base/envs dirs
+    try:
+        result = subprocess.run(
+            ["conda", "info", "--json"], capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            # Scan envs_dirs from conda config
+            for envs_dir in data.get("envs_dirs", []):
+                if os.path.isdir(envs_dir):
+                    for env in Path(envs_dir).iterdir():
+                        py = env / "python.exe"
+                        if py.is_file():
+                            dirs.append(str(env))
+    except Exception:
+        pass
+
+    _logger.debug("_get_conda_env_dirs: found %d total", len(dirs))
     return dirs
 
 
@@ -403,8 +438,15 @@ class EnvironmentScannerWorker(QObject):
             if self._cancelled:
                 break
             self.progress_count.emit(i + 1, len(candidates))
-            self.progress_text.emit(f"  Checking: {py_path}")
-            info = diagnose_python(py_path, timeout=15.0)
+            _logger.info("Scanning env %d/%d: %s", i + 1, len(candidates), py_path)
+            self.progress_text.emit(f"Validating environment {i+1}/{len(candidates)}...")
+            info = diagnose_python(py_path, timeout=45.0)
+            _logger.info(
+                "Env %s: status=%s torch=%s cuda=%s ultralytics=%s error=%s",
+                os.path.basename(os.path.dirname(os.path.dirname(py_path))) or py_path,
+                info.status, info.torch_version, info.torch_cuda_version,
+                info.ultralytics_installed, info.error[:80] if info.error else "",
+            )
             results.append(info)
             self.env_found.emit(info)
 

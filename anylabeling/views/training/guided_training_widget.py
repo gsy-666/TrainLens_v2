@@ -1216,23 +1216,57 @@ class GuidedTrainingWidget(QWidget):
 
     def _on_scan_finished(self, results: list):
         from anylabeling.services.training_center.environment_scanner import (
-            find_best_env, register_external_env, EnvStatus,
+            find_best_env, rank_environments, register_external_env, EnvStatus,
         )
 
         self.rescan_envs_btn.setEnabled(True)
         self.rescan_envs_btn.setText("Rescan Environments")
         self.gpu_install_progress.setVisible(False)
-        self.append_training_log(f"Environment scan complete: {len(results)} environments found.")
+
+        # Log detailed results
+        ready_count = sum(1 for e in results if e.is_cuda_ready)
+        missing_pkg_count = sum(1 for e in results if e.needs_packages)
+        cpu_count = sum(1 for e in results if e.status == EnvStatus.CPU_ONLY)
+        self.append_training_log(
+            f"Environment scan: {len(results)} total, "
+            f"{ready_count} READY, {missing_pkg_count} CUDA+missing pkgs, {cpu_count} CPU-only"
+        )
+        for e in rank_environments(results):
+            self.append_training_log(
+                f"  [{e.status}] {e.env_name}: torch={e.torch_version} cuda={e.torch_cuda_version} "
+                f"utl={e.ultralytics_version or 'missing'} gpu={e.gpu_names}"
+            )
 
         best = find_best_env(results)
-        if best is None:
+
+        # ── No CUDA at all ──
+        if best is None and missing_pkg_count == 0 and ready_count == 0:
             QMessageBox.information(
                 self, "No CUDA Environment",
-                "No ready CUDA training environment was found.\n\n"
+                "No CUDA-capable training environment was found.\n\n"
                 "You can:\n"
                 "  • Install a new GPU Runtime\n"
                 "  • Continue with CPU training"
             )
+            return
+
+        # ── Safety net: if find_best_env missed something, take first MISSING_PACKAGES ──
+        if best is None and missing_pkg_count > 0:
+            for e in results:
+                if e.needs_packages:
+                    best = e
+                    break
+
+        # ── Safety net: if still None, take first READY ──
+        if best is None and ready_count > 0:
+            for e in results:
+                if e.is_cuda_ready:
+                    best = e
+                    break
+
+        if best is None:
+            # Should not happen, but handle gracefully
+            self.append_training_log("ERROR: find_best_env returned None despite available envs")
             return
 
         if best.is_cuda_ready:
@@ -1250,13 +1284,17 @@ class GuidedTrainingWidget(QWidget):
                 f"Device list has been updated."
             )
         elif best.needs_packages:
+            # ── CUDA ready but missing packages ──
+            gpu_info = ", ".join(
+                f"{name} · {mem} GB" for name, mem in zip(best.gpu_names, best.gpu_memory_gb)
+            ) if best.gpu_memory_gb else ", ".join(best.gpu_names)
+
             msg = (
-                f"CUDA environment found but missing packages:\n\n"
-                f"  {best.env_name}\n"
-                f"  Python: {best.python_version}\n"
-                f"  PyTorch: {best.torch_version} · CUDA {best.torch_cuda_version}\n"
-                f"  GPU: {', '.join(best.gpu_names)}\n\n"
-                f"Missing: ultralytics\n\n"
+                f"CUDA Environment Found\n\n"
+                f"Python:\n{best.python_path}\n\n"
+                f"PyTorch:\n{best.torch_version} · CUDA {best.torch_cuda_version}\n\n"
+                f"GPU:\n{gpu_info}\n\n"
+                f"Missing:\nUltralytics (required for training)\n\n"
                 f"Install missing packages into this environment?"
             )
             reply = QMessageBox.question(
