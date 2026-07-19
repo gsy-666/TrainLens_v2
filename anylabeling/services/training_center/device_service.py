@@ -247,6 +247,37 @@ def detect_local_devices() -> list[DeviceInfo]:
     except Exception as e:
         _logger.warning("Device detection failed: %s", e)
 
+    # ── Fallback: external CUDA runtimes ──
+    if len(devices) <= 1:  # Only CPU found
+        _name, gpu_count, _drv, _cuda = _probe_nvidia_smi()
+        if gpu_count > 0:
+            # Try external runtimes
+            try:
+                from anylabeling.services.training_center.runtime_installer import (
+                    detect_runtimes, query_runtime_devices,
+                )
+                runtimes = detect_runtimes()
+                for rt in runtimes:
+                    if rt.install_status == "ready" and rt.verification_status == "PASS":
+                        gpu_devices = query_runtime_devices(rt)
+                        for gd in gpu_devices:
+                            idx = gd["index"]
+                            name = gd["name"]
+                            mem = gd["total_memory_gb"]
+                            devices.append(DeviceInfo(
+                                backend="cuda",
+                                index=idx,
+                                display_name=f"GPU {idx} — {name} · {mem:.1f} GB",
+                                training_value=f"cuda:{idx}",
+                                available=True,
+                                total_memory_bytes=int(mem * (1024 ** 3)),
+                                capability=gd.get("capability", ""),
+                                execution_location="local",
+                            ))
+                        break  # Only use first ready runtime
+            except Exception as e:
+                _logger.debug("External runtime scan skipped: %s", e)
+
     return devices
 
 
@@ -259,15 +290,42 @@ def resolve_training_device(device_value: str) -> str:
         "cpu"            → "cpu"
         "cuda:0"         → "0"
         "cuda:1"         → "1"
+
+    Also checks external runtimes for CUDA availability.
     """
     device_value = str(device_value).strip().lower()
 
     # Normalize legacy formats
     if device_value in ("0", "1", "2", "3"):
-        # Old bare index → cuda:N
-        return device_value  # Ultralytics accepts bare "0", "1"
+        return device_value
     if device_value == "cuda":
-        return "0"  # Legacy "cuda" → GPU 0
+        return "0"
+
+    if device_value.startswith("cuda:"):
+        idx = device_value.split(":")[-1]
+        return idx
+
+    if device_value == "auto":
+        # Check in-process CUDA first
+        try:
+            import torch
+            if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+                return "0"
+        except Exception:
+            pass
+        # Check external runtimes
+        try:
+            from anylabeling.services.training_center.runtime_installer import (
+                detect_runtimes, query_runtime_devices,
+            )
+            runtimes = detect_runtimes()
+            for rt in runtimes:
+                gpus = query_runtime_devices(rt)
+                if gpus:
+                    return "0"
+        except Exception:
+            pass
+        return "cpu"
 
     if device_value.startswith("cuda:"):
         idx = device_value.split(":")[-1]

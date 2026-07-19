@@ -70,6 +70,13 @@ class TrainingJob:
     python_executable: Optional[Path] = None
     command: Optional[list] = None
 
+    # Runtime (GPU environment)
+    runtime_id: Optional[str] = None
+    runtime_python: Optional[str] = None
+    requested_device: Optional[str] = None
+    resolved_device: Optional[str] = None
+    execution_mode: Optional[str] = None  # "local" | "remote"
+
     # Training config (for Guided history display)
     task: Optional[str] = None
     model: Optional[str] = None

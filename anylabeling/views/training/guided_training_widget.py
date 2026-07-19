@@ -1214,12 +1214,13 @@ class GuidedTrainingWidget(QWidget):
     def _on_install_finished(self, success: bool, message: str):
         if success:
             self.gpu_install_progress.setText(
-                "✓ GPU runtime installed!\nRestart TrainLens to use GPU training."
+                "✓ GPU runtime ready!"
             )
             self.gpu_install_progress.setStyleSheet("color: green; font-size: 11px; font-weight: bold;")
             QMessageBox.information(
                 self, "GPU Runtime Ready",
-                f"GPU runtime installed successfully!\n\nRestart TrainLens.\n\n{message}"
+                f"GPU runtime installed and verified!\n\n"
+                f"Device list has been updated.\n\n{message}"
             )
         else:
             self.gpu_install_progress.setText(f"✗ Failed.\n{message[:200]}")
@@ -3529,6 +3530,44 @@ class GuidedTrainingWidget(QWidget):
         actual_data = self._prepared_yaml_path or config["basic"].get("data", "")
         # Normalize task display name
         task_display = (self.selected_task_type or "").strip().capitalize()
+
+        # ── Resolve GPU runtime ──
+        runtime_id = None
+        runtime_python = None
+        requested_device = getattr(self, '_requested_device', 'auto') or 'auto'
+        resolved_device = getattr(self, '_resolved_device', 'cpu') or 'cpu'
+        from anylabeling.services.training_center.device_service import resolve_training_device
+        ul_device = resolve_training_device(requested_device)
+
+        if ul_device != "cpu":
+            # Try to find a ready CUDA runtime
+            try:
+                from anylabeling.services.training_center.runtime_installer import (
+                    detect_runtimes, get_runtime_info,
+                )
+                runtimes = detect_runtimes()
+                if runtimes:
+                    rt = runtimes[0]
+                    runtime_id = rt.runtime_id
+                    runtime_python = rt.python_path
+                    self.append_training_log(
+                        f"Using GPU Runtime: {runtime_id}\n"
+                        f"  Python: {runtime_python}\n"
+                        f"  Torch: {rt.torch_version} · CUDA {rt.torch_cuda_version}"
+                    )
+                else:
+                    QMessageBox.critical(
+                        self, self.tr("GPU Not Available"),
+                        self.tr("No ready CUDA runtime found. Please install GPU runtime first.")
+                    )
+                    return
+            except Exception as e:
+                QMessageBox.critical(
+                    self, self.tr("Runtime Error"),
+                    self.tr(f"Failed to load GPU runtime: {e}")
+                )
+                return
+
         self.current_job = TrainingJob(
             job_id=job_id,
             mode=TrainingMode.GUIDED_ULTRALYTICS,
@@ -3548,6 +3587,11 @@ class GuidedTrainingWidget(QWidget):
             data=actual_data,
             project=project_path,
             name=name,
+            runtime_id=runtime_id,
+            runtime_python=runtime_python,
+            requested_device=requested_device,
+            resolved_device=ul_device,
+            execution_mode="local",
         )
 
         adapter = UltralyticsAdapter()

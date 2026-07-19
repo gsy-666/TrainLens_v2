@@ -26,12 +26,12 @@ RUNTIME_ROOT = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Lo
 CACHE_ROOT = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "TrainLens" / "cache" / "runtimes"
 NVIDIA_RUNTIME_DIR = RUNTIME_ROOT / "nvidia-cuda"
 
-REQUIRED_PACKAGES = [
-    "torch",
-    "torchvision",
-    "torchaudio",
-    "ultralytics",
-]
+# ── CUDA PyTorch index (official wheel) ──
+TORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu126"
+COMPUTE_PLATFORM = "cu126"
+
+CUDA_PACKAGES = ["torch", "torchvision"]
+GENERAL_PACKAGES = ["ultralytics"]
 
 
 @dataclass
@@ -40,7 +40,10 @@ class RuntimeInfo:
     runtime_id: str = ""
     runtime_path: str = ""
     python_path: str = ""
+    torch_index_url: str = ""
+    compute_platform: str = ""
     torch_version: str = ""
+    torchvision_version: str = ""
     torch_cuda_version: str = ""
     ultralytics_version: str = ""
     installed_at: str = ""
@@ -177,32 +180,68 @@ class RuntimeInstallerWorker(QObject):
         self.progress_text.emit("Upgrading pip...")
         self._run_pip(venv_python, ["install", "--upgrade", "pip"])
 
-        # 4. Install PyTorch with CUDA
+        # 4. Install CUDA PyTorch from official wheel index
         self._emit_stage("INSTALLING")
-        self.progress_text.emit("Installing PyTorch with CUDA support...")
+        self.progress_text.emit(
+            f"Installing CUDA PyTorch from {TORCH_CUDA_INDEX} ..."
+        )
         self.progress_text.emit("This may take several minutes...")
 
-        for i, pkg in enumerate(REQUIRED_PACKAGES):
+        for i, pkg in enumerate(CUDA_PACKAGES):
             if self._cancelled:
                 self._emit_stage("FAILED")
                 self.finished.emit(False, "Cancelled by user")
                 return
-            pct = int((i / len(REQUIRED_PACKAGES)) * 80) + 10
+            pct = 10 + int((i / (len(CUDA_PACKAGES) + len(GENERAL_PACKAGES))) * 70)
             self.progress_percent.emit(pct)
-            self.progress_text.emit(f"  Installing {pkg}...")
+            self.progress_text.emit(f"  Installing {pkg} (CUDA)...")
+            ok = self._run_pip(
+                venv_python,
+                ["install", pkg, "--index-url", TORCH_CUDA_INDEX],
+            )
+            if not ok:
+                self._emit_stage("FAILED")
+                self.finished.emit(False, f"Failed to install {pkg} from {TORCH_CUDA_INDEX}")
+                return
+
+        # 5. Install ultralytics from regular PyPI
+        self.progress_text.emit("Installing ultralytics (PyPI)...")
+        for pkg in GENERAL_PACKAGES:
+            if self._cancelled:
+                self._emit_stage("FAILED")
+                self.finished.emit(False, "Cancelled by user")
+                return
+            self.progress_percent.emit(80)
             ok = self._run_pip(venv_python, ["install", pkg])
             if not ok:
                 self._emit_stage("FAILED")
                 self.finished.emit(False, f"Failed to install {pkg}")
                 return
 
-        # 5. Verify
+        # 6. Verify
         self._emit_stage("VERIFYING")
         self.progress_percent.emit(90)
         self.progress_text.emit("Verifying GPU runtime...")
 
-        verdict, details = self._verify_runtime(venv_python)
+        verdict, torch_ver, cuda_ver, details = self._verify_runtime(venv_python)
         if verdict:
+            # Save runtime info with verified versions
+            info = RuntimeInfo(
+                runtime_id="nvidia-cuda",
+                runtime_path=str(NVIDIA_RUNTIME_DIR),
+                python_path=venv_python,
+                torch_index_url=TORCH_CUDA_INDEX,
+                compute_platform=COMPUTE_PLATFORM,
+                torch_version=torch_ver,
+                torch_cuda_version=cuda_ver,
+                ultralytics_version=_get_pkg_version(venv_python, "ultralytics"),
+                torchvision_version=_get_pkg_version(venv_python, "torchvision"),
+                installed_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                install_status="ready",
+                verification_status="PASS",
+                gpu_test_result=details,
+            )
+            save_runtime_info(info)
             self._emit_stage("COMPLETED")
             elapsed = time.time() - t0
             self.elapsed_changed.emit(f"{int(elapsed // 60)}m {int(elapsed % 60)}s")
@@ -236,28 +275,30 @@ class RuntimeInstallerWorker(QObject):
             self.progress_text.emit(f"    Error: {e}")
             return False
 
-    def _verify_runtime(self, python_exe: str) -> tuple[bool, str]:
-        """Run CUDA verification script. Returns (passed, details)."""
+    def _verify_runtime(self, python_exe: str) -> tuple[bool, str, str, str]:
+        """Run CUDA verification. Returns (passed, torch_ver, cuda_ver, details)."""
         verify_script = """
-import sys, torch
-print(f"Python: {sys.version}")
-print(f"Torch: {torch.__version__}")
-print(f"Torch CUDA: {getattr(torch.version, 'cuda', 'N/A')}")
-print(f"CUDA available: {torch.cuda.is_available()}")
-if torch.cuda.is_available():
-    print(f"GPU count: {torch.cuda.device_count()}")
-    for i in range(torch.cuda.device_count()):
-        print(f"GPU {i}: {torch.cuda.get_device_name(i)}")
-    t = torch.randn(100, 100, device='cuda:0')
+import sys, json, torch
+info = {
+    "torch_version": torch.__version__,
+    "torch_cuda_version": getattr(torch.version, "cuda", None),
+    "cuda_available": torch.cuda.is_available(),
+    "gpu_count": 0,
+    "gpu_names": [],
+    "tensor_test": "SKIP",
+}
+if info["cuda_available"]:
+    info["gpu_count"] = torch.cuda.device_count()
+    for i in range(info["gpu_count"]):
+        info["gpu_names"].append(torch.cuda.get_device_name(i))
+    t = torch.randn(100, 100, device="cuda:0")
     t = t @ t.T
     torch.cuda.synchronize()
     del t
     torch.cuda.empty_cache()
-    print("CUDA tensor test: PASS")
-    sys.exit(0)
-else:
-    print("CUDA tensor test: SKIP (CUDA not available)")
-    sys.exit(1)
+    info["tensor_test"] = "PASS"
+print(json.dumps(info))
+sys.exit(0 if info["tensor_test"] == "PASS" else 1)
 """
         try:
             result = subprocess.run(
@@ -265,12 +306,99 @@ else:
                 capture_output=True, text=True, timeout=30,
             )
             output = result.stdout.strip()
-            if result.returncode == 0 and "CUDA tensor test: PASS" in output:
-                return True, output
-            return False, output or result.stderr or "Verification failed"
+            try:
+                info = json.loads(output)
+            except json.JSONDecodeError:
+                return False, "", "", output or "Invalid JSON output"
+            torch_ver = info.get("torch_version", "")
+            cuda_ver = info.get("torch_cuda_version") or ""
+            if cuda_ver is None:
+                return False, torch_ver, "", "torch.version.cuda is None — not a CUDA build"
+            if not info["cuda_available"]:
+                return False, torch_ver, cuda_ver, "torch.cuda.is_available()=False"
+            if info["tensor_test"] != "PASS":
+                return False, torch_ver, cuda_ver, "CUDA tensor test failed"
+            gpu_list = ", ".join(info.get("gpu_names", []))
+            details = (
+                f"Torch: {torch_ver}\n"
+                f"CUDA: {cuda_ver}\n"
+                f"GPUs ({info['gpu_count']}): {gpu_list}\n"
+                f"Tensor test: PASS"
+            )
+            return True, torch_ver, cuda_ver, details
         except Exception as e:
-            return False, str(e)
+            return False, "", "", str(e)
 
     def _emit_stage(self, stage: str):
         self.stage_changed.emit(stage)
         _mark_install_status(stage, self.venv_dir)
+
+
+def _get_pkg_version(python_exe: str, pkg: str) -> str:
+    """Get installed version of a package in the runtime."""
+    try:
+        result = subprocess.run(
+            [python_exe, "-c", f"import {pkg}; print({pkg}.__version__)"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def detect_runtimes() -> list[RuntimeInfo]:
+    """Scan runtimes directory for installed GPU runtimes.
+
+    Returns list of RuntimeInfo with verification_status='READY'.
+    """
+    runtimes = []
+    if not RUNTIME_ROOT.is_dir():
+        return runtimes
+    for entry in sorted(RUNTIME_ROOT.iterdir()):
+        if not entry.is_dir():
+            continue
+        info_file = entry / "runtime.json"
+        if not info_file.is_file():
+            continue
+        try:
+            with open(info_file) as f:
+                data = json.load(f)
+            info = RuntimeInfo(**{k: v for k, v in data.items() if k in RuntimeInfo.__dataclass_fields__})
+            if info.install_status == "ready" and info.verification_status == "PASS":
+                runtimes.append(info)
+        except Exception:
+            pass
+    return runtimes
+
+
+def query_runtime_devices(runtime: RuntimeInfo) -> list[dict]:
+    """Use a runtime's Python to query GPU devices.
+
+    Returns list of dicts with keys: index, name, total_memory_gb, capability.
+    """
+    script = """
+import json, torch
+devices = []
+if torch.cuda.is_available():
+    for i in range(torch.cuda.device_count()):
+        props = torch.cuda.get_device_properties(i)
+        devices.append({
+            "index": i,
+            "name": torch.cuda.get_device_name(i),
+            "total_memory_gb": round(props.total_memory / (1024**3), 1),
+            "capability": f"{props.major}.{props.minor}",
+        })
+print(json.dumps(devices))
+"""
+    try:
+        result = subprocess.run(
+            [runtime.python_path, "-c", script],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0:
+            return json.loads(result.stdout.strip())
+    except Exception:
+        pass
+    return []
