@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import signal
 import shutil
@@ -80,6 +81,10 @@ class TrainingManager:
 
             def run_training():
                 try:
+                    worker_cmd = build_training_worker_command(payload_path, python_executable=python_executable)
+                    _log = logging.getLogger(__name__)
+                    _log.info("QProcess program: %s", worker_cmd[0])
+
                     self.notify_callbacks(
                         "training_started", {"total_epochs": self.total_epochs}
                     )
@@ -90,7 +95,7 @@ class TrainingManager:
                         creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
 
                     self.training_process = subprocess.Popen(
-                        build_training_worker_command(payload_path, python_executable=python_executable),
+                        worker_cmd,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
                         text=True,
@@ -197,7 +202,7 @@ class TrainingManager:
             config_thread.daemon = True
             config_thread.start()
 
-            return True, "Training started successfully"
+            return True, "Worker process started"
 
         except Exception as e:
             return False, f"Failed to start training: {str(e)}"
@@ -255,6 +260,13 @@ def build_training_worker_env():
 
 def build_training_worker_command(payload_path: str, python_executable: str = None):
     python_exe = python_executable or sys.executable
+
+    _log = logging.getLogger(__name__ + ".build_training_worker_command")
+    _log.info(
+        "build_training_worker_command: python_executable=%s (provided=%s sys=%s)",
+        python_exe, python_executable, sys.executable,
+    )
+
     command = [python_exe]
     if getattr(sys, "frozen", False):
         command.extend(

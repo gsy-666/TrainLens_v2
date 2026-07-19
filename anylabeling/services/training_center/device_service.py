@@ -168,6 +168,10 @@ class DeviceInfo:
     capability: str = ""  # compute capability string
     reason_unavailable: str = ""
     execution_location: str = "local"  # "local" | "remote"
+    # Runtime binding (for external CUDA environments)
+    runtime_id: str = ""
+    runtime_python: str = ""
+    device_name: str = ""  # raw GPU name from nvidia-smi/registered env
 
 
 def detect_local_devices() -> list[DeviceInfo]:
@@ -301,7 +305,7 @@ def detect_local_devices() -> list[DeviceInfo]:
                             continue
                         for i, name in enumerate(gpu_names):
                             mem = gpu_mem[i] if i < len(gpu_mem) else 0
-                            _logger.info("Adding GPU device %d: %s %sGB", i, name, mem)
+                            _logger.info("Adding GPU device %d: %s %sGB runtime=%s", i, name, mem, os.path.basename(py))
                             devices.append(DeviceInfo(
                                 backend="cuda", index=i,
                                 display_name=f"GPU {i} — {name} · {mem:.1f} GB",
@@ -309,6 +313,9 @@ def detect_local_devices() -> list[DeviceInfo]:
                                 available=True,
                                 total_memory_bytes=int(mem * (1024**3)),
                                 execution_location="local",
+                                runtime_id=reg.get("runtime_id", ""),
+                                runtime_python=py,
+                                device_name=name,
                             ))
                         break  # Only use first ready registered env
                 except Exception as e:

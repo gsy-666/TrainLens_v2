@@ -64,6 +64,15 @@ class UltralyticsAdapter(TrainingAdapter):
         self._current_runtime_python = getattr(job, 'runtime_python', None) or None
 
         python_executable = self._current_runtime_python
+
+        # Diagnostic: log the runtime being used
+        if python_executable:
+            _log = __import__('logging').getLogger(__name__)
+            _log.info(
+                "Adapter received runtime_python: %s (job_id=%s, device=%s)",
+                python_executable, job.job_id, getattr(job, 'requested_device', '?'),
+            )
+
         success, message = self.manager.start_training(config, python_executable=python_executable)
         return success, message
 

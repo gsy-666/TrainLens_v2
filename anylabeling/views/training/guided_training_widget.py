@@ -979,19 +979,23 @@ class GuidedTrainingWidget(QWidget):
     def _populate_device_combo(self):
         """Populate device QComboBox with Auto + CPU + detected GPUs.
 
-        Uses userData to store internal device values, separate from display text.
+        Each GPU item stores the full DeviceInfo as userData,
+        including runtime_id and runtime_python for external CUDA envs.
         """
         import logging
         _log = logging.getLogger(__name__)
-        from anylabeling.services.training_center.device_service import detect_local_devices
+        from anylabeling.services.training_center.device_service import detect_local_devices, DeviceInfo
         combo = self.config_widgets["device"]
         current_val = combo.currentData() or "auto"
 
         combo.blockSignals(True)
         combo.clear()
 
-        # Auto (always first)
-        combo.addItem("Auto", "auto")
+        # Auto (always first) — no runtime binding
+        combo.addItem("Auto", DeviceInfo(
+            backend="auto", index=0, display_name="Auto",
+            training_value="auto", available=True,
+        ))
         _log.debug("Device combo: added Auto / auto")
 
         # Detected GPUs
@@ -1000,28 +1004,38 @@ class GuidedTrainingWidget(QWidget):
             devices = detect_local_devices()
             _log.debug("detect_local_devices returned %d devices", len(devices))
             for d in devices:
-                _log.debug("  Device: backend=%s idx=%d name=%s avail=%s",
-                           d.backend, d.index, d.display_name, d.available)
+                _log.debug("  Device: backend=%s idx=%d name=%s avail=%s runtime_py=%s",
+                           d.backend, d.index, d.display_name, d.available,
+                           d.runtime_python or "(none)")
                 if d.backend == "cuda" and d.available:
                     self._detected_gpus.append(d)
-                    combo.addItem(d.display_name, d.training_value)
-                    _log.info("Device combo: added %s / %s", d.display_name, d.training_value)
+                    combo.addItem(d.display_name, d)
+                    _log.info("Device combo: added %s / %s runtime=%s",
+                              d.display_name, d.training_value,
+                              d.runtime_python or "(none)")
                 elif d.backend == "cpu" and d.available:
-                    combo.addItem("CPU", "cpu")
+                    combo.addItem("CPU", d)
                     _log.debug("Device combo: added CPU / cpu")
         except Exception as e:
             _log.warning("Device detection failed: %s", e)
-            combo.addItem("CPU", "cpu")
+            combo.addItem("CPU", DeviceInfo(
+                backend="cpu", index=0, display_name="CPU",
+                training_value="cpu", available=True,
+            ))
 
         # Restore previous selection or default to Auto
-        idx = combo.findData(current_val)
-        if idx >= 0:
-            combo.setCurrentIndex(idx)
+        for i in range(combo.count()):
+            if combo.itemData(i) and getattr(combo.itemData(i), 'training_value', None) == getattr(current_val, 'training_value', current_val):
+                combo.setCurrentIndex(i)
+                break
         else:
             combo.setCurrentIndex(0)
 
         combo.blockSignals(False)
-        _log.info("Device combo: %d items, selected=%s", combo.count(), combo.currentData())
+        _log.info("Device combo: %d items, selected: training_value=%s runtime_py=%s",
+                  combo.count(),
+                  getattr(combo.currentData(), 'training_value', combo.currentData()) if combo.currentData() else None,
+                  getattr(combo.currentData(), 'runtime_python', '') if combo.currentData() else '')
 
     def _on_refresh_devices(self):
         """Re-scan GPUs and refresh the device combo."""
@@ -1029,6 +1043,58 @@ class GuidedTrainingWidget(QWidget):
         self._update_gpu_info_label()
         self._update_test_gpu_btn()
         self.append_training_log("Devices refreshed.")
+
+    def _get_selected_training_device(self) -> dict:
+        """Return the selected device's full training configuration.
+
+        Reads from the device combo's userData (DeviceInfo) directly.
+        No re-scanning, no guessing from display text.
+
+        Returns dict with keys:
+            requested_device, resolved_device, runtime_id,
+            runtime_python, device_name, execution_mode
+        """
+        combo = self.config_widgets.get("device")
+        if not combo:
+            return {"requested_device": "auto", "resolved_device": "cpu",
+                    "runtime_id": "", "runtime_python": "", "device_name": "",
+                    "execution_mode": "local"}
+
+        item_data = combo.currentData()
+        if item_data is None:
+            return {"requested_device": "auto", "resolved_device": "cpu",
+                    "runtime_id": "", "runtime_python": "", "device_name": "",
+                    "execution_mode": "local"}
+
+        # New path: DeviceInfo dataclass in userData
+        if hasattr(item_data, 'training_value'):
+            d = item_data
+            requested_device = d.training_value
+            resolved_device = self._resolve_ultralytics_device(requested_device)
+            return {
+                "requested_device": requested_device,
+                "resolved_device": resolved_device,
+                "runtime_id": d.runtime_id,
+                "runtime_python": d.runtime_python,
+                "device_name": d.device_name or d.display_name,
+                "execution_mode": d.execution_location,
+            }
+
+        # Legacy: bare string in userData
+        tv = str(item_data)
+        return {"requested_device": tv, "resolved_device": self._resolve_ultralytics_device(tv),
+                "runtime_id": "", "runtime_python": "", "device_name": "",
+                "execution_mode": "local"}
+
+    def _resolve_ultralytics_device(self, device_value: str) -> str:
+        """Convert internal device value to Ultralytics-compatible format."""
+        from anylabeling.services.training_center.device_service import resolve_training_device
+        return resolve_training_device(device_value)
+
+    def _get_selected_runtime_python(self) -> str:
+        """Get the runtime Python path for the currently selected device."""
+        info = self._get_selected_training_device()
+        return info.get("runtime_python", "") or ""
 
     def _on_test_gpu(self):
         """Run a quick CUDA tensor test — uses external runtime if registered."""
@@ -3348,12 +3414,11 @@ print(json.dumps(result, ensure_ascii=False))
                     train_args[key] = value
             self.total_epochs = train_args.get("epochs", 100)
 
-            # Log the training command
-            cmd_parts = ["yolo", self.selected_task_type.lower(), "train"]
-            for key, value in train_args.items():
-                cmd_parts.append(f"{key}={value}")
+            # Log training arguments (not a fake yolo CLI)
             self.append_training_log(
-                f"Training command: {' '.join(cmd_parts)}"
+                f"Training arguments: " +
+                ", ".join(f"{k}={v}" for k, v in sorted(train_args.items())
+                          if k not in xany_params_to_exclude)
             )
 
             return train_args
@@ -3374,43 +3439,13 @@ print(json.dumps(result, ensure_ascii=False))
         output_dir = os.path.join(project, name) if project and name else project
         device = str(config["basic"].get("device", "auto"))
 
-        # Resolve runtime info for the selected device
-        runtime_id = ""
-        runtime_python = ""
-        resolved_device = device
-        device_name = ""
-        requested_device = device
-
-        if device not in ("cpu", "auto") and device.startswith("cuda"):
-            try:
-                from anylabeling.services.training_center.environment_scanner import (
-                    get_registered_envs,
-                )
-                for reg in get_registered_envs():
-                    if str(reg.get("verification_status", "")).strip().lower() == "ready":
-                        runtime_id = reg.get("runtime_id", "")
-                        runtime_python = reg.get("python_path", "")
-                        device_name = ", ".join(reg.get("gpu_names", []))
-                        resolved_device = "0"  # Ultralytics format
-                        break
-            except Exception:
-                pass
-        elif device == "auto":
-            # Check if external runtime exists
-            try:
-                from anylabeling.services.training_center.environment_scanner import (
-                    get_registered_envs,
-                )
-                from anylabeling.services.training_center.device_service import resolve_training_device
-                for reg in get_registered_envs():
-                    if str(reg.get("verification_status", "")).strip().lower() == "ready":
-                        runtime_id = reg.get("runtime_id", "")
-                        runtime_python = reg.get("python_path", "")
-                        device_name = ", ".join(reg.get("gpu_names", []))
-                        resolved_device = resolve_training_device("auto")
-                        break
-            except Exception:
-                pass
+        # Resolve runtime info from the device combo (single source of truth)
+        dev_info = self._get_selected_training_device()
+        runtime_id = dev_info["runtime_id"]
+        runtime_python = dev_info["runtime_python"]
+        requested_device = dev_info["requested_device"]
+        resolved_device = dev_info["resolved_device"]
+        device_name = dev_info["device_name"]
 
         # Use prepared YAML if available, else config field
         dataset_yaml = self._prepared_yaml_path or config["basic"].get("data", "")
@@ -4056,64 +4091,56 @@ print(json.dumps(result, ensure_ascii=False))
         # Normalize task display name
         task_display = (self.selected_task_type or "").strip().capitalize()
 
-        # ── Resolve GPU runtime ──
-        runtime_id = None
-        runtime_python = None
-        requested_device = getattr(self, '_requested_device', 'auto') or 'auto'
-        resolved_device = getattr(self, '_resolved_device', 'cpu') or 'cpu'
-        from anylabeling.services.training_center.device_service import resolve_training_device
-        ul_device = resolve_training_device(requested_device)
+        # ── Resolve GPU runtime (single source of truth: device combo) ──
+        dev_info = self._get_selected_training_device()
+        runtime_id = dev_info["runtime_id"]
+        runtime_python = dev_info["runtime_python"]
+        requested_device = dev_info["requested_device"]
+        resolved_device = dev_info["resolved_device"]
+        device_name = dev_info["device_name"]
+        execution_mode = dev_info["execution_mode"]
 
-        if ul_device != "cpu":
-            # Try to find a ready CUDA runtime (1) TrainLens runtime → (2) registered external env → (3) none
-            try:
-                from anylabeling.services.training_center.runtime_installer import (
-                    detect_runtimes,
-                )
-                from anylabeling.services.training_center.environment_scanner import (
-                    get_registered_envs, EnvironmentInfo, register_external_env,
-                )
-
-                # Priority 1: TrainLens installed runtime
-                runtimes = detect_runtimes()
-                if runtimes:
-                    rt = runtimes[0]
-                    runtime_id = rt.runtime_id
-                    runtime_python = rt.python_path
-                    self.append_training_log(
-                        f"Using GPU Runtime: {runtime_id}\n"
-                        f"  Python: {runtime_python}\n"
-                        f"  Torch: {rt.torch_version} · CUDA {rt.torch_cuda_version}"
-                    )
-                else:
-                    # Priority 2: Registered external environments
-                    reg_envs = get_registered_envs()
-                    # Find first ready CUDA env
-                    found = False
-                    for reg in reg_envs:
-                        if reg.get("verification_status") in ("ready", "READY"):
-                            runtime_id = reg["runtime_id"]
-                            runtime_python = reg["python_path"]
-                            found = True
-                            self.append_training_log(
-                                f"Using external CUDA environment:\n"
-                                f"  Python: {runtime_python}\n"
-                                f"  Torch: {reg.get('torch_version', '?')} · CUDA {reg.get('torch_cuda_version', '?')}"
-                            )
-                            break
-                    if not found:
-                        QMessageBox.critical(
-                            self, self.tr("GPU Not Available"),
-                            self.tr("No ready CUDA environment found.\n"
-                                    "Please install GPU runtime or add an external CUDA environment.")
-                        )
-                        return
-            except Exception as e:
+        # Hard validation: GPU tasks MUST have a runtime Python
+        if requested_device.startswith("cuda") or (resolved_device and resolved_device not in ("cpu", "")):
+            self.append_training_log(
+                f"Selected device: {requested_device}\n"
+                f"Selected runtime id: {runtime_id or '(none)'}\n"
+                f"Selected runtime python: {runtime_python or '(none)'}"
+            )
+            if not runtime_python:
                 QMessageBox.critical(
-                    self, self.tr("Runtime Error"),
-                    self.tr(f"Failed to load GPU runtime: {e}")
+                    self, self.tr("GPU Runtime Missing"),
+                    self.tr("Selected GPU runtime is not bound to this device.\n\n"
+                            "Device: {device}\n\n"
+                            "Possible causes:\n"
+                            "• No CUDA-enabled Python environment registered\n"
+                            "• Registered environment is not in 'ready' state\n"
+                            "• Run 'Scan Environments' to detect CUDA installations\n\n"
+                            "Falling back to CPU training is NOT allowed for GPU selection.").format(device=requested_device)
                 )
                 return
+            if not os.path.isfile(runtime_python):
+                QMessageBox.critical(
+                    self, self.tr("Runtime Python Missing"),
+                    self.tr(
+                        "Selected GPU runtime Python does not exist:\n\n"
+                        "{path}\n\n"
+                        "The environment may have been moved or uninstalled.\n"
+                        "Please re-scan environments and select a valid CUDA Python."
+                    ).format(path=runtime_python)
+                )
+                return
+
+            # Log the training command info
+            self.append_training_log(
+                f"Worker Python: {runtime_python}\n"
+                f"Training arguments: device={resolved_device}"
+            )
+        else:
+            # CPU or Auto without external runtime — safe to use GUI Python
+            from anylabeling.services.training_center.device_service import resolve_training_device
+            resolved_device = resolve_training_device(requested_device)
+            execution_mode = "local"
 
         self.current_job = TrainingJob(
             job_id=job_id,
@@ -4137,8 +4164,8 @@ print(json.dumps(result, ensure_ascii=False))
             runtime_id=runtime_id,
             runtime_python=runtime_python,
             requested_device=requested_device,
-            resolved_device=ul_device,
-            execution_mode="local",
+            resolved_device=resolved_device,
+            execution_mode=execution_mode or "local",
         )
 
         adapter = UltralyticsAdapter()
@@ -4213,7 +4240,7 @@ print(json.dumps(result, ensure_ascii=False))
             self._reset_start_ui()
             return
 
-        self.append_training_log(self.tr(f"Worker process started: {message}"))
+        self.append_training_log(self.tr(f"Job reserved, waiting for worker..."))
 
     def _on_prep_error(self, error_msg):
         """Called on GUI thread when background preparation fails."""
