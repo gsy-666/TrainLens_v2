@@ -247,11 +247,11 @@ def detect_local_devices() -> list[DeviceInfo]:
     except Exception as e:
         _logger.warning("Device detection failed: %s", e)
 
-    # ── Fallback: external CUDA runtimes ──
+    # ── Fallback: external CUDA runtimes and registered envs ──
     if len(devices) <= 1:  # Only CPU found
         _name, gpu_count, _drv, _cuda = _probe_nvidia_smi()
         if gpu_count > 0:
-            # Try external runtimes
+            # 1. Try TrainLens runtimes
             try:
                 from anylabeling.services.training_center.runtime_installer import (
                     detect_runtimes, query_runtime_devices,
@@ -261,24 +261,51 @@ def detect_local_devices() -> list[DeviceInfo]:
                     if rt.install_status == "ready" and rt.verification_status == "PASS":
                         gpu_devices = query_runtime_devices(rt)
                         for gd in gpu_devices:
-                            idx = gd["index"]
-                            name = gd["name"]
-                            mem = gd["total_memory_gb"]
-                            devices.append(DeviceInfo(
-                                backend="cuda",
-                                index=idx,
-                                display_name=f"GPU {idx} — {name} · {mem:.1f} GB",
-                                training_value=f"cuda:{idx}",
-                                available=True,
-                                total_memory_bytes=int(mem * (1024 ** 3)),
-                                capability=gd.get("capability", ""),
-                                execution_location="local",
-                            ))
-                        break  # Only use first ready runtime
+                            devices.append(_make_gpu_device(gd))
+                        break
             except Exception as e:
-                _logger.debug("External runtime scan skipped: %s", e)
+                _logger.debug("Runtime scan skipped: %s", e)
+
+            # 2. Try registered external environments
+            if len(devices) <= 1:
+                try:
+                    from anylabeling.services.training_center.environment_scanner import (
+                        get_registered_envs, diagnose_python, EnvStatus,
+                    )
+                    for reg in get_registered_envs():
+                        if reg.get("verification_status") == EnvStatus.READY:
+                            info = diagnose_python(reg["python_path"], timeout=10.0)
+                            if info.is_cuda_ready and info.gpu_names:
+                                for i, name in enumerate(info.gpu_names):
+                                    mem = info.gpu_memory_gb[i] if i < len(info.gpu_memory_gb) else 0
+                                    devices.append(DeviceInfo(
+                                        backend="cuda", index=i,
+                                        display_name=f"GPU {i} — {name} · {mem:.1f} GB",
+                                        training_value=f"cuda:{i}",
+                                        available=True,
+                                        total_memory_bytes=int(mem * (1024**3)),
+                                        execution_location="local",
+                                    ))
+                                break
+                except Exception as e:
+                    _logger.debug("Registered env scan skipped: %s", e)
 
     return devices
+
+
+def _make_gpu_device(gd: dict) -> DeviceInfo:
+    idx = gd["index"]
+    name = gd["name"]
+    mem = gd.get("total_memory_gb", 0)
+    return DeviceInfo(
+        backend="cuda", index=idx,
+        display_name=f"GPU {idx} — {name} · {mem:.1f} GB",
+        training_value=f"cuda:{idx}",
+        available=True,
+        total_memory_bytes=int(mem * (1024**3)),
+        capability=gd.get("capability", ""),
+        execution_location="local",
+    )
 
 
 def resolve_training_device(device_value: str) -> str:

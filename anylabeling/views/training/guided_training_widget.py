@@ -1187,6 +1187,147 @@ class GuidedTrainingWidget(QWidget):
         )
         QMessageBox.information(self, "GPU Diagnostics", msg)
 
+    def _on_rescan_environments(self):
+        """Background scan for CUDA training environments."""
+        from anylabeling.services.training_center.environment_scanner import (
+            EnvironmentScannerWorker, find_best_env, rank_environments,
+            register_external_env, EnvStatus,
+        )
+
+        self.rescan_envs_btn.setEnabled(False)
+        self.rescan_envs_btn.setText("Scanning...")
+        self.gpu_install_progress.setVisible(True)
+        self.gpu_install_progress.setText("Scanning environments...")
+        self.gpu_install_progress.setStyleSheet("color: #2196F3; font-size: 11px;")
+        self.append_training_log("Environment scan started...")
+
+        self._scan_thread = QThread(self)
+        self._scan_worker = EnvironmentScannerWorker()
+        self._scan_worker.moveToThread(self._scan_thread)
+
+        self._scan_worker.progress_text.connect(self._on_scan_progress)
+        self._scan_worker.finished.connect(self._on_scan_finished)
+        self._scan_thread.started.connect(self._scan_worker.run)
+        self._scan_thread.finished.connect(self._scan_thread.deleteLater)
+        self._scan_thread.start()
+
+    def _on_scan_progress(self, text: str):
+        self.gpu_install_progress.setText(text[:200])
+
+    def _on_scan_finished(self, results: list):
+        from anylabeling.services.training_center.environment_scanner import (
+            find_best_env, register_external_env, EnvStatus,
+        )
+
+        self.rescan_envs_btn.setEnabled(True)
+        self.rescan_envs_btn.setText("Rescan Environments")
+        self.gpu_install_progress.setVisible(False)
+        self.append_training_log(f"Environment scan complete: {len(results)} environments found.")
+
+        best = find_best_env(results)
+        if best is None:
+            QMessageBox.information(
+                self, "No CUDA Environment",
+                "No ready CUDA training environment was found.\n\n"
+                "You can:\n"
+                "  • Install a new GPU Runtime\n"
+                "  • Continue with CPU training"
+            )
+            return
+
+        if best.is_cuda_ready:
+            register_external_env(best)
+            self._populate_device_combo()
+            self._update_gpu_env_card()
+            QMessageBox.information(
+                self, "CUDA Environment Found",
+                f"Ready CUDA environment registered:\n\n"
+                f"  {best.env_name}\n"
+                f"  Python {best.python_version}\n"
+                f"  PyTorch {best.torch_version} · CUDA {best.torch_cuda_version}\n"
+                f"  GPU: {', '.join(best.gpu_names)}\n"
+                f"  Ultralytics: {best.ultralytics_version}\n\n"
+                f"Device list has been updated."
+            )
+        elif best.needs_packages:
+            msg = (
+                f"CUDA environment found but missing packages:\n\n"
+                f"  {best.env_name}\n"
+                f"  Python: {best.python_version}\n"
+                f"  PyTorch: {best.torch_version} · CUDA {best.torch_cuda_version}\n"
+                f"  GPU: {', '.join(best.gpu_names)}\n\n"
+                f"Missing: ultralytics\n\n"
+                f"Install missing packages into this environment?"
+            )
+            reply = QMessageBox.question(
+                self, "Install Missing Packages", msg,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self._install_missing_packages(best)
+        else:
+            QMessageBox.information(
+                self, "No Ready Environment",
+                f"Best available: {best.status}\n\n"
+                f"  {best.env_name}\n"
+                f"  Python: {best.python_version}\n"
+                f"  PyTorch: {best.torch_version or 'N/A'}"
+            )
+
+    def _install_missing_packages(self, env_info):
+        """Install missing packages (ultralytics) into an external environment."""
+        from anylabeling.services.training_center.environment_scanner import (
+            diagnose_python, register_external_env,
+        )
+        python_exe = env_info.python_path
+
+        msg = (
+            f"Install ultralytics into this environment?\n\n"
+            f"  {env_info.env_name}\n"
+            f"  Python: {python_exe}\n\n"
+            f"Command:\n"
+            f"  {python_exe} -m pip install ultralytics==8.4.96\n\n"
+            f"This will NOT reinstall torch or modify CUDA."
+        )
+        reply = QMessageBox.question(
+            self, "Confirm Install", msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        self.gpu_install_progress.setVisible(True)
+        self.gpu_install_progress.setText("Installing ultralytics...")
+        self.gpu_install_progress.setStyleSheet("color: #2196F3; font-size: 11px;")
+
+        import subprocess as _sp
+        try:
+            result = _sp.run(
+                [python_exe, "-m", "pip", "install", "ultralytics==8.4.96"],
+                capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode == 0:
+                info = diagnose_python(python_exe)
+                if info.is_cuda_ready:
+                    register_external_env(info)
+                    self._populate_device_combo()
+                    self._update_gpu_env_card()
+                    self.gpu_install_progress.setText("✓ Ready!")
+                    self.gpu_install_progress.setStyleSheet("color: green; font-size: 11px; font-weight: bold;")
+                    QMessageBox.information(self, "Success", "Environment is now ready for GPU training.")
+                else:
+                    self.gpu_install_progress.setText("✗ Verification failed.")
+                    self.gpu_install_progress.setStyleSheet("color: red; font-size: 11px;")
+            else:
+                self.gpu_install_progress.setText(f"✗ Install failed.")
+                self.gpu_install_progress.setStyleSheet("color: red; font-size: 11px;")
+                QMessageBox.warning(self, "Install Failed", result.stderr[:500])
+        except Exception as e:
+            self.gpu_install_progress.setText(f"✗ Error: {e}")
+            self.gpu_install_progress.setStyleSheet("color: red; font-size: 11px;")
+
     def _start_gpu_install(self):
         from anylabeling.services.training_center.runtime_installer import (
             RuntimeInstallerWorker, NVIDIA_RUNTIME_DIR,
@@ -1361,6 +1502,10 @@ class GuidedTrainingWidget(QWidget):
         self.view_diag_btn = QPushButton("View Diagnostics")
         self.view_diag_btn.clicked.connect(self._on_view_diagnostics)
         gpu_env_btns.addWidget(self.view_diag_btn)
+
+        self.rescan_envs_btn = QPushButton("Rescan Environments")
+        self.rescan_envs_btn.clicked.connect(self._on_rescan_environments)
+        gpu_env_btns.addWidget(self.rescan_envs_btn)
 
         gpu_env_btns.addStretch()
         gpu_env_layout.addLayout(gpu_env_btns)
@@ -3540,11 +3685,16 @@ class GuidedTrainingWidget(QWidget):
         ul_device = resolve_training_device(requested_device)
 
         if ul_device != "cpu":
-            # Try to find a ready CUDA runtime
+            # Try to find a ready CUDA runtime (1) TrainLens runtime → (2) registered external env → (3) none
             try:
                 from anylabeling.services.training_center.runtime_installer import (
-                    detect_runtimes, get_runtime_info,
+                    detect_runtimes,
                 )
+                from anylabeling.services.training_center.environment_scanner import (
+                    get_registered_envs, EnvironmentInfo, register_external_env,
+                )
+
+                # Priority 1: TrainLens installed runtime
                 runtimes = detect_runtimes()
                 if runtimes:
                     rt = runtimes[0]
@@ -3556,11 +3706,28 @@ class GuidedTrainingWidget(QWidget):
                         f"  Torch: {rt.torch_version} · CUDA {rt.torch_cuda_version}"
                     )
                 else:
-                    QMessageBox.critical(
-                        self, self.tr("GPU Not Available"),
-                        self.tr("No ready CUDA runtime found. Please install GPU runtime first.")
-                    )
-                    return
+                    # Priority 2: Registered external environments
+                    reg_envs = get_registered_envs()
+                    # Find first ready CUDA env
+                    found = False
+                    for reg in reg_envs:
+                        if reg.get("verification_status") in ("ready", "READY"):
+                            runtime_id = reg["runtime_id"]
+                            runtime_python = reg["python_path"]
+                            found = True
+                            self.append_training_log(
+                                f"Using external CUDA environment:\n"
+                                f"  Python: {runtime_python}\n"
+                                f"  Torch: {reg.get('torch_version', '?')} · CUDA {reg.get('torch_cuda_version', '?')}"
+                            )
+                            break
+                    if not found:
+                        QMessageBox.critical(
+                            self, self.tr("GPU Not Available"),
+                            self.tr("No ready CUDA environment found.\n"
+                                    "Please install GPU runtime or add an external CUDA environment.")
+                        )
+                        return
             except Exception as e:
                 QMessageBox.critical(
                     self, self.tr("Runtime Error"),
