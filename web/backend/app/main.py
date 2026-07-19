@@ -33,8 +33,11 @@ from .routers import (  # noqa: E402
     upload,
     video,
 )
+from .auth import TokenAuthMiddleware  # noqa: E402
 
 app = FastAPI(title="X-AnyLabeling Web", version="0.1.0")
+
+app.add_middleware(TokenAuthMiddleware)
 
 app.add_middleware(
     CORSMiddleware,

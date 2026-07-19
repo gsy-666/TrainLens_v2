@@ -53,4 +53,4 @@ echo "[4/4] 启动服务 http://127.0.0.1:8000 （按 Ctrl+C 停止）"
   elif command -v open >/dev/null 2>&1; then open http://127.0.0.1:8000
   fi ) &
 cd "$SCRIPT_DIR/backend"
-exec "$PY" -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+exec "$PY" start.py "$@"
