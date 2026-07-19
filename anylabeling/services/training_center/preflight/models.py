@@ -99,6 +99,15 @@ class GuidedPreflightContext:
     job_name: str = ""
     classes: str = ""
 
+    # Runtime (external GPU environment)
+    runtime_id: str = ""
+    runtime_python: str = ""
+    requested_device: str = ""
+    resolved_device: str = ""
+    execution_mode: str = ""
+    runtime_type: str = ""
+    device_name: str = ""
+
     def fingerprint(self) -> str:
         parts = [
             self.task_type, self.model_path, self.dataset_yaml,

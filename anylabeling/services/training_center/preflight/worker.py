@@ -1,5 +1,6 @@
 """TrainLens Preflight — background worker (QObject, runs on QThread)."""
 
+import os
 import time
 from enum import Enum
 
@@ -11,7 +12,7 @@ from .common_checks import (
     check_output_directory, check_positive_int,
 )
 from .guided_checks import (
-    check_device, check_model, check_python_packages,
+    check_device, check_device_with_runtime, check_model, check_python_packages,
 )
 from .guided_yaml import (
     check_yaml_dataset_paths, check_yaml_structure, read_yaml_safe,
@@ -119,9 +120,13 @@ class PreflightWorker(QObject):
         if self._cancelled:
             return
 
-        # 4. Device
+        # 4. Device — use runtime-aware check if external runtime available
         self.progress.emit("Checking device configuration...")
-        check_device(result, ctx.device)
+        runtime_python = getattr(ctx, "runtime_python", "") or ""
+        if runtime_python and os.path.isfile(runtime_python):
+            check_device_with_runtime(result, ctx)
+        else:
+            check_device(result, ctx.device)
         if self._cancelled:
             return
 

@@ -1031,7 +1031,7 @@ class GuidedTrainingWidget(QWidget):
         self.append_training_log("Devices refreshed.")
 
     def _on_test_gpu(self):
-        """Run a quick CUDA tensor test in a background thread."""
+        """Run a quick CUDA tensor test — uses external runtime if registered."""
         from anylabeling.services.training_center.device_service import test_gpu_quick
         combo = self.config_widgets["device"]
         device_value = combo.currentData() or "auto"
@@ -1039,11 +1039,60 @@ class GuidedTrainingWidget(QWidget):
         self.test_gpu_btn.setEnabled(False)
         self.test_gpu_btn.setText("Testing...")
 
-        result = test_gpu_quick(device_value)
-        self._show_gpu_test_result(result)
+        # Try external runtime first
+        runtime_python = self._get_selected_runtime_python()
+        if runtime_python and runtime_python != sys.executable:
+            # Test via external runtime subprocess
+            from anylabeling.services.training_center.preflight.guided_checks import _query_runtime_cuda
+            info = _query_runtime_cuda(runtime_python)
+            if info:
+                self._show_gpu_test_result({
+                    "status": "PASS" if info.get("cuda_available") else "FAILED",
+                    "device_name": ", ".join(info.get("gpu_names", ["Unknown"])),
+                    "total_memory_gb": 0,
+                    "free_memory_gb": 0,
+                    "cuda_version": info.get("torch_cuda_version", "N/A"),
+                    "torch_version": info.get("torch_version", "N/A"),
+                    "elapsed_ms": 0,
+                    "error": None if info.get("cuda_available") else "CUDA not available in runtime",
+                })
+            else:
+                self._show_gpu_test_result({
+                    "status": "FAILED",
+                    "device_name": "N/A",
+                    "total_memory_gb": 0,
+                    "free_memory_gb": 0,
+                    "cuda_version": None,
+                    "torch_version": "N/A",
+                    "elapsed_ms": 0,
+                    "error": f"Failed to query runtime: {runtime_python}",
+                })
+        else:
+            # In-process test
+            result = test_gpu_quick(device_value)
+            self._show_gpu_test_result(result)
 
         self.test_gpu_btn.setEnabled(True)
         self.test_gpu_btn.setText("Test GPU")
+
+    def _get_selected_runtime_python(self) -> str:
+        """Get the runtime Python path for the currently selected device."""
+        combo = self.config_widgets.get("device")
+        if not combo:
+            return ""
+        device_value = combo.currentData() or ""
+        if device_value in ("cpu", "auto", ""):
+            return ""
+        try:
+            from anylabeling.services.training_center.environment_scanner import (
+                get_registered_envs,
+            )
+            for reg in get_registered_envs():
+                if str(reg.get("verification_status", "")).strip().lower() == "ready":
+                    return reg.get("python_path", "")
+        except Exception:
+            pass
+        return ""
 
     def _show_gpu_test_result(self, result: dict):
         """Display GPU test result in a message box."""
@@ -3323,9 +3372,48 @@ print(json.dumps(result, ensure_ascii=False))
         project = config["basic"].get("project", "")
         name = config["basic"].get("name", "")
         output_dir = os.path.join(project, name) if project and name else project
+        device = str(config["basic"].get("device", "auto"))
+
+        # Resolve runtime info for the selected device
+        runtime_id = ""
+        runtime_python = ""
+        resolved_device = device
+        device_name = ""
+        requested_device = device
+
+        if device not in ("cpu", "auto") and device.startswith("cuda"):
+            try:
+                from anylabeling.services.training_center.environment_scanner import (
+                    get_registered_envs,
+                )
+                for reg in get_registered_envs():
+                    if str(reg.get("verification_status", "")).strip().lower() == "ready":
+                        runtime_id = reg.get("runtime_id", "")
+                        runtime_python = reg.get("python_path", "")
+                        device_name = ", ".join(reg.get("gpu_names", []))
+                        resolved_device = "0"  # Ultralytics format
+                        break
+            except Exception:
+                pass
+        elif device == "auto":
+            # Check if external runtime exists
+            try:
+                from anylabeling.services.training_center.environment_scanner import (
+                    get_registered_envs,
+                )
+                from anylabeling.services.training_center.device_service import resolve_training_device
+                for reg in get_registered_envs():
+                    if str(reg.get("verification_status", "")).strip().lower() == "ready":
+                        runtime_id = reg.get("runtime_id", "")
+                        runtime_python = reg.get("python_path", "")
+                        device_name = ", ".join(reg.get("gpu_names", []))
+                        resolved_device = resolve_training_device("auto")
+                        break
+            except Exception:
+                pass
+
         # Use prepared YAML if available, else config field
         dataset_yaml = self._prepared_yaml_path or config["basic"].get("data", "")
-        # Verify YAML still exists; don't use deleted paths
         if dataset_yaml and not os.path.isfile(dataset_yaml):
             dataset_yaml = ""
         return GuidedPreflightContext(
@@ -3335,9 +3423,14 @@ print(json.dumps(result, ensure_ascii=False))
             epochs=config["train"].get("epochs", 100),
             batch=config["train"].get("batch", 16),
             imgsz=config["train"].get("imgsz", 640),
-            device=str(config["basic"].get("device", "cpu")),
+            device=device,
             output_dir=output_dir,
             job_name=name,
+            runtime_id=runtime_id,
+            runtime_python=runtime_python,
+            requested_device=requested_device,
+            resolved_device=resolved_device,
+            device_name=device_name,
         )
 
     # ── Dataset cache constants ──────────────────────────────────────
