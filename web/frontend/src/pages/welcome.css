@@ -163,6 +163,22 @@
 }
 .wl-demo:hover { text-decoration: underline; }
 
+.wl-remote {
+  margin-bottom: 28px;
+  padding: 0;
+  background: none;
+  border: none;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--mute);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: color 0.15s ease;
+}
+.wl-remote:hover { color: var(--accent); }
+
 /* ---- features (no cards, plain 3-col) ---- */
 .wl-features {
   width: 100%;

@@ -39,10 +39,13 @@ app = FastAPI(title="X-AnyLabeling Web", version="0.1.0")
 
 app.add_middleware(TokenAuthMiddleware)
 
+# The web frontend may be served from any origin (local one-click install
+# connecting to a cloud backend). /api/* is guarded by the token middleware
+# whenever a token is configured, so an open CORS policy is acceptable here.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

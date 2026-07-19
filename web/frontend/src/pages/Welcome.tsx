@@ -1,5 +1,5 @@
-import { useRef, useState } from "react";
-import { message } from "antd";
+import { useEffect, useRef, useState } from "react";
+import { message, Modal } from "antd";
 import gsap from "gsap";
 import { useGSAP } from "@gsap/react";
 import {
@@ -8,9 +8,12 @@ import {
   ThunderboltOutlined,
   VideoCameraOutlined,
   ExperimentOutlined,
+  CloudServerOutlined,
+  DisconnectOutlined,
 } from "@ant-design/icons";
 import DirBrowserModal from "../components/DirBrowserModal";
 import { useStudio } from "../store/useStudio";
+import { getServerUrl, getToken, setServerUrl, setToken } from "../api/client";
 import "@fontsource-variable/outfit";
 import "./welcome.css";
 
@@ -24,10 +27,34 @@ const FEATURES = [
 
 export default function Welcome() {
   const openDir = useStudio((s) => s.openDir);
+  const openVideo = useStudio((s) => s.openVideo);
   const [path, setPath] = useState("");
   const [browserOpen, setBrowserOpen] = useState(false);
   const [opening, setOpening] = useState(false);
+  const [remoteOpen, setRemoteOpen] = useState(false);
+  const [serverInput, setServerInput] = useState(getServerUrl());
+  const [tokenInput, setTokenInput] = useState(getToken());
   const scope = useRef<HTMLDivElement>(null);
+  const serverUrl = getServerUrl();
+
+  // resume last session once on mount
+  const resumedRef = useRef(false);
+  useEffect(() => {
+    if (resumedRef.current) return;
+    resumedRef.current = true;
+    try {
+      const raw = localStorage.getItem("xaw_last_session");
+      if (!raw) return;
+      const s = JSON.parse(raw) as { type?: string; path?: string };
+      if (!s.path) return;
+      const hide = message.loading(`恢复上次会话：${s.path}`, 0);
+      const p = s.type === "video" ? openVideo(s.path) : openDir(s.path);
+      p.catch(() => undefined).finally(hide);
+    } catch {
+      /* no session to resume */
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useGSAP(
     () => {
@@ -115,6 +142,19 @@ export default function Welcome() {
             </button>
           </div>
 
+          <button
+            type="button"
+            className="wl-remote"
+            onClick={() => {
+              setServerInput(getServerUrl());
+              setTokenInput(getToken());
+              setRemoteOpen(true);
+            }}
+          >
+            <CloudServerOutlined />
+            {serverUrl ? `已连接：${serverUrl}` : "连接远程服务器"}
+          </button>
+
           <div className="wl-features">
             {FEATURES.map((f) => (
               <div key={f.title} className="wl-feature">
@@ -147,6 +187,67 @@ export default function Welcome() {
           await doOpen(p);
         }}
       />
+
+      <Modal
+        open={remoteOpen}
+        title="连接远程服务器"
+        okText="保存并连接"
+        cancelText="取消"
+        onCancel={() => setRemoteOpen(false)}
+        onOk={() => {
+          setServerUrl(serverInput);
+          setToken(tokenInput.trim());
+          setRemoteOpen(false);
+          if (serverInput.trim()) {
+            message.success(`已连接到 ${serverInput.trim()}`);
+          }
+          window.location.reload();
+        }}
+        width={420}
+      >
+        <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 8 }}>
+          <div>
+            <div style={{ marginBottom: 4 }}>服务器地址</div>
+            <input
+              className="wl-input"
+              style={{ width: "100%" }}
+              placeholder="例如 http://172.20.10.6:8000"
+              value={serverInput}
+              onChange={(e) => setServerInput(e.target.value)}
+            />
+          </div>
+          <div>
+            <div style={{ marginBottom: 4 }}>访问令牌（服务器启动时控制台打印）</div>
+            <input
+              className="wl-input"
+              style={{ width: "100%" }}
+              type="password"
+              placeholder="无令牌可留空"
+              value={tokenInput}
+              onChange={(e) => setTokenInput(e.target.value)}
+            />
+          </div>
+          <div style={{ fontSize: 12, color: "#71717a" }}>
+            留空地址则使用本机后端。连接后，标注、AI 推理、训练全部在远程服务器上执行。
+          </div>
+          {serverUrl && (
+            <button
+              type="button"
+              className="wl-demo"
+              style={{ alignSelf: "flex-start", color: "#dc2626" }}
+              onClick={() => {
+                setServerUrl("");
+                setToken("");
+                setRemoteOpen(false);
+                message.success("已断开远程连接，使用本机后端");
+                window.location.reload();
+              }}
+            >
+              <DisconnectOutlined /> 断开当前连接（{serverUrl}）
+            </button>
+          )}
+        </div>
+      </Modal>
     </div>
   );
 }

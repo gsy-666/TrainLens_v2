@@ -132,6 +132,19 @@ export default function LabelStudio() {
         saveCurrent().then((ok) => ok && message.success("已保存", 1));
         return;
       }
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        useStudio.getState().undo();
+        return;
+      }
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        (e.key.toLowerCase() === "y" || (e.shiftKey && e.key.toLowerCase() === "z"))
+      ) {
+        e.preventDefault();
+        useStudio.getState().redo();
+        return;
+      }
       if (typing) return;
 
       const cancelDraft = (window as unknown as { __cancelCanvasDraft?: () => void })

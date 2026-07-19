@@ -47,6 +47,8 @@ export default function CanvasEditor({ onFinishDraft }: Props) {
     setSelected,
     updateShape,
     setImageSize,
+    beginShapeEdit,
+    endShapeEdit,
   } = useStudio();
 
   const currentFile =
@@ -334,7 +336,7 @@ export default function CanvasEditor({ onFinishDraft }: Props) {
     (index: number, vi: number, pos: Point) => {
       const s = shapes[index];
       const pts = s.points.map((pt, i) => (i === vi ? pos : pt));
-      updateShape(index, { ...s, points: pts });
+      updateShape(index, { ...s, points: pts }, { history: false });
     },
     [shapes, updateShape]
   );
@@ -371,7 +373,9 @@ export default function CanvasEditor({ onFinishDraft }: Props) {
             y={cy}
             radius={4}
             fill={color}
+            onDragStart={() => beginShapeEdit()}
             onDragMove={(e) => moveVertex(i, 0, [e.target.x(), e.target.y()])}
+            onDragEnd={() => endShapeEdit()}
           />
         );
       }
@@ -441,7 +445,9 @@ export default function CanvasEditor({ onFinishDraft }: Props) {
         strokeWidth={1}
         strokeScaleEnabled={false}
         draggable
+        onDragStart={() => beginShapeEdit()}
         onDragMove={(e) => moveVertex(selected, vi, [e.target.x(), e.target.y()])}
+        onDragEnd={() => endShapeEdit()}
       />
     ));
   };
