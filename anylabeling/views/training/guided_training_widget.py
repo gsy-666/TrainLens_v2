@@ -2468,7 +2468,7 @@ class GuidedTrainingWidget(QWidget):
 
     # ── Dataset cache constants ──────────────────────────────────────
     _MANIFEST_VERSION = 2
-    _CONVERTER_VERSION = 2  # bumped to invalidate old coco8/coco80 caches
+    _CONVERTER_VERSION = 3  # bumped: fix train/val split ratio (round + class coverage)
     _SPLIT_SEED = 42
 
     def _prepare_dataset(self) -> bool:
@@ -2642,6 +2642,20 @@ class GuidedTrainingWidget(QWidget):
             )
         except Exception:
             valid_count = len(self.image_list)
+        # Count actual train/val images from output
+        train_count = 0
+        val_count = 0
+        for split_name, counter in [("train", "train_count"), ("val", "val_count")]:
+            img_dir = os.path.join(dataset_dir, "images", split_name)
+            if os.path.isdir(img_dir):
+                count = len([
+                    f for f in os.listdir(img_dir)
+                    if f.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp'))
+                ])
+                if split_name == "train":
+                    train_count = count
+                else:
+                    val_count = count
         manifest = {
             "manifest_version": self._MANIFEST_VERSION,
             "converter_version": self._CONVERTER_VERSION,
@@ -2656,6 +2670,8 @@ class GuidedTrainingWidget(QWidget):
             "classes": labels,
             "class_to_id": class_to_id,
             "valid_images": valid_count,
+            "train_count": train_count,
+            "val_count": val_count,
             "created_at": datetime.datetime.now().isoformat(),
         }
         mf_path = os.path.join(dataset_dir, "dataset_manifest.json")
@@ -2767,19 +2783,45 @@ class GuidedTrainingWidget(QWidget):
 
         # 9. Valid image count must match actual exported images
         expected_valid = manifest.get("valid_images", 0)
-        actual_images = 0
+        actual_train = 0
+        actual_val = 0
         for split in ("train", "val"):
             img_dir = os.path.join(dataset_dir, "images", split)
             if os.path.isdir(img_dir):
-                actual_images += len([
+                count = len([
                     f for f in os.listdir(img_dir)
                     if f.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp'))
                 ])
+                if split == "train":
+                    actual_train = count
+                else:
+                    actual_val = count
+        actual_images = actual_train + actual_val
         if actual_images != expected_valid:
             self.append_training_log(
                 f"ERROR: Exported images ({actual_images}) != valid count ({expected_valid})"
             )
             return False
+
+        # 10. Train/val split hard check
+        ratio = manifest.get("split_ratio", 0.8)
+        if ratio > 0.5 and actual_train <= actual_val:
+            self.append_training_log(
+                f"ERROR: train_ratio={ratio} but train ({actual_train}) <= val ({actual_val})"
+            )
+            return False
+
+        # 11. Target count check
+        target_train = round(expected_valid * ratio)
+        if abs(actual_train - target_train) > max(1, expected_valid * 0.1):
+            self.append_training_log(
+                f"ERROR: train count ({actual_train}) deviates too far from target ({target_train})"
+            )
+            return False
+
+        # Update manifest with actual counts if they differ
+        manifest["train_count"] = actual_train
+        manifest["val_count"] = actual_val
 
         return True
 

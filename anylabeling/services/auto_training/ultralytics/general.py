@@ -226,9 +226,70 @@ def create_yolo_dataset(
     # ensure train/val split is randomized
     valid_images = random.sample(valid_images, k=len(valid_images))
 
-    train_count = int(len(valid_images) * dataset_ratio)
-    train_valid_images = valid_images[:train_count]
-    val_valid_images = valid_images[train_count:]
+    # ── Class-aware stratified split ──────────────────────────────────
+    # Build class→images index for single-instance / rare-class coverage
+    class_to_images: dict[int, list] = {}
+    for idx, (_, label_file) in enumerate(valid_images):
+        try:
+            with open(label_file, "r", encoding="utf-8") as f:
+                jd = json.load(f)
+            for s in jd.get("shapes", []):
+                lbl = s.get("label")
+                if lbl and str(lbl).strip():
+                    # Map label to converter class ID (already contiguous)
+                    try:
+                        cid = converter.classes.index(str(lbl).strip())
+                    except ValueError:
+                        continue
+                    class_to_images.setdefault(cid, []).append(idx)
+        except Exception:
+            pass
+
+    # Remove duplicates (same image may appear under multiple classes)
+    for cid in list(class_to_images.keys()):
+        class_to_images[cid] = list(set(class_to_images[cid]))
+
+    total_valid = len(valid_images)
+    target_train = round(total_valid * dataset_ratio)
+    target_val = total_valid - target_train
+
+    # Safety: when ratio > 0.5, train must be > val
+    if dataset_ratio > 0.5 and target_train <= target_val:
+        target_train = target_val + 1
+        target_val = total_valid - target_train
+
+    # Phase 1: guarantee single-instance classes go to train
+    train_indices: set = set()
+    for cid, img_indices in class_to_images.items():
+        if len(img_indices) == 1:
+            train_indices.add(img_indices[0])
+
+    # Phase 2: ensure every class has at least one image in train
+    for cid, img_indices in class_to_images.items():
+        if not any(i in train_indices for i in img_indices):
+            for i in img_indices:
+                if i not in train_indices:
+                    train_indices.add(i)
+                    break
+
+    # Phase 3: fill remaining slots from unassigned images
+    remaining = [i for i in range(total_valid) if i not in train_indices]
+    needed = target_train - len(train_indices)
+    if needed > 0:
+        extra = remaining[:needed]
+        train_indices.update(extra)
+        remaining = [i for i in remaining if i not in train_indices]
+
+    train_valid_images = [valid_images[i] for i in sorted(train_indices)]
+    val_valid_images = [valid_images[i] for i in sorted(remaining)]
+
+    # Log split stats
+    import logging
+    _logger = logging.getLogger(__name__)
+    _logger.info(
+        f"Dataset split: train={len(train_valid_images)}, val={len(val_valid_images)}, "
+        f"total={total_valid}, target_train={target_train}, dataset_ratio={dataset_ratio}"
+    )
 
     if task_type == "Classify":
         _process_classify_images_batch(train_valid_images, train_dir)
