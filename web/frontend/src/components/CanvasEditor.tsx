@@ -83,14 +83,21 @@ export default function CanvasEditor({ onFinishDraft, onSamPrompt }: Props) {
       setImg(null);
       return;
     }
+    let cancelled = false;
     const image = new window.Image();
     image.src = video ? videoFrameUrl(currentIndex) : imageUrl(currentFile);
     image.onload = () => {
+      if (cancelled) return;
       setImg(image);
       setImageSize(image.naturalWidth, image.naturalHeight);
     };
+    image.onerror = () => {
+      if (!cancelled) setImg(null);
+    };
     return () => {
+      cancelled = true;
       image.onload = null;
+      image.onerror = null;
     };
   }, [currentFile, video, currentIndex, setImageSize]);
 
@@ -613,7 +620,7 @@ export default function CanvasEditor({ onFinishDraft, onSamPrompt }: Props) {
         onMouseUp={onMouseUp}
         onDblClick={onDblClick}
       >
-        <Layer listening={false}>{img && <KonvaImage image={img} />}</Layer>
+        <Layer listening={false}>{img && <KonvaImage key={currentFile} image={img} />}</Layer>
         <Layer>
           {shapes.map(renderShape)}
           {renderHandles()}
