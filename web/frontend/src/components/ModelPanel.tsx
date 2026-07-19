@@ -43,6 +43,8 @@ export default function ModelPanel() {
     markAllLabeled,
     reloadCurrent,
     refreshImages,
+    samMode,
+    setSamMode,
   } = useStudio();
 
   const [models, setModels] = useState<api.ModelInfo[]>([]);
@@ -131,7 +133,8 @@ export default function ModelPanel() {
   const onUnload = useCallback(async () => {
     await api.unloadModel();
     setLoaded(null);
-  }, []);
+    setSamMode(false);
+  }, [setSamMode]);
 
   const onRunCurrent = useCallback(async () => {
     if (currentIndex < 0 || !loaded) return;
@@ -397,6 +400,19 @@ export default function ModelPanel() {
             保留已有标注{" "}
             <Switch size="small" checked={preserve} onChange={setPreserve} />
           </div>
+          {loaded.supports_marks && !video && (
+            <div style={{ fontSize: 11, color: "#888", marginTop: 4 }}>
+              SAM 交互（画布上点/框提示）{" "}
+              <Switch
+                size="small"
+                checked={samMode}
+                onChange={(v) => {
+                  setSamMode(v);
+                  if (v) message.info("SAM 模式：单击出点，拖拽出框", 3);
+                }}
+              />
+            </div>
+          )}
         </div>
       )}
 

@@ -32,6 +32,56 @@ class PredictRequest(BaseModel):
     iou: Optional[float] = None
 
 
+class SamMark(BaseModel):
+    type: str  # "point" | "rectangle"
+    data: List[float]  # point: [x, y]; rectangle: [x1, y1, x2, y2]
+    label: Optional[int] = 1  # point label: 1 positive, 0 negative
+
+
+class SamPredictRequest(BaseModel):
+    image: str
+    marks: List[SamMark]
+
+
+@router.post("/predict/sam")
+async def predict_sam(req: SamPredictRequest):
+    """Interactive SAM prompting: point/box marks -> mask polygons."""
+    svc = get_model_service()
+    image_path = _resolve_image(req.image)
+    loaded = svc.loaded_info()
+    if not loaded:
+        raise HTTPException(status_code=400, detail="No model loaded")
+    if not loaded["supports_marks"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Loaded model '{loaded['display_name']}' does not support point/box prompts",
+        )
+    if not req.marks:
+        raise HTTPException(status_code=400, detail="marks is empty")
+
+    marks = []
+    for m in req.marks:
+        if m.type == "point":
+            if len(m.data) != 2:
+                raise HTTPException(status_code=400, detail="point mark needs [x, y]")
+            marks.append({"type": "point", "data": m.data, "label": m.label or 1})
+        elif m.type == "rectangle":
+            if len(m.data) != 4:
+                raise HTTPException(
+                    status_code=400, detail="rectangle mark needs [x1, y1, x2, y2]"
+                )
+            marks.append({"type": "rectangle", "data": m.data})
+        else:
+            raise HTTPException(status_code=400, detail=f"unknown mark type: {m.type}")
+
+    try:
+        svc.manager.set_auto_labeling_marks(marks)
+        result = await asyncio.to_thread(svc.predict, str(image_path))
+    except Exception as e:  # noqa
+        raise HTTPException(status_code=500, detail=f"SAM prediction failed: {e}")
+    return result
+
+
 @router.post("/predict")
 async def predict(req: PredictRequest):
     svc = get_model_service()

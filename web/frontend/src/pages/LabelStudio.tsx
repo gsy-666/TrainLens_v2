@@ -8,6 +8,7 @@ import DirBrowserModal from "../components/DirBrowserModal";
 import ExportDialog from "../components/ExportDialog";
 import CanvasEditor from "../components/CanvasEditor";
 import ModelPanel from "../components/ModelPanel";
+import * as api from "../api/client";
 import { useStudio } from "../store/useStudio";
 import type { Point, Shape, ShapeType } from "../types";
 
@@ -23,6 +24,7 @@ export default function LabelStudio() {
     updateShape,
     removeShape,
     shapes,
+    images,
     selected,
     setSelected,
     setMode,
@@ -67,6 +69,59 @@ export default function LabelStudio() {
   const handleFinishDraft = useCallback((points: Point[], type: ShapeType) => {
     setDraft({ points, type });
   }, []);
+
+  // ---- SAM prompt handling ----------------------------------------------------
+  const handleSamPrompt = useCallback(
+    async (a: Point, b: Point) => {
+      const file = images[currentIndex]?.filename;
+      if (!file) return;
+      const isPoint = Math.hypot(b[0] - a[0], b[1] - a[1]) < 3;
+      const marks = isPoint
+        ? [{ type: "point" as const, data: a, label: 1 }]
+        : [
+            {
+              type: "rectangle" as const,
+              data: [
+                Math.min(a[0], b[0]),
+                Math.min(a[1], b[1]),
+                Math.max(a[0], b[0]),
+                Math.max(a[1], b[1]),
+              ],
+            },
+          ];
+      const hide = message.loading("SAM 推理中…", 0);
+      try {
+        const res = await api.predictSam(file, marks);
+        const polygons = res.shapes.filter((s) => s.points.length >= 3);
+        if (polygons.length === 0) {
+          message.warning("未生成掩码，换个位置或拖个框试试");
+          return;
+        }
+        const area = (pts: [number, number][]) => {
+          let s = 0;
+          for (let i = 0; i < pts.length; i++) {
+            const [x1, y1] = pts[i];
+            const [x2, y2] = pts[(i + 1) % pts.length];
+            s += x1 * y2 - x2 * y1;
+          }
+          return Math.abs(s / 2);
+        };
+        const best = polygons.reduce((m, s) =>
+          area(s.points) > area(m.points) ? s : m
+        );
+        setDraft({
+          points: best.points.map((p) => [p[0], p[1]] as Point),
+          type: "polygon",
+        });
+      } catch (e) {
+        const err = e as { response?: { data?: { detail?: string } }; message: string };
+        message.error(`SAM 推理失败: ${err.response?.data?.detail ?? err.message}`);
+      } finally {
+        hide();
+      }
+    },
+    [images, currentIndex]
+  );
 
   const confirmDraft = useCallback(
     (v: LabelFormValue) => {
@@ -228,7 +283,7 @@ export default function LabelStudio() {
         </Layout.Sider>
         <Layout.Content style={{ position: "relative" }}>
           {currentIndex >= 0 ? (
-            <CanvasEditor onFinishDraft={handleFinishDraft} />
+            <CanvasEditor onFinishDraft={handleFinishDraft} onSamPrompt={handleSamPrompt} />
           ) : (
             <div
               style={{

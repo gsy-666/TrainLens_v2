@@ -15,12 +15,14 @@ interface ViewState {
 
 interface Props {
   onFinishDraft: (points: Point[], type: ShapeType) => void;
+  onSamPrompt: (start: Point, end: Point) => void;
 }
 
 const HANDLE_RADIUS = 4;
 const MIN_DRAG_PX = 3; // min drag distance (image px) to finish a drag shape
+const SAM_CLICK_PX = 3; // below this a SAM prompt counts as a point
 
-export default function CanvasEditor({ onFinishDraft }: Props) {
+export default function CanvasEditor({ onFinishDraft, onSamPrompt }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<Konva.Stage>(null);
   const [size, setSize] = useState({ w: 800, h: 600 });
@@ -34,6 +36,10 @@ export default function CanvasEditor({ onFinishDraft }: Props) {
   const [rotPhase, setRotPhase] = useState<0 | 1>(0); // rotation: 0=edge, 1=extent
   const panRef = useRef<{ startX: number; startY: number; vx: number; vy: number; moved: boolean } | null>(null);
 
+  // SAM prompt state
+  const [samStart, setSamStart] = useState<Point | null>(null);
+  const [samCur, setSamCur] = useState<Point | null>(null);
+
   const {
     images,
     video,
@@ -44,6 +50,7 @@ export default function CanvasEditor({ onFinishDraft }: Props) {
     mode,
     createType,
     fitRequest,
+    samMode,
     setSelected,
     updateShape,
     setImageSize,
@@ -108,7 +115,9 @@ export default function CanvasEditor({ onFinishDraft }: Props) {
     setPreviewPt(null);
     setDragging(false);
     setRotPhase(0);
-  }, [currentFile, mode, createType]);
+    setSamStart(null);
+    setSamCur(null);
+  }, [currentFile, mode, createType, samMode]);
 
   // ---- helpers -------------------------------------------------------------
   const toImagePos = useCallback((): Point | null => {
@@ -173,6 +182,13 @@ export default function CanvasEditor({ onFinishDraft }: Props) {
       const p = toImagePos();
       if (!p) return;
 
+      // SAM prompt mode: click = point prompt, drag = box prompt
+      if (samMode && !video && e.evt.button === 0) {
+        setSamStart(p);
+        setSamCur(p);
+        return;
+      }
+
       if (mode === "select") {
         // click on empty background -> start panning (click without move = deselect)
         const target = e.target;
@@ -229,7 +245,7 @@ export default function CanvasEditor({ onFinishDraft }: Props) {
           break;
       }
     },
-    [mode, createType, draftPts, rotPhase, view, toImagePos, finishDraft]
+    [mode, createType, draftPts, rotPhase, view, toImagePos, finishDraft, samMode, video]
   );
 
   const onMouseMove = useCallback(() => {
@@ -248,6 +264,10 @@ export default function CanvasEditor({ onFinishDraft }: Props) {
     }
     const p = toImagePos();
     if (!p) return;
+    if (samMode && samStart) {
+      setSamCur(p);
+      return;
+    }
     setPreviewPt(p);
 
     if (mode === "create" && dragging && draftPts.length === 1) {
@@ -260,6 +280,14 @@ export default function CanvasEditor({ onFinishDraft }: Props) {
 
   const onMouseUp = useCallback(
     (e: KonvaEventObject<MouseEvent>) => {
+      if (samMode && samStart) {
+        const p = toImagePos();
+        const a = samStart;
+        setSamStart(null);
+        setSamCur(null);
+        if (p) onSamPrompt(a, p);
+        return;
+      }
       if (panRef.current) {
         const wasClick = !panRef.current.moved;
         panRef.current = null;
@@ -310,7 +338,7 @@ export default function CanvasEditor({ onFinishDraft }: Props) {
           break;
       }
     },
-    [mode, dragging, draftPts, createType, toImagePos, finishDraft, setSelected]
+    [mode, dragging, draftPts, createType, toImagePos, finishDraft, setSelected, samMode, samStart, onSamPrompt]
   );
 
   const onDblClick = useCallback(() => {
@@ -522,8 +550,49 @@ export default function CanvasEditor({ onFinishDraft }: Props) {
     }
   };
 
-  const cursor =
-    mode === "create" ? "crosshair" : panRef.current?.moved ? "grabbing" : "default";
+  const renderSamPreview = () => {
+    if (!samMode || !samStart) return null;
+    const color = "#2563eb";
+    const common = {
+      stroke: color,
+      strokeWidth: 2,
+      dash: [6, 4],
+      strokeScaleEnabled: false,
+      listening: false,
+    };
+    const isBox =
+      samCur &&
+      Math.hypot(samCur[0] - samStart[0], samCur[1] - samStart[1]) > SAM_CLICK_PX;
+    if (isBox && samCur) {
+      return (
+        <Rect
+          {...common}
+          x={Math.min(samStart[0], samCur[0])}
+          y={Math.min(samStart[1], samCur[1])}
+          width={Math.abs(samCur[0] - samStart[0])}
+          height={Math.abs(samCur[1] - samStart[1])}
+        />
+      );
+    }
+    // point marker: small cross
+    const [cx, cy] = samStart;
+    const r = 6;
+    return (
+      <>
+        <Circle x={cx} y={cy} radius={2.5} fill={color} listening={false} />
+        <Line {...common} points={[cx - r, cy, cx + r, cy]} dash={undefined} />
+        <Line {...common} points={[cx, cy - r, cx, cy + r]} dash={undefined} />
+      </>
+    );
+  };
+
+  const cursor = samMode
+    ? "crosshair"
+    : mode === "create"
+      ? "crosshair"
+      : panRef.current?.moved
+        ? "grabbing"
+        : "default";
 
   return (
     <div
@@ -549,6 +618,7 @@ export default function CanvasEditor({ onFinishDraft }: Props) {
           {shapes.map(renderShape)}
           {renderHandles()}
           {renderDraft()}
+          {renderSamPreview()}
         </Layer>
       </Stage>
     </div>

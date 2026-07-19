@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 
 import anylabeling.config as anylabeling_config
 from anylabeling.config import get_work_directory
+from anylabeling.services.auto_labeling import _AUTO_LABELING_MARKS_MODELS
 from anylabeling.services.auto_labeling.model_manager import ModelManager
 
 
@@ -80,6 +81,7 @@ class WebModelService:
             "display_name": cfg.get("display_name"),
             "type": cfg.get("type"),
             "config_file": cfg.get("config_file"),
+            "supports_marks": cfg.get("type") in _AUTO_LABELING_MARKS_MODELS,
         }
 
     # ---- load / unload --------------------------------------------------------
