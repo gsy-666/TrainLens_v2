@@ -1119,12 +1119,41 @@ class GuidedTrainingWidget(QWidget):
         from anylabeling.services.training_center.device_service import (
             diagnose_environment, EnvironmentState,
         )
+        from anylabeling.services.training_center.environment_scanner import (
+            get_registered_envs,
+        )
         diag = diagnose_environment()
 
-        if diag.state == EnvironmentState.GPU_READY:
-            self.gpu_env_status_label.setText(
-                f"✓ {diag.gpu_name}\nPyTorch {diag.torch_version} · CUDA {diag.torch_cuda_version}"
-            )
+        # Check external runtimes for GPU readiness
+        has_external_gpu = False
+        external_info = None
+        try:
+            for reg in get_registered_envs():
+                if str(reg.get("verification_status", "")).strip().lower() == "ready":
+                    has_external_gpu = True
+                    external_info = reg
+                    break
+        except Exception:
+            pass
+
+        if diag.state == EnvironmentState.GPU_READY or has_external_gpu:
+            # In-process or external GPU ready
+            if has_external_gpu and external_info:
+                gpu_name = ", ".join(external_info.get("gpu_names", ["Unknown"]))
+                rt_python = external_info.get("python_path", "")
+                rt_torch = external_info.get("torch_version", "?")
+                rt_cuda = external_info.get("torch_cuda_version", "?")
+                self.gpu_env_status_label.setText(
+                    f"Detected GPU: {gpu_name}\n"
+                    f"GUI PyTorch: {diag.torch_version}\n"
+                    f"Training Runtime: {rt_python}\n"
+                    f"Runtime PyTorch: {rt_torch} · CUDA {rt_cuda}\n"
+                    f"Status: GPU training ready"
+                )
+            else:
+                self.gpu_env_status_label.setText(
+                    f"✓ {diag.gpu_name}\nPyTorch {diag.torch_version} · CUDA {diag.torch_cuda_version}"
+                )
             self.gpu_env_status_label.setStyleSheet("color: green; font-size: 11px;")
             self.enable_gpu_btn.setVisible(False)
             self.continue_cpu_btn.setVisible(False)

@@ -200,19 +200,19 @@ def detect_local_devices() -> list[DeviceInfo]:
                 "Installed PyTorch %s is CPU-only. Install a CUDA-enabled "
                 "PyTorch build for NVIDIA GPU training.", torch_version
             )
-            return devices
+            # DO NOT return early — fall through to external runtime detection
 
         if not torch.cuda.is_available():
             _logger.warning(
                 "torch.cuda.is_available()=False (PyTorch %s, CUDA %s). "
                 "Check NVIDIA driver and CUDA toolkit.", torch_version, cuda_version
             )
-            return devices
+            # DO NOT return early — fall through to external runtime detection
 
-        gpu_count = torch.cuda.device_count()
-        if gpu_count == 0:
+        gpu_count = torch.cuda.device_count() if cuda_version else 0
+        if gpu_count == 0 and cuda_version:
             _logger.warning("torch.cuda.device_count()=0 despite is_available()=True")
-            return devices
+            # Still fall through to external runtimes
 
         for i in range(gpu_count):
             try:
@@ -247,9 +247,12 @@ def detect_local_devices() -> list[DeviceInfo]:
     except Exception as e:
         _logger.warning("Device detection failed: %s", e)
 
+    _logger.info("After in-process detection: %d devices", len(devices))
+
     # ── Fallback: external CUDA runtimes and registered envs ──
     if len(devices) <= 1:  # Only CPU found
         _name, gpu_count, _drv, _cuda = _probe_nvidia_smi()
+        _logger.info("Fallback: nvidia-smi gpu_count=%d devices=%d", gpu_count, len(devices))
         if gpu_count > 0:
             # 1. Try TrainLens runtimes
             try:
@@ -257,35 +260,48 @@ def detect_local_devices() -> list[DeviceInfo]:
                     detect_runtimes, query_runtime_devices,
                 )
                 runtimes = detect_runtimes()
+                _logger.info("TrainLens runtimes found: %d", len(runtimes))
                 for rt in runtimes:
                     if rt.install_status == "ready" and rt.verification_status == "PASS":
                         gpu_devices = query_runtime_devices(rt)
+                        _logger.info("Runtime %s provides %d GPU devices", rt.runtime_id, len(gpu_devices))
                         for gd in gpu_devices:
                             devices.append(_make_gpu_device(gd))
                         break
             except Exception as e:
-                _logger.debug("Runtime scan skipped: %s", e)
+                _logger.warning("Runtime scan failed: %s", e)
 
             # 2. Try registered external environments (fast: use stored GPU info)
             if len(devices) <= 1:
+                _logger.info("Trying registered envs (devices=%d)...", len(devices))
                 try:
                     from anylabeling.services.training_center.environment_scanner import (
                         get_registered_envs,
                     )
-                    for reg in get_registered_envs():
+                    regs = get_registered_envs()
+                    _logger.info("Registered envs found: %d", len(regs))
+                    for reg in regs:
                         status = str(reg.get("verification_status", "")).strip().lower()
-                        if status != "ready":
-                            continue
                         py = reg.get("python_path", "")
-                        if not py or not os.path.isfile(py):
-                            _logger.debug("Registered env python missing: %s", py)
-                            continue
+                        py_ok = bool(py and os.path.isfile(py))
                         gpu_names = reg.get("gpu_names", [])
                         gpu_mem = reg.get("gpu_memory_gb", [])
+                        _logger.info(
+                            "Reg env %s: status=%s py=%s py_ok=%s gpus=%s mem=%s",
+                            reg.get("runtime_id"), status, py[:60], py_ok, gpu_names, gpu_mem,
+                        )
+                        if status != "ready":
+                            _logger.debug("Reg env skipped: status=%s", status)
+                            continue
+                        if not py_ok:
+                            _logger.warning("Reg env python missing: %s", py)
+                            continue
                         if not gpu_names:
+                            _logger.debug("Reg env has no gpu_names")
                             continue
                         for i, name in enumerate(gpu_names):
                             mem = gpu_mem[i] if i < len(gpu_mem) else 0
+                            _logger.info("Adding GPU device %d: %s %sGB", i, name, mem)
                             devices.append(DeviceInfo(
                                 backend="cuda", index=i,
                                 display_name=f"GPU {i} — {name} · {mem:.1f} GB",
@@ -294,15 +310,11 @@ def detect_local_devices() -> list[DeviceInfo]:
                                 total_memory_bytes=int(mem * (1024**3)),
                                 execution_location="local",
                             ))
-                        if devices:
-                            _logger.info(
-                                "Registered env %s provides GPU: %s",
-                                reg.get("runtime_id"), gpu_names,
-                            )
-                            break
+                        break  # Only use first ready registered env
                 except Exception as e:
-                    _logger.debug("Registered env scan skipped: %s", e)
-                    _logger.debug("Registered env scan skipped: %s", e)
+                    _logger.warning("Registered env scan failed: %s", e)
+
+    _logger.info("detect_local_devices returning %d devices", len(devices))
 
     return devices
 
