@@ -4,7 +4,9 @@ Persistent JSONL-based storage for training job history.
 Thread-safe with atomic writes and corruption resistance.
 """
 
+import csv
 import json
+import os
 import shutil
 import threading
 import warnings
@@ -34,7 +36,20 @@ class JobHistoryRecord:
     metadata: Dict[str, Any] = field(default_factory=dict)
     error_message: Optional[str] = None
 
-    # Metrics summary
+    # Training config (for Guided display)
+    task: Optional[str] = None
+    model: Optional[str] = None
+    data: Optional[str] = None
+    project: Optional[str] = None
+
+    # Epochs & metrics
+    requested_epochs: Optional[int] = None
+    completed_epochs: Optional[int] = None
+    best_epoch: Optional[int] = None
+    best_metric_name: Optional[str] = None
+    best_metric_value: Optional[float] = None
+
+    # Legacy metrics (kept for backward compat)
     total_epochs: Optional[int] = None
     final_epoch: Optional[int] = None
     best_map50: Optional[float] = None
@@ -55,11 +70,18 @@ class JobHistoryRecord:
     checkpoint_path: Optional[str] = None
     results_path: Optional[str] = None
     export_path: Optional[str] = None
+    best_weights_path: Optional[str] = None
+    last_weights_path: Optional[str] = None
+    results_csv_path: Optional[str] = None
+    results_image_path: Optional[str] = None
+    log_path: Optional[str] = None
 
-    # Training config (for Guided display)
-    task: Optional[str] = None
-    model: Optional[str] = None
-    data: Optional[str] = None
+    # Final state
+    exit_code: Optional[int] = None
+    final_status: Optional[str] = None
+    dataset_yaml: Optional[str] = None
+    model_name: Optional[str] = None
+    project_path: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization"""
@@ -196,9 +218,10 @@ class HistoryStore:
         error_message: Optional[str] = None,
         **metrics
     ):
-        """Mark job as terminal and record final metrics
+        """Mark job as terminal and record final metrics.
 
         Idempotent: preserves existing terminal state.
+        Auto-parses results.csv for epochs and best metric.
 
         Args:
             job_id: Job ID to finalize
@@ -219,12 +242,16 @@ class HistoryStore:
             record = self._cache[job_id]
 
             # Idempotent: don't overwrite existing terminal state
-            current_status = TrainingStatus(record.status)
-            if current_status.is_terminal():
+            try:
+                current_status = TrainingStatus(record.status)
+            except ValueError:
+                current_status = None
+            if current_status and current_status.is_terminal():
                 return
 
             # Update terminal fields
             record.status = status.value
+            record.final_status = status.value
             if ended_at:
                 record.ended_at = ended_at.isoformat()
 
@@ -237,10 +264,55 @@ class HistoryStore:
                 record.output_directory = str(output_directory)
 
             # Calculate duration
-            if record.started_at and record.ended_at:
-                start = datetime.fromisoformat(record.started_at)
-                end = datetime.fromisoformat(record.ended_at)
-                record.duration_seconds = (end - start).total_seconds()
+            if record.started_at:
+                try:
+                    start = datetime.fromisoformat(record.started_at)
+                    end = ended_at if ended_at else datetime.now()
+                    record.duration_seconds = max(0, (end - start).total_seconds())
+                except (ValueError, TypeError):
+                    pass
+
+            # ── Parse results.csv for epochs and best metric ──
+            out_dir = record.output_directory
+            if out_dir and os.path.isdir(out_dir):
+                results_csv = os.path.join(out_dir, "results.csv")
+                if os.path.isfile(results_csv):
+                    try:
+                        epochs_metrics = _parse_results_csv(results_csv)
+                        if epochs_metrics:
+                            record.completed_epochs = len(epochs_metrics)
+                            record.results_csv_path = results_csv
+                            # Find best epoch by mAP50(B)
+                            best = _find_best_epoch(epochs_metrics)
+                            if best:
+                                record.best_epoch = best["epoch"]
+                                record.best_metric_name = best["metric_name"]
+                                record.best_metric_value = best["metric_value"]
+                    except Exception:
+                        pass
+
+                # Check for weights
+                best_pt = os.path.join(out_dir, "weights", "best.pt")
+                if os.path.isfile(best_pt):
+                    record.best_weights_path = best_pt
+                last_pt = os.path.join(out_dir, "weights", "last.pt")
+                if os.path.isfile(last_pt):
+                    record.last_weights_path = last_pt
+
+                # results.png
+                results_png = os.path.join(out_dir, "results.png")
+                if os.path.isfile(results_png):
+                    record.results_image_path = results_png
+
+                # Legacy: also set for backward compat
+                if record.best_map50 is None and record.best_metric_name == "metrics/mAP50(B)":
+                    record.best_map50 = record.best_metric_value
+                if record.best_map50_95 is None and record.best_metric_name == "metrics/mAP50-95(B)":
+                    record.best_map50_95 = record.best_metric_value
+                if record.final_epoch is None:
+                    record.final_epoch = record.completed_epochs
+                if record.total_epochs is None:
+                    record.total_epochs = record.requested_epochs
 
             # Update metrics
             for key, value in metrics.items():
@@ -308,6 +380,18 @@ class HistoryStore:
                 self.index_file.unlink()
             self._loaded = True
 
+    def delete_job(self, job_id: str):
+        """Delete a single job record from history.
+
+        Args:
+            job_id: Job ID to delete
+        """
+        with self._lock:
+            self._ensure_loaded()
+            if job_id in self._cache:
+                del self._cache[job_id]
+                self._write_index()
+
 
 # Singleton instance
 _store: Optional[HistoryStore] = None
@@ -329,3 +413,81 @@ def get_history_store(history_dir: Optional[Path] = None) -> HistoryStore:
         if _store is None or history_dir is not None:
             _store = HistoryStore(history_dir=history_dir)
         return _store
+
+
+# ── Results CSV parsing ───────────────────────────────────────────
+
+def _parse_results_csv(csv_path: str) -> list:
+    """Parse ultralytics results.csv into a list of per-epoch metric dicts.
+
+    Returns empty list on any error.
+    """
+    rows = []
+    try:
+        with open(csv_path, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                # Strip whitespace from keys
+                cleaned = {k.strip(): v.strip() for k, v in row.items()}
+                rows.append(cleaned)
+    except Exception:
+        pass
+    return rows
+
+
+def _find_best_epoch(epochs: list) -> dict | None:
+    """Find the epoch with the best mAP50(B) value.
+
+    Returns dict with epoch, metric_name, metric_value or None.
+    """
+    if not epochs:
+        return None
+
+    # Priority metrics for Detect tasks
+    candidates = [
+        "metrics/mAP50(B)",
+        "metrics/mAP50-95(B)",
+    ]
+
+    best = None
+    for metric in candidates:
+        for i, row in enumerate(epochs):
+            val_str = row.get(metric, "").strip()
+            if not val_str:
+                continue
+            try:
+                val = float(val_str)
+                epoch_num = i + 1  # 1-based epoch
+                if best is None or val > best["metric_value"]:
+                    best = {
+                        "epoch": epoch_num,
+                        "metric_name": metric,
+                        "metric_value": round(val, 4),
+                    }
+            except (ValueError, TypeError):
+                continue
+        if best is not None:
+            break
+
+    return best
+
+
+def format_duration(seconds: float | None) -> str:
+    """Format duration for display.
+
+    < 60s: "23s"
+    < 1h:   "4m 12s"
+    >= 1h:  "1h 08m"
+    """
+    if seconds is None or seconds <= 0:
+        return ""
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes = seconds // 60
+    secs = seconds % 60
+    if minutes < 60:
+        return f"{minutes}m {secs}s"
+    hours = minutes // 60
+    mins = minutes % 60
+    return f"{hours}h {mins:02d}m"

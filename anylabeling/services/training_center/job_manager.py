@@ -4,6 +4,7 @@ Global singleton that coordinates all training jobs across different modes.
 Enforces mutual exclusion and manages job lifecycle.
 """
 
+import os
 import threading
 import time
 from datetime import datetime
@@ -103,6 +104,10 @@ class JobManager:
                 task=getattr(job, 'task', None),
                 model=getattr(job, 'model', None),
                 data=getattr(job, 'data', None),
+                project=getattr(job, 'project', None),
+                project_path=os.path.join(getattr(job, 'project', '') or '', getattr(job, 'name', '') or '') if getattr(job, 'project', None) else None,
+                dataset_yaml=getattr(job, 'data', None),
+                model_name=getattr(job, 'model', None),
             )
             store.append_job(record)
         except Exception:
@@ -438,23 +443,26 @@ class JobManager:
         and notify status callbacks (lock-free). Event callbacks are
         dispatched lock-free with a snapshot.
         """
+        # Convert float timestamp to datetime
+        ended_dt = datetime.fromtimestamp(event.timestamp) if event.timestamp else datetime.now()
+
         if event.event_type == TrainingEventType.COMPLETED:
             self.complete_job(
                 event.job_id,
-                ended_at=event.timestamp,
+                ended_at=ended_dt,
                 metadata=event.payload
             )
         elif event.event_type == TrainingEventType.FAILED:
             self.fail_job(
                 event.job_id,
                 error=event.payload.get('error', 'Unknown error'),
-                ended_at=event.timestamp,
+                ended_at=ended_dt,
                 metadata=event.payload
             )
         elif event.event_type == TrainingEventType.STOPPED:
             self.stop_job(
                 event.job_id,
-                ended_at=event.timestamp,
+                ended_at=ended_dt,
                 metadata=event.payload
             )
 

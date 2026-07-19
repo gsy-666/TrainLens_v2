@@ -21,9 +21,12 @@ from PyQt6.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
     QWidget,
+    QDialog,
 )
 
-from anylabeling.services.training_center.history import get_history_store
+from anylabeling.services.training_center.history import (
+    get_history_store, format_duration,
+)
 from anylabeling.services.training_center.job_manager import get_job_manager
 from anylabeling.services.training_center.models import TrainingStatus
 from anylabeling.services.training_center.event_protocol import TrainingEventType
@@ -60,7 +63,10 @@ MODE_LABELS = {
 class TrainingHistoryWidget(QWidget):
     """Displays training job history from HistoryStore."""
 
-    COLUMNS = ["Status", "Mode", "Name", "Task / Script", "Started At", "Duration", "Output"]
+    COLUMNS = [
+        "Started", "Task", "Model", "Dataset", "Status",
+        "Epochs", "Best Metric", "Duration",
+    ]
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -115,23 +121,47 @@ class TrainingHistoryWidget(QWidget):
 
         self.detail_text = QTextEdit()
         self.detail_text.setReadOnly(True)
-        self.detail_text.setMaximumHeight(120)
+        self.detail_text.setMaximumHeight(140)
         self.detail_text.setPlaceholderText("Select a job to view details...")
         detail_layout.addWidget(self.detail_text)
 
-        action_buttons = QVBoxLayout()
-        self.open_dir_btn = QPushButton("Open Directory")
+        # Action buttons (2-column grid)
+        action_layout = QVBoxLayout()
+        action_layout.setSpacing(4)
+
+        self.open_dir_btn = QPushButton("Open Output Folder")
         self.open_dir_btn.clicked.connect(self._open_output_directory)
         self.open_dir_btn.setEnabled(False)
-        action_buttons.addWidget(self.open_dir_btn)
+        action_layout.addWidget(self.open_dir_btn)
+
+        self.open_log_btn = QPushButton("Open Log")
+        self.open_log_btn.clicked.connect(self._open_log)
+        self.open_log_btn.setEnabled(False)
+        action_layout.addWidget(self.open_log_btn)
+
+        self.open_csv_btn = QPushButton("Open results.csv")
+        self.open_csv_btn.clicked.connect(self._open_results_csv)
+        self.open_csv_btn.setEnabled(False)
+        action_layout.addWidget(self.open_csv_btn)
+
+        self.open_best_pt_btn = QPushButton("Open best.pt Folder")
+        self.open_best_pt_btn.clicked.connect(self._open_best_pt_folder)
+        self.open_best_pt_btn.setEnabled(False)
+        action_layout.addWidget(self.open_best_pt_btn)
 
         self.view_metrics_btn = QPushButton("View Metrics")
         self.view_metrics_btn.clicked.connect(self._view_metrics)
         self.view_metrics_btn.setEnabled(False)
-        action_buttons.addWidget(self.view_metrics_btn)
+        action_layout.addWidget(self.view_metrics_btn)
 
-        action_buttons.addStretch()
-        detail_layout.addLayout(action_buttons)
+        self.delete_btn = QPushButton("Delete Record")
+        self.delete_btn.clicked.connect(self._delete_record)
+        self.delete_btn.setEnabled(False)
+        self.delete_btn.setStyleSheet("color: #d32f2f;")
+        action_layout.addWidget(self.delete_btn)
+
+        action_layout.addStretch()
+        detail_layout.addLayout(action_layout)
 
         layout.addLayout(detail_layout)
 
@@ -163,32 +193,7 @@ class TrainingHistoryWidget(QWidget):
         if active_job and job.job_id == active_job.job_id:
             effective_status = active_job.status.value
 
-        # Status
-        status_text = STATUS_LABELS.get(effective_status, effective_status.upper())
-        status_item = QTableWidgetItem(status_text)
-        color = STATUS_COLORS.get(effective_status, QColor(158, 158, 158))
-        status_item.setForeground(color)
-        status_item.setData(Qt.ItemDataRole.UserRole, job.job_id)
-        self.table.setItem(row, 0, status_item)
-
-        # Mode
-        mode_text = MODE_LABELS.get(job.mode, job.mode)
-        self.table.setItem(row, 1, QTableWidgetItem(mode_text))
-
-        # Name
-        self.table.setItem(row, 2, QTableWidgetItem(job.display_name or ""))
-
-        # Task / Script
-        task_text = ""
-        if job.command:
-            task_text = " ".join(str(c) for c in job.command)
-            if len(task_text) > 60:
-                task_text = task_text[:57] + "..."
-        elif job.metadata and isinstance(job.metadata, dict):
-            task_text = job.metadata.get("task", "") or job.metadata.get("model", "")
-        self.table.setItem(row, 3, QTableWidgetItem(task_text))
-
-        # Started At
+        # 0. Started
         started = job.started_at or job.created_at
         started_text = ""
         if started:
@@ -197,112 +202,258 @@ class TrainingHistoryWidget(QWidget):
                 started_text = dt.strftime("%Y-%m-%d %H:%M")
             except (ValueError, TypeError):
                 started_text = str(started)[:16]
-        self.table.setItem(row, 4, QTableWidgetItem(started_text))
+        started_item = QTableWidgetItem(started_text)
+        started_item.setData(Qt.ItemDataRole.UserRole, job.job_id)
+        self.table.setItem(row, 0, started_item)
 
-        # Duration
-        duration_text = ""
-        if job.duration_seconds is not None and job.duration_seconds > 0:
-            mins = int(job.duration_seconds // 60)
-            secs = int(job.duration_seconds % 60)
-            duration_text = f"{mins}m {secs}s"
-        self.table.setItem(row, 5, QTableWidgetItem(duration_text))
+        # 1. Task
+        task_text = job.task or (job.metadata.get("task", "") if isinstance(job.metadata, dict) else "") or ""
+        self.table.setItem(row, 1, QTableWidgetItem(task_text))
 
-        # Output directory
-        output_text = job.output_directory or ""
-        self.table.setItem(row, 6, QTableWidgetItem(output_text))
+        # 2. Model
+        model_text = job.model_name or job.model or (job.metadata.get("model", "") if isinstance(job.metadata, dict) else "")
+        if not model_text and job.command:
+            # Try to extract model from command
+            for part in job.command:
+                if part.endswith('.pt') or part.endswith('.yaml'):
+                    model_text = os.path.basename(part)
+                    break
+        self.table.setItem(row, 2, QTableWidgetItem(model_text or "—"))
+
+        # 3. Dataset
+        dataset_text = job.dataset_yaml or job.data or (job.metadata.get("data", "") if isinstance(job.metadata, dict) else "")
+        if dataset_text:
+            dataset_text = os.path.basename(dataset_text)
+        self.table.setItem(row, 3, QTableWidgetItem(dataset_text or "—"))
+
+        # 4. Status
+        status_text = STATUS_LABELS.get(effective_status, effective_status.upper())
+        status_item = QTableWidgetItem(status_text)
+        color = STATUS_COLORS.get(effective_status, QColor(158, 158, 158))
+        status_item.setForeground(color)
+        self.table.setItem(row, 4, status_item)
+
+        # 5. Epochs
+        epochs_text = "—"
+        completed = job.completed_epochs or job.final_epoch
+        requested = job.requested_epochs or job.total_epochs
+        if completed is not None:
+            if requested:
+                epochs_text = f"{completed} / {requested}"
+            else:
+                epochs_text = str(completed)
+        self.table.setItem(row, 5, QTableWidgetItem(epochs_text))
+
+        # 6. Best Metric
+        metric_text = "—"
+        if job.best_metric_name and job.best_metric_value is not None:
+            short_name = job.best_metric_name.replace("metrics/", "")
+            metric_text = f"{short_name} {job.best_metric_value:.3f}"
+        elif job.best_map50 is not None:
+            metric_text = f"mAP50 {job.best_map50:.3f}"
+        elif job.best_map50_95 is not None:
+            metric_text = f"mAP50-95 {job.best_map50_95:.3f}"
+        self.table.setItem(row, 6, QTableWidgetItem(metric_text))
+
+        # 7. Duration
+        duration_text = format_duration(job.duration_seconds)
+        self.table.setItem(row, 7, QTableWidgetItem(duration_text))
+
+    # ── Selection & Detail ───────────────────────────────────────
 
     def _on_selection_changed(self):
         selected = self.table.selectedItems()
         if not selected:
-            self.detail_text.clear()
-            self.open_dir_btn.setEnabled(False)
-            self.view_metrics_btn.setEnabled(False)
+            self._clear_detail()
             return
 
         row = selected[0].row()
         job_id = self.table.item(row, 0).data(Qt.ItemDataRole.UserRole)
         job = self.history_store.get_job(job_id)
         if job is None:
-            self.detail_text.clear()
-            self.open_dir_btn.setEnabled(False)
-            self.view_metrics_btn.setEnabled(False)
+            self._clear_detail()
             return
 
-        # Build detail text
-        lines = []
-        lines.append(f"Job ID: {job.job_id}")
-        lines.append(f"Status: {STATUS_LABELS.get(job.status, job.status.upper())}")
-        lines.append(f"Mode: {MODE_LABELS.get(job.mode, job.mode)}")
-        lines.append(f"Name: {job.display_name or 'N/A'}")
-        lines.append(f"Framework: {job.framework or 'N/A'}")
+        self._show_detail(job)
 
+    def _clear_detail(self):
+        self.detail_text.clear()
+        for btn in [self.open_dir_btn, self.open_log_btn, self.open_csv_btn,
+                     self.open_best_pt_btn, self.view_metrics_btn, self.delete_btn]:
+            btn.setEnabled(False)
+
+    def _show_detail(self, job):
+        lines = []
+        status_label = STATUS_LABELS.get(job.status, job.status.upper())
+        lines.append(f"Status: {status_label}")
+
+        # Start / Finish
         if job.started_at:
             lines.append(f"Started: {job.started_at[:19]}")
         if job.ended_at:
-            lines.append(f"Ended: {job.ended_at[:19]}")
-        if job.duration_seconds is not None and job.duration_seconds > 0:
-            mins = int(job.duration_seconds // 60)
-            secs = int(job.duration_seconds % 60)
-            lines.append(f"Duration: {mins}m {secs}s")
+            lines.append(f"Finished: {job.ended_at[:19]}")
+        duration = format_duration(job.duration_seconds)
+        if duration:
+            lines.append(f"Duration: {duration}")
 
-        lines.append(f"Output: {job.output_directory or 'N/A'}")
+        task = job.task or "—"
+        lines.append(f"Task: {task}")
+        model = job.model_name or job.model or "—"
+        lines.append(f"Model: {model}")
+        dataset = job.dataset_yaml or job.data or "—"
+        lines.append(f"Dataset: {os.path.basename(dataset) if dataset else '—'}")
+
+        # Epochs
+        completed = job.completed_epochs or job.final_epoch
+        requested = job.requested_epochs or job.total_epochs
+        if completed is not None:
+            if requested:
+                lines.append(f"Epochs: {completed} / {requested}")
+            else:
+                lines.append(f"Epochs: {completed}")
+        else:
+            lines.append("Epochs: —")
+
+        # Best metric
+        if job.best_metric_name and job.best_metric_value is not None:
+            lines.append(f"Best: {job.best_metric_name} = {job.best_metric_value:.4f}")
+        elif job.best_map50 is not None:
+            lines.append(f"Best: mAP50 = {job.best_map50:.4f}")
+        else:
+            lines.append("Best: —")
+
+        # Paths
+        out = job.output_directory or job.project_path or "—"
+        lines.append(f"Project: {out}")
+        lines.append(f"best.pt: {job.best_weights_path or 'Not available'}")
+        lines.append(f"last.pt: {job.last_weights_path or 'Not available'}")
+        lines.append(f"results.csv: {job.results_csv_path or 'Not available'}")
 
         if job.error_message:
             lines.append(f"Error: {job.error_message}")
 
         self.detail_text.setPlainText("\n".join(lines))
-        self.open_dir_btn.setEnabled(bool(job.output_directory))
-        self.view_metrics_btn.setEnabled(bool(job.output_directory))
 
-    def _open_output_directory(self):
+        # Enable/disable buttons
+        has_output = bool(job.output_directory) and os.path.isdir(job.output_directory or "")
+        self.open_dir_btn.setEnabled(has_output)
+        self.open_log_btn.setEnabled(has_output)
+
+        has_csv = bool(job.results_csv_path) and os.path.isfile(job.results_csv_path or "")
+        self.open_csv_btn.setEnabled(has_csv)
+
+        has_best_pt = bool(job.best_weights_path) and os.path.isfile(job.best_weights_path or "")
+        self.open_best_pt_btn.setEnabled(has_best_pt)
+
+        self.view_metrics_btn.setEnabled(has_output or has_csv)
+        self.delete_btn.setEnabled(True)
+
+    # ── Actions ──────────────────────────────────────────────────
+
+    def _selected_job(self):
+        """Get currently selected job record."""
         selected = self.table.selectedItems()
         if not selected:
-            return
+            return None
         row = selected[0].row()
         job_id = self.table.item(row, 0).data(Qt.ItemDataRole.UserRole)
-        job = self.history_store.get_job(job_id)
-        if job is None or not job.output_directory:
-            QMessageBox.information(self, "Info", "No output directory recorded for this job.")
-            return
+        return self.history_store.get_job(job_id)
 
-        path = job.output_directory
-        if not os.path.exists(path):
-            QMessageBox.warning(
-                self, "Directory Not Found",
-                f"The output directory no longer exists:\n{path}"
-            )
+    def _open_path(self, path, not_found_msg="Path not available."):
+        """Safely open a file or directory in the system file manager."""
+        if not path:
+            QMessageBox.information(self, "Info", not_found_msg)
             return
-
-        # Open in system file manager
-        if sys.platform == "win32":
-            os.startfile(path)
-        elif sys.platform == "darwin":
-            subprocess.run(["open", path])
+        if os.path.isfile(path):
+            # Open containing folder and select file
+            if sys.platform == "win32":
+                subprocess.run(["explorer", "/select,", os.path.abspath(path)])
+            elif sys.platform == "darwin":
+                subprocess.run(["open", "-R", path])
+            else:
+                subprocess.run(["xdg-open", os.path.dirname(path)])
+        elif os.path.isdir(path):
+            if sys.platform == "win32":
+                os.startfile(path)
+            elif sys.platform == "darwin":
+                subprocess.run(["open", path])
+            else:
+                subprocess.run(["xdg-open", path])
         else:
-            subprocess.run(["xdg-open", path])
+            QMessageBox.warning(self, "Not Found", f"Path does not exist:\n{path}")
+
+    def _open_output_directory(self):
+        job = self._selected_job()
+        if job is None:
+            return
+        path = job.output_directory or job.project_path
+        if not path or not os.path.isdir(path or ""):
+            QMessageBox.information(self, "Info", "Output directory no longer exists.")
+            return
+        self._open_path(path)
+
+    def _open_log(self):
+        job = self._selected_job()
+        if job is None:
+            return
+        out_dir = job.output_directory
+        if not out_dir or not os.path.isdir(out_dir):
+            QMessageBox.information(self, "Info", "Output directory not available.")
+            return
+        # Try to find a log file
+        log_candidates = [
+            os.path.join(out_dir, "train.log"),
+            os.path.join(out_dir, "log.txt"),
+            os.path.join(out_dir, "events.out.tfevents."),
+        ]
+        for candidate in log_candidates:
+            if os.path.isfile(candidate):
+                self._open_path(candidate)
+                return
+        # Fall back to opening the output dir
+        QMessageBox.information(
+            self, "No Log Found",
+            "No log file found in the output directory.\nOpening the output folder instead."
+        )
+        self._open_path(out_dir)
+
+    def _open_results_csv(self):
+        job = self._selected_job()
+        if job is None:
+            return
+        path = job.results_csv_path
+        if not path or not os.path.isfile(path or ""):
+            QMessageBox.information(self, "Info", "results.csv not available for this job.")
+            return
+        self._open_path(path)
+
+    def _open_best_pt_folder(self):
+        job = self._selected_job()
+        if job is None:
+            return
+        path = job.best_weights_path
+        if not path or not os.path.isfile(path or ""):
+            QMessageBox.information(self, "Info", "best.pt not available for this job.")
+            return
+        self._open_path(path)
 
     def _view_metrics(self):
         """Open a metrics dashboard dialog for the selected historical job."""
-        from PyQt6.QtWidgets import QDialog
-
-        selected = self.table.selectedItems()
-        if not selected:
+        job = self._selected_job()
+        if job is None:
             return
-        row = selected[0].row()
-        job_id = self.table.item(row, 0).data(Qt.ItemDataRole.UserRole)
-        job = self.history_store.get_job(job_id)
-        if job is None or not job.output_directory:
+        path = job.output_directory or job.project_path
+        if not path or not os.path.isdir(path or ""):
             QMessageBox.information(self, "Info", "No metrics data available for this job.")
             return
 
-        path = job.output_directory
-        results_csv = os.path.join(path, "results.csv")
+        results_csv = job.results_csv_path or os.path.join(path, "results.csv")
         metrics_jsonl = os.path.join(path, "metrics.jsonl")
         if not os.path.isfile(results_csv) and not os.path.isfile(metrics_jsonl):
             QMessageBox.information(
                 self, "No Metrics Data",
                 "This job's output directory does not contain metrics data.\n\n"
-                f"Expected: {results_csv} or {metrics_jsonl}"
+                f"Expected: {results_csv}"
             )
             return
 
@@ -324,6 +475,28 @@ class TrainingHistoryWidget(QWidget):
         layout.addLayout(btn_layout)
 
         dialog.exec()
-
-        # Cleanup
         dashboard.cleanup()
+
+    def _delete_record(self):
+        """Delete the selected history record (database only, not training files)."""
+        job = self._selected_job()
+        if job is None:
+            return
+
+        reply = QMessageBox.question(
+            self, "Delete Record",
+            f"Delete history record for '{job.display_name or job.job_id}'?\n\n"
+            "This only removes the database record, not the training files.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            self.history_store.delete_job(job.job_id)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to delete record: {e}")
+            return
+
+        self.refresh()
