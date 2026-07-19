@@ -72,6 +72,19 @@ from anylabeling.services.training_center.models import TrainingJob, TrainingMod
 from anylabeling.services.training_center.adapters.ultralytics_adapter import UltralyticsAdapter
 from anylabeling.services.training_center.event_protocol import TrainingEventType
 
+def _get_combo_training_value(combo):
+    """Extract training_value string from a QComboBox item.
+
+    Handles both DeviceInfo objects (new) and bare strings (legacy).
+    Returns the training_value string suitable for config dicts.
+    """
+    data = combo.currentData()
+    if data is None:
+        return "auto"
+    if hasattr(data, 'training_value'):
+        return data.training_value
+    return str(data)
+
 
 class _TrainingPrepWorker(QObject):
     """Background worker for dataset creation + training args preparation.
@@ -2396,10 +2409,12 @@ print(json.dumps(result, ensure_ascii=False))
                     elif key == "device":
                         from anylabeling.services.training_center.device_service import migrate_legacy_device
                         migrated = migrate_legacy_device(str(value))
-                        # Find matching item by userData
+                        # Find matching item by training_value (works for both string and DeviceInfo)
                         idx = -1
                         for i in range(self.config_widgets[key].count()):
-                            if self.config_widgets[key].itemData(i) == migrated:
+                            item = self.config_widgets[key].itemData(i)
+                            training_val = item.training_value if hasattr(item, 'training_value') else str(item)
+                            if training_val == migrated:
                                 idx = i
                                 break
                         if idx >= 0:
@@ -2482,7 +2497,7 @@ print(json.dumps(result, ensure_ascii=False))
                 "model": (get_widget_value("model") or "").strip('"'),
                 "data": (get_widget_value("data") or "").strip('"'),
                 "device": (
-                    self.config_widgets["device"].currentData()
+                    _get_combo_training_value(self.config_widgets["device"])
                     if "device" in self.config_widgets
                     and hasattr(self.config_widgets["device"], "currentData")
                     else get_widget_value("device") or "auto"
@@ -3437,7 +3452,6 @@ print(json.dumps(result, ensure_ascii=False))
         project = config["basic"].get("project", "")
         name = config["basic"].get("name", "")
         output_dir = os.path.join(project, name) if project and name else project
-        device = str(config["basic"].get("device", "auto"))
 
         # Resolve runtime info from the device combo (single source of truth)
         dev_info = self._get_selected_training_device()
@@ -3458,7 +3472,7 @@ print(json.dumps(result, ensure_ascii=False))
             epochs=config["train"].get("epochs", 100),
             batch=config["train"].get("batch", 16),
             imgsz=config["train"].get("imgsz", 640),
-            device=device,
+            device=requested_device,
             output_dir=output_dir,
             job_name=name,
             runtime_id=runtime_id,
