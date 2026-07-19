@@ -1540,10 +1540,21 @@ class GuidedTrainingWidget(QWidget):
             if section in config:
                 for key, value in config[section].items():
                     if key == "dataset_ratio":
+                        # Legacy migration: detect unreasonable ratios (< 0.5)
                         if 0 <= value <= 1:
+                            if value < 0.5:
+                                logger.warning(
+                                    f"Migrated legacy split setting ({value}) → train_ratio=0.8"
+                                )
+                                value = 0.8
                             self.config_widgets[key].setValue(int(value * 100))
                             self.dataset_ratio_label.setText(str(value))
                         else:
+                            if value < 50:
+                                logger.warning(
+                                    f"Migrated legacy split setting ({value}) → train_ratio=80"
+                                )
+                                value = 80
                             self.config_widgets[key].setValue(int(value))
                             self.dataset_ratio_label.setText(
                                 str(value / 100.0)
@@ -2468,7 +2479,7 @@ class GuidedTrainingWidget(QWidget):
 
     # ── Dataset cache constants ──────────────────────────────────────
     _MANIFEST_VERSION = 2
-    _CONVERTER_VERSION = 3  # bumped: fix train/val split ratio (round + class coverage)
+    _CONVERTER_VERSION = 4  # bumped: fix train_ratio passthrough + source_dir
     _SPLIT_SEED = 42
 
     def _prepare_dataset(self) -> bool:
@@ -2620,7 +2631,7 @@ class GuidedTrainingWidget(QWidget):
                         if (data.get("manifest_version") == self._MANIFEST_VERSION
                                 and data.get("converter_version") == self._CONVERTER_VERSION
                                 and data.get("fingerprint") == fingerprint
-                                and abs(data.get("split_ratio", 0.8) - ratio) < 0.001
+                                and abs(data.get("train_ratio", data.get("split_ratio", 0.8)) - ratio) < 0.001
                                 and data.get("task_type") == (self.selected_task_type or "detect").lower()):
                             return data
                     except Exception:
@@ -2663,10 +2674,10 @@ class GuidedTrainingWidget(QWidget):
             "yaml_path": yaml_path,
             "source_fingerprint": fingerprint,
             "fingerprint": fingerprint,
-            "split_ratio": ratio,
+            "train_ratio": ratio,
             "split_seed": self._SPLIT_SEED,
             "task_type": (self.selected_task_type or "detect").lower(),
-            "source_dir": str(self.output_dir) if self.output_dir else "",
+            "source_dir": str(self.output_dir) if self.output_dir else os.path.dirname(self.image_list[0]) if self.image_list else "",
             "classes": labels,
             "class_to_id": class_to_id,
             "valid_images": valid_count,
@@ -2803,19 +2814,25 @@ class GuidedTrainingWidget(QWidget):
             )
             return False
 
-        # 10. Train/val split hard check
-        ratio = manifest.get("split_ratio", 0.8)
+        # 10. Train/val split hard check (strict: exact match)
+        ratio = manifest.get("train_ratio", manifest.get("split_ratio", 0.8))
+        expected_train = round(expected_valid * ratio)
+        expected_val = expected_valid - expected_train
+        if actual_train != expected_train:
+            self.append_training_log(
+                f"ERROR: train count ({actual_train}) != expected ({expected_train}) "
+                f"for train_ratio={ratio}, valid={expected_valid}"
+            )
+            return False
+        if actual_val != expected_val:
+            self.append_training_log(
+                f"ERROR: val count ({actual_val}) != expected ({expected_val})"
+            )
+            return False
+        # Also enforce train > val when ratio > 0.5
         if ratio > 0.5 and actual_train <= actual_val:
             self.append_training_log(
                 f"ERROR: train_ratio={ratio} but train ({actual_train}) <= val ({actual_val})"
-            )
-            return False
-
-        # 11. Target count check
-        target_train = round(expected_valid * ratio)
-        if abs(actual_train - target_train) > max(1, expected_valid * 0.1):
-            self.append_training_log(
-                f"ERROR: train count ({actual_train}) deviates too far from target ({target_train})"
             )
             return False
 

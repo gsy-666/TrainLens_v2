@@ -336,7 +336,7 @@ class TestValidatePreparedOutput:
         # Write manifest
         mf_path = os.path.join(ds_dir, "dataset_manifest.json")
         manifest = {"classes": ["shoes", "bag"], "valid_images": 2,
-                     "split_ratio": 0.5, "train_count": 1, "val_count": 1}
+                     "train_ratio": 0.5, "train_count": 1, "val_count": 1}
         with open(mf_path, "w") as f:
             json.dump(manifest, f)
         # Need label files with valid IDs to pass check #8
@@ -545,7 +545,7 @@ class TestPreflightClassMetadata:
         mf_path = os.path.join(prepared_dir, "dataset_manifest.json")
         manifest = {"classes": ["shoes", "bag"], "valid_images": 2,
                      "class_to_id": {"shoes": 0, "bag": 1},
-                     "split_ratio": 0.5, "train_count": 1, "val_count": 1}
+                     "train_ratio": 0.5, "train_count": 1, "val_count": 1}
         with open(mf_path, "w") as f:
             json.dump(manifest, f)
         # Write label files with valid IDs
@@ -568,7 +568,7 @@ class TestSplitRatio:
             "valid_images": valid,
             "train_count": train,
             "val_count": val,
-            "split_ratio": ratio,
+            "train_ratio": ratio,
             "class_to_id": {"a": 0, "b": 1},
         }
 
@@ -631,10 +631,10 @@ class TestSplitRatio:
         # The on-disk manifest already has train_count=21, val_count=5 from _make_dataset_dirs
 
     def test_converter_version_bumped(self, qapp):
-        """_CONVERTER_VERSION must be 3 (bumped from 2)."""
+        """_CONVERTER_VERSION must be 4 (bumped from 3 for train_ratio fix)."""
         w = _make_widget()
-        assert w._CONVERTER_VERSION == 3, (
-            f"Expected _CONVERTER_VERSION=3 to invalidate old caches, got {w._CONVERTER_VERSION}"
+        assert w._CONVERTER_VERSION == 4, (
+            f"Expected _CONVERTER_VERSION=4 to invalidate old caches, got {w._CONVERTER_VERSION}"
         )
 
     def test_split_fixed_seed_reproducible(self, qapp, tmp_path):
@@ -646,3 +646,99 @@ class TestSplitRatio:
         # Not 7/19
         assert round(26 * 0.8) != 7
 
+
+# ── Test 31-36: Config chain + legacy migration ──────────────────────
+
+class TestConfigChain:
+    """Verify train_ratio flows correctly through the entire config chain."""
+
+    def _make_full_widget(self):
+        """Create widget with all config widgets needed for get_current_config."""
+        w = _make_widget(image_list=[], task_type="Detect")
+        from anylabeling.views.training.widgets.ultralytics_widgets.custom_widgets import (
+            CustomLineEdit, CustomSlider, CustomComboBox,
+        )
+        from PyQt6.QtWidgets import QLabel
+        w.config_widgets = {
+            "data": CustomLineEdit(),
+            "project": CustomLineEdit(),
+            "name": CustomLineEdit(),
+            "model": CustomLineEdit(),
+            "device": CustomComboBox(),
+            "epochs": CustomLineEdit(),
+            "batch": CustomLineEdit(),
+            "imgsz": CustomLineEdit(),
+            "dataset_ratio": CustomSlider(),
+        }
+        w.config_widgets["data"].setText("/tmp/data.yaml")
+        w.config_widgets["project"].setText("/tmp/proj")
+        w.config_widgets["name"].setText("exp")
+        w.config_widgets["model"].setText("/tmp/model.pt")
+        w.config_widgets["device"].addItems(["cpu", "cuda"])
+        w.config_widgets["device"].setCurrentText("cpu")
+        w.config_widgets["epochs"].setText("100")
+        w.config_widgets["batch"].setText("16")
+        w.config_widgets["imgsz"].setText("640")
+        # Default slider value: 80 → 0.8
+        w.config_widgets["dataset_ratio"].setRange(5, 95)
+        w.config_widgets["dataset_ratio"].setValue(80)
+        # dataset_ratio_label needed for legacy migration
+        w.dataset_ratio_label = QLabel("0.8")
+        return w
+
+    def test_default_slider_gives_08(self, qapp):
+        """Default slider value 80 → get_current_config returns 0.8."""
+        w = self._make_full_widget()
+        config = w.get_current_config()
+        assert config["basic"]["dataset_ratio"] == 0.8, (
+            f"Expected 0.8, got {config['basic']['dataset_ratio']}"
+        )
+
+    def test_get_current_config_returns_train_ratio(self, qapp):
+        """When slider is 80%, get_current_config returns 0.8 train ratio."""
+        w = self._make_full_widget()
+        config = w.get_current_config()
+        ratio = config["basic"]["dataset_ratio"]
+        assert ratio == 0.8
+        # For 26 valid images, round(26 * 0.8) = 21
+        assert round(26 * ratio) == 21
+
+    def test_legacy_028_config_migrated_to_08(self, qapp):
+        """Legacy 0.28 value in saved config is migrated to 0.8 on load."""
+        w = self._make_full_widget()
+        # Simulate loading a legacy config with dataset_ratio=0.28
+        w.load_config_to_ui({"basic": {"dataset_ratio": 0.28}})
+        config = w.get_current_config()
+        assert config["basic"]["dataset_ratio"] == 0.8, (
+            f"Legacy 0.28 should be migrated to 0.8, got {config['basic']['dataset_ratio']}"
+        )
+
+    def test_legacy_28_pct_config_migrated_to_80(self, qapp):
+        """Legacy integer 28 (percentage) is migrated to 80 on load."""
+        w = self._make_full_widget()
+        w.load_config_to_ui({"basic": {"dataset_ratio": 28}})
+        config = w.get_current_config()
+        assert config["basic"]["dataset_ratio"] == 0.8, (
+            f"Legacy 28 should be migrated to 0.8, got {config['basic']['dataset_ratio']}"
+        )
+
+    def test_ratio_changes_fingerprint(self, qapp):
+        """Changing the ratio changes the dataset fingerprint."""
+        w = self._make_full_widget()
+        w.image_list = ["/a/img1.jpg"]
+        w.output_dir = "/tmp"
+        w.selected_task_type = "Detect"
+        fp1 = w._compute_source_fingerprint()
+        # Change slider value
+        w.config_widgets["dataset_ratio"].setValue(70)
+        fp2 = w._compute_source_fingerprint()
+        assert fp1 != fp2, "Fingerprint should change when ratio changes"
+
+    def test_epochs_change_does_not_affect_ratio(self, qapp):
+        """Changing epochs does not affect dataset_ratio."""
+        w = self._make_full_widget()
+        config1 = w.get_current_config()
+        w.config_widgets["epochs"].setText("200")
+        config2 = w.get_current_config()
+        assert config1["basic"]["dataset_ratio"] == config2["basic"]["dataset_ratio"]
+        assert config2["train"]["epochs"] == "200"
