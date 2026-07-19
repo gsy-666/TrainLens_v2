@@ -22,6 +22,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from .routers import (  # noqa: E402
+    dataset,
     export,
     files,
     fs,
@@ -60,6 +61,7 @@ app.include_router(upload.router, prefix="/api", tags=["upload"])
 app.include_router(video.router, prefix="/api", tags=["video"])
 app.include_router(training.router, prefix="/api", tags=["training"])
 app.include_router(monitor.router, prefix="/api", tags=["monitor"])
+app.include_router(dataset.router, prefix="/api", tags=["dataset"])
 
 
 @app.get("/api/health")

@@ -7,7 +7,9 @@ import {
   InputNumber,
   List,
   message,
+  Modal,
   Select,
+  Slider,
   Space,
   Table,
   Tag,
@@ -50,6 +52,10 @@ export default function TrainingCenter({ onBack }: Props) {
   const [patience, setPatience] = useState<number | null>(null);
   const [lr0, setLr0] = useState<number | null>(null);
   const [browse, setBrowse] = useState<"data" | "project" | null>(null);
+  const [prepOpen, setPrepOpen] = useState(false);
+  const [prepTask, setPrepTask] = useState("Detect");
+  const [prepRatio, setPrepRatio] = useState(0.9);
+  const [preparing, setPreparing] = useState(false);
 
   // runtime
   const [issues, setIssues] = useState<api.PreflightIssue[] | null>(null);
@@ -183,6 +189,29 @@ export default function TrainingCenter({ onBack }: Props) {
     message.info("已请求停止");
   }, []);
 
+  const onPrepareDataset = useCallback(async () => {
+    setPreparing(true);
+    try {
+      const r = await api.prepareDataset({
+        task_type: prepTask,
+        dataset_ratio: prepRatio,
+      });
+      setData(r.data_yaml);
+      setPrepOpen(false);
+      const trainMatch = r.info.match(/Train images: (\d+)/);
+      const valMatch = r.info.match(/Val images: (\d+)/);
+      message.success(
+        `训练集已生成：train ${trainMatch?.[1] ?? "?"} 张 / val ${valMatch?.[1] ?? "?"} 张，已填入 YAML 路径`,
+        5
+      );
+    } catch (e) {
+      const err = e as { response?: { data?: { detail?: string } }; message: string };
+      message.error(`生成失败: ${err.response?.data?.detail ?? err.message}`);
+    } finally {
+      setPreparing(false);
+    }
+  }, [prepTask, prepRatio]);
+
   const metricGroups = [
     { key: "loss", title: "Loss" },
     { key: "quality", title: "Quality (mAP / P / R)" },
@@ -242,6 +271,15 @@ export default function TrainingCenter({ onBack }: Props) {
                   <Input value={data} onChange={(e) => setData(e.target.value)} disabled={running} placeholder="data.yaml 路径" />
                   <Button icon={<FolderOpenOutlined />} onClick={() => setBrowse("data")} disabled={running} />
                 </Space.Compact>
+                <Button
+                  type="link"
+                  size="small"
+                  style={{ padding: 0, marginTop: 4 }}
+                  onClick={() => setPrepOpen(true)}
+                  disabled={running}
+                >
+                  从当前标注数据集一键生成
+                </Button>
               </div>
               <div>
                 <div style={{ marginBottom: 4 }}>输出目录</div>
@@ -436,6 +474,48 @@ export default function TrainingCenter({ onBack }: Props) {
           setBrowse(null);
         }}
       />
+
+      <Modal
+        open={prepOpen}
+        title="从当前标注数据集生成训练集"
+        okText="生成"
+        cancelText="取消"
+        confirmLoading={preparing}
+        onCancel={() => setPrepOpen(false)}
+        onOk={onPrepareDataset}
+        width={420}
+      >
+        <div style={{ display: "flex", flexDirection: "column", gap: 14, marginTop: 8 }}>
+          <div style={{ fontSize: 13, color: "#71717a" }}>
+            将标注页当前打开的目录（Labelme JSON）转换为 YOLO 训练结构：
+            自动提取类别、分层抽样划分 train/val、生成 data.yaml。
+          </div>
+          <div>
+            <div style={{ marginBottom: 4 }}>任务类型</div>
+            <Select
+              style={{ width: "100%" }}
+              value={prepTask}
+              onChange={setPrepTask}
+              options={["Detect", "OBB", "Segment", "Pose", "Classify"].map((t) => ({
+                value: t,
+                label: t,
+              }))}
+            />
+          </div>
+          <div>
+            <div style={{ marginBottom: 4 }}>
+              训练集比例：{(prepRatio * 100).toFixed(0)}%
+            </div>
+            <Slider
+              min={0.5}
+              max={0.95}
+              step={0.05}
+              value={prepRatio}
+              onChange={setPrepRatio}
+            />
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }
