@@ -259,6 +259,12 @@ def build_training_worker_env():
 
 
 def build_training_worker_command(payload_path: str, python_executable: str = None):
+    """Build the command to launch the training worker subprocess.
+
+    When python_executable differs from sys.executable (external runtime),
+    uses the standalone training_worker.py script that has zero Qt dependencies.
+    Otherwise falls back to the legacy -m anylabeling.app entry point.
+    """
     python_exe = python_executable or sys.executable
 
     _log = logging.getLogger(__name__ + ".build_training_worker_command")
@@ -266,6 +272,12 @@ def build_training_worker_command(payload_path: str, python_executable: str = No
         "build_training_worker_command: python_executable=%s (provided=%s sys=%s)",
         python_exe, python_executable, sys.executable,
     )
+
+    # Use standalone worker for external runtimes (no Qt dependency)
+    if python_executable and os.path.normpath(python_executable) != os.path.normpath(sys.executable):
+        worker_script = os.path.join(os.path.dirname(__file__), "training_worker.py")
+        _log.info("Using standalone worker script: %s", worker_script)
+        return [python_exe, worker_script, "--payload", payload_path]
 
     command = [python_exe]
     if getattr(sys, "frozen", False):
