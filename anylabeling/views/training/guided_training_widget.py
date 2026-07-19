@@ -1102,6 +1102,136 @@ class GuidedTrainingWidget(QWidget):
         self.device_checkboxes.setVisible(False)
         self._update_gpu_info_label()
 
+    # ── GPU Environment Status Card ──────────────────────────────────
+
+    def _update_gpu_env_card(self):
+        """Update the GPU environment status card based on current diagnosis."""
+        if not hasattr(self, 'gpu_env_card'):
+            return
+        from anylabeling.services.training_center.device_service import (
+            diagnose_environment, EnvironmentState,
+        )
+        diag = diagnose_environment()
+
+        if diag.state == EnvironmentState.GPU_READY:
+            self.gpu_env_status_label.setText(
+                f"✓ {diag.gpu_name}\nPyTorch {diag.torch_version} · CUDA {diag.torch_cuda_version}"
+            )
+            self.gpu_env_status_label.setStyleSheet("color: green; font-size: 11px;")
+            self.enable_gpu_btn.setVisible(False)
+            self.continue_cpu_btn.setVisible(False)
+        elif diag.state == EnvironmentState.GPU_PRESENT_CPU_TORCH:
+            self.gpu_env_status_label.setText(
+                f"Detected: {diag.gpu_name}\n"
+                f"Current PyTorch: {diag.torch_version} (CPU-only)\n"
+                "GPU training is not enabled."
+            )
+            self.gpu_env_status_label.setStyleSheet("color: #e67e22; font-size: 11px;")
+            self.enable_gpu_btn.setVisible(True)
+            self.continue_cpu_btn.setVisible(True)
+        elif diag.state == EnvironmentState.NO_NVIDIA_GPU:
+            self.gpu_env_status_label.setText("No NVIDIA GPU detected.")
+            self.gpu_env_status_label.setStyleSheet("color: gray; font-size: 11px;")
+            self.enable_gpu_btn.setVisible(False)
+            self.continue_cpu_btn.setVisible(False)
+        else:
+            self.gpu_env_status_label.setText(diag.diagnostic_message or "GPU status unknown.")
+            self.gpu_env_status_label.setStyleSheet("color: #e67e22; font-size: 11px;")
+            self.enable_gpu_btn.setVisible(False)
+            self.continue_cpu_btn.setVisible(False)
+
+    def _on_enable_gpu_clicked(self):
+        """Show GPU install confirmation, then start background installation."""
+        from anylabeling.services.training_center.device_service import diagnose_environment
+        from anylabeling.services.training_center.runtime_installer import NVIDIA_RUNTIME_DIR
+        diag = diagnose_environment()
+
+        msg = (
+            f"Install GPU Training Runtime\n\n"
+            f"GPU: {diag.gpu_name}\n"
+            f"Current PyTorch: {diag.torch_version} (CPU-only)\n\n"
+            f"Will install CUDA-enabled PyTorch into:\n{NVIDIA_RUNTIME_DIR}\n\n"
+            f"Packages: torch, torchvision, torchaudio, ultralytics\n"
+            f"Source: PyPI (pypi.org)\n\n"
+            f"Estimated disk: ~3-5 GB. May take 5-15 min.\n\n"
+            f"Continue?"
+        )
+        reply = QMessageBox.question(
+            self, "Enable GPU Training", msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._start_gpu_install()
+
+    def _on_continue_cpu(self):
+        self.gpu_env_card.setVisible(False)
+        self.append_training_log("Continuing with CPU training.")
+
+    def _on_view_diagnostics(self):
+        from anylabeling.services.training_center.device_service import (
+            diagnose_environment,
+        )
+        diag = diagnose_environment()
+        msg = (
+            f"=== GPU Diagnostics ===\n\n"
+            f"State: {diag.state.value}\n"
+            f"GPU: {diag.gpu_name or 'N/A'}\nCount: {diag.gpu_count}\n"
+            f"Driver: {diag.driver_version or 'N/A'}\n"
+            f"Driver CUDA: {diag.driver_cuda_version or 'N/A'}\n"
+            f"PyTorch: {diag.torch_version or 'N/A'}\n"
+            f"Torch CUDA: {diag.torch_cuda_version or 'N/A'}\n"
+            f"CUDA available: {diag.cuda_available}\n\n"
+            f"Action: {diag.recommended_action}"
+        )
+        QMessageBox.information(self, "GPU Diagnostics", msg)
+
+    def _start_gpu_install(self):
+        from anylabeling.services.training_center.runtime_installer import (
+            RuntimeInstallerWorker, NVIDIA_RUNTIME_DIR,
+        )
+        self.enable_gpu_btn.setEnabled(False)
+        self.gpu_install_progress.setVisible(True)
+        self.gpu_install_progress.setText("Starting installation...")
+        self.gpu_install_progress.setStyleSheet("color: #2196F3; font-size: 11px;")
+        self.append_training_log("GPU runtime installation started...")
+
+        self._install_thread = QThread(self)
+        self._install_worker = RuntimeInstallerWorker(str(NVIDIA_RUNTIME_DIR))
+        self._install_worker.moveToThread(self._install_thread)
+
+        self._install_worker.progress_text.connect(self._on_install_progress)
+        self._install_worker.finished.connect(self._on_install_finished)
+        self._install_thread.started.connect(self._install_worker.run)
+        self._install_thread.finished.connect(self._install_thread.deleteLater)
+        self._install_thread.start()
+
+    def _on_install_progress(self, text: str):
+        self.gpu_install_progress.setText(text[:200])
+        self.append_training_log(f"[GPU Install] {text}")
+
+    def _on_install_finished(self, success: bool, message: str):
+        if success:
+            self.gpu_install_progress.setText(
+                "✓ GPU runtime installed!\nRestart TrainLens to use GPU training."
+            )
+            self.gpu_install_progress.setStyleSheet("color: green; font-size: 11px; font-weight: bold;")
+            QMessageBox.information(
+                self, "GPU Runtime Ready",
+                f"GPU runtime installed successfully!\n\nRestart TrainLens.\n\n{message}"
+            )
+        else:
+            self.gpu_install_progress.setText(f"✗ Failed.\n{message[:200]}")
+            self.gpu_install_progress.setStyleSheet("color: red; font-size: 11px;")
+            QMessageBox.warning(
+                self, "Installation Failed",
+                f"GPU runtime installation failed.\n\n{message}\n\nCPU training remains available."
+            )
+        self.enable_gpu_btn.setEnabled(True)
+        self._update_gpu_env_card()
+        self._populate_device_combo()
+
     def init_basic_settings(self, parent_layout):
         group = QGroupBox(self.tr("Basic Settings"))
         layout = QFormLayout(group)
@@ -1208,6 +1338,39 @@ class GuidedTrainingWidget(QWidget):
         dataset_layout.addWidget(self.config_widgets["dataset_ratio"])
         dataset_layout.addWidget(self.dataset_ratio_label)
         layout.addRow("Dataset Ratio:", dataset_layout)
+
+        # ── GPU Environment Status Card ──
+        self.gpu_env_card = QGroupBox("GPU Environment")
+        gpu_env_layout = QVBoxLayout(self.gpu_env_card)
+        self.gpu_env_status_label = QLabel()
+        self.gpu_env_status_label.setWordWrap(True)
+        gpu_env_layout.addWidget(self.gpu_env_status_label)
+
+        gpu_env_btns = QHBoxLayout()
+        self.enable_gpu_btn = QPushButton("Enable GPU Training")
+        self.enable_gpu_btn.clicked.connect(self._on_enable_gpu_clicked)
+        self.enable_gpu_btn.setVisible(False)
+        gpu_env_btns.addWidget(self.enable_gpu_btn)
+
+        self.continue_cpu_btn = QPushButton("Continue with CPU")
+        self.continue_cpu_btn.clicked.connect(self._on_continue_cpu)
+        self.continue_cpu_btn.setVisible(False)
+        gpu_env_btns.addWidget(self.continue_cpu_btn)
+
+        self.view_diag_btn = QPushButton("View Diagnostics")
+        self.view_diag_btn.clicked.connect(self._on_view_diagnostics)
+        gpu_env_btns.addWidget(self.view_diag_btn)
+
+        gpu_env_btns.addStretch()
+        gpu_env_layout.addLayout(gpu_env_btns)
+
+        self.gpu_install_progress = QLabel()
+        self.gpu_install_progress.setVisible(False)
+        self.gpu_install_progress.setWordWrap(True)
+        gpu_env_layout.addWidget(self.gpu_install_progress)
+
+        layout.addRow(self.gpu_env_card)
+        self._update_gpu_env_card()
 
         parent_layout.addWidget(group)
 

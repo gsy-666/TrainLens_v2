@@ -7,10 +7,152 @@ device abstraction for future remote training support.
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
+import sys
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Optional
 
 _logger = logging.getLogger(__name__)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Environment State
+# ═══════════════════════════════════════════════════════════════════
+
+class EnvironmentState(str, Enum):
+    """GPU training environment readiness."""
+    GPU_READY = "gpu_ready"
+    GPU_PRESENT_CPU_TORCH = "gpu_present_cpu_torch"
+    NO_NVIDIA_GPU = "no_nvidia_gpu"
+    DRIVER_UNAVAILABLE = "driver_unavailable"
+    CUDA_INIT_FAILED = "cuda_init_failed"
+    RUNTIME_NOT_INSTALLED = "runtime_not_installed"
+    INSTALLING = "installing"
+    INSTALL_FAILED = "install_failed"
+
+
+@dataclass
+class EnvironmentDiagnosis:
+    """Complete GPU environment assessment."""
+
+    state: EnvironmentState = EnvironmentState.RUNTIME_NOT_INSTALLED
+    gpu_name: str = ""
+    gpu_count: int = 0
+    driver_version: str = ""
+    driver_cuda_version: str = ""
+    torch_version: str = ""
+    torch_cuda_version: str = ""
+    cuda_available: bool = False
+    current_runtime: str = ""
+    recommended_action: str = ""
+    diagnostic_message: str = ""
+
+
+def diagnose_environment() -> EnvironmentDiagnosis:
+    """Perform full environment diagnosis.
+
+    Checks nvidia-smi, PyTorch build, and CUDA tensor test.
+    """
+    d = EnvironmentDiagnosis()
+
+    # ── Check nvidia-smi ──
+    d.gpu_name, d.gpu_count, d.driver_version, d.driver_cuda_version = (
+        _probe_nvidia_smi()
+    )
+
+    # ── Check PyTorch ──
+    try:
+        import torch
+        d.torch_version = torch.__version__
+        d.torch_cuda_version = getattr(torch.version, "cuda", None) or ""
+    except ImportError:
+        d.torch_version = "not installed"
+        d.state = EnvironmentState.RUNTIME_NOT_INSTALLED
+        if d.gpu_count > 0:
+            d.recommended_action = "Install PyTorch with CUDA support"
+            d.diagnostic_message = (
+                f"NVIDIA {d.gpu_name} detected but PyTorch is not installed."
+            )
+        return d
+
+    # ── Determine state ──
+    if d.gpu_count == 0:
+        d.state = EnvironmentState.NO_NVIDIA_GPU
+        d.recommended_action = "Use CPU training"
+        d.diagnostic_message = "No NVIDIA GPU detected. GPU training unavailable."
+    elif not d.torch_cuda_version:
+        d.state = EnvironmentState.GPU_PRESENT_CPU_TORCH
+        d.recommended_action = "Install CUDA-enabled PyTorch runtime"
+        d.diagnostic_message = (
+            f"NVIDIA {d.gpu_name} detected but current PyTorch is CPU-only."
+        )
+    elif torch.cuda.is_available():
+        try:
+            t = torch.zeros(1, device="cuda:0")
+            del t
+            torch.cuda.empty_cache()
+            d.cuda_available = True
+            d.state = EnvironmentState.GPU_READY
+            d.recommended_action = "GPU training ready"
+            d.diagnostic_message = (
+                f"NVIDIA {d.gpu_name} — PyTorch {d.torch_version} "
+                f"CUDA {d.torch_cuda_version} — GPU training available."
+            )
+        except Exception as e:
+            d.state = EnvironmentState.CUDA_INIT_FAILED
+            d.cuda_available = False
+            d.recommended_action = "Check CUDA installation"
+            d.diagnostic_message = f"CUDA initialization failed: {e}"
+    else:
+        d.state = EnvironmentState.DRIVER_UNAVAILABLE
+        d.recommended_action = "Install/update NVIDIA driver"
+        d.diagnostic_message = (
+            f"NVIDIA driver issue: CUDA reported as unavailable."
+        )
+
+    return d
+
+
+def _probe_nvidia_smi() -> tuple[str, int, str, str]:
+    """Query nvidia-smi for GPU info. Returns (name, count, driver_ver, cuda_ver)."""
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return ("", 0, "", "")
+        lines = [l.strip() for l in result.stdout.strip().split("\n") if l.strip()]
+        if not lines:
+            return ("", 0, "", "")
+        # First GPU
+        parts = [p.strip() for p in lines[0].split(",")]
+        name = parts[0] if len(parts) > 0 else ""
+        driver_ver = parts[1] if len(parts) > 1 else ""
+
+        # Driver's max supported CUDA version
+        try:
+            r2 = subprocess.run(
+                ["nvidia-smi"], capture_output=True, text=True, timeout=10,
+            )
+            import re
+            m = re.search(r"CUDA Version:\s*([\d.]+)", r2.stdout)
+            cuda_ver = m.group(1) if m else ""
+        except Exception:
+            cuda_ver = ""
+
+        return (name, len(lines), driver_ver, cuda_ver)
+    except FileNotFoundError:
+        return ("", 0, "", "")
+    except Exception:
+        return ("", 0, "", "")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Device Info (original)
+# ═══════════════════════════════════════════════════════════════════
 
 
 @dataclass
