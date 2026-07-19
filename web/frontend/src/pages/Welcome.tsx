@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { message, Modal } from "antd";
+import { useRef, useState } from "react";
+import { Modal } from "antd";
 import gsap from "gsap";
 import { useGSAP } from "@gsap/react";
 import {
@@ -37,24 +37,25 @@ export default function Welcome() {
   const scope = useRef<HTMLDivElement>(null);
   const serverUrl = getServerUrl();
 
-  // resume last session once on mount
-  const resumedRef = useRef(false);
-  useEffect(() => {
-    if (resumedRef.current) return;
-    resumedRef.current = true;
-    try {
-      const raw = localStorage.getItem("xaw_last_session");
-      if (!raw) return;
-      const s = JSON.parse(raw) as { type?: string; path?: string };
-      if (!s.path) return;
-      const hide = message.loading(`恢复上次会话：${s.path}`, 0);
-      const p = s.type === "video" ? openVideo(s.path) : openDir(s.path);
-      p.catch(() => undefined).finally(hide);
-    } catch {
-      /* no session to resume */
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // Auto-resume disabled — always show Welcome page on startup.
+  // To re-enable, uncomment the useEffect below.
+  // const resumedRef = useRef(false);
+  // useEffect(() => {
+  //   if (resumedRef.current) return;
+  //   resumedRef.current = true;
+  //   try {
+  //     const raw = localStorage.getItem("xaw_last_session");
+  //     if (!raw) return;
+  //     const s = JSON.parse(raw) as { type?: string; path?: string };
+  //     if (!s.path) return;
+  //     const hide = message.loading(`恢复上次会话：${s.path}`, 0);
+  //     const p = s.type === "video" ? openVideo(s.path) : openDir(s.path);
+  //     p.catch(() => undefined).finally(hide);
+  //   } catch {
+  //     /* no session to resume */
+  //   }
+  //   // eslint-disable-next-line react-hooks/exhaustive-deps
+  // }, []);
 
   useGSAP(
     () => {
