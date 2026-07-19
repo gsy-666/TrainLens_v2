@@ -1196,13 +1196,42 @@ class GuidedTrainingWidget(QWidget):
             QMessageBox.warning(self, "GPU Test Failed", msg)
 
     def _update_gpu_info_label(self):
-        """Update the GPU info label below the device selector."""
+        """Update the GPU info label below the device selector.
+
+        Checks both in-process torch and registered external runtimes
+        to provide accurate GPU availability information.
+        """
         if not hasattr(self, 'gpu_info_label'):
             return
         from anylabeling.services.training_center.device_service import get_device_diagnostics
+
+        # Check if external CUDA runtime is ready
+        has_external_runtime = False
+        try:
+            from anylabeling.services.training_center.environment_scanner import (
+                get_registered_envs,
+            )
+            for reg in get_registered_envs():
+                if str(reg.get("verification_status", "")).strip().lower() == "ready":
+                    has_external_runtime = True
+                    break
+        except Exception:
+            pass
+
         diag = get_device_diagnostics()
 
-        if diag["pytorch_cpu_only"]:
+        if has_external_runtime:
+            # External CUDA runtime is available — GPU training is ready
+            gpu_info = ", ".join(
+                f"{g['name']} · {g['total_memory_gb']:.1f} GB"
+                for g in diag.get("gpus", [])
+            ) if diag.get("gpus") else "GPU detected"
+            self.gpu_info_label.setText(
+                f"✓ GPU training ready (external runtime)"
+                + (f" — {gpu_info}" if gpu_info else "")
+            )
+            self.gpu_info_label.setStyleSheet("color: green; font-size: 11px;")
+        elif diag["pytorch_cpu_only"]:
             self.gpu_info_label.setText(
                 "⚠ Installed PyTorch is CPU-only. Install a CUDA-enabled PyTorch build for NVIDIA GPU training."
             )
