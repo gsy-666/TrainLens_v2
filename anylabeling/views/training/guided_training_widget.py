@@ -976,31 +976,131 @@ class GuidedTrainingWidget(QWidget):
             checkbox.setChecked(True)  # Default check all GPUs
             self._cuda_layout.addWidget(checkbox)
 
-    def on_device_changed(self, device_text):
-        if device_text == "cuda":
-            try:
-                import torch
+    def _populate_device_combo(self):
+        """Populate device QComboBox with Auto + CPU + detected GPUs.
 
-                if os.environ.get("CUDA_VISIBLE_DEVICES") == "-1":
-                    cuda_visible_devices_backup = os.environ.get(
-                        "CUDA_VISIBLE_DEVICES"
-                    )
-                    del os.environ["CUDA_VISIBLE_DEVICES"]
-                    torch.cuda.empty_cache()
-                    device_count = torch.cuda.device_count()
-                    if cuda_visible_devices_backup != "-1":
-                        os.environ["CUDA_VISIBLE_DEVICES"] = (
-                            cuda_visible_devices_backup
-                        )
-                else:
-                    device_count = torch.cuda.device_count()
+        Uses userData to store internal device values, separate from display text.
+        """
+        from anylabeling.services.training_center.device_service import detect_local_devices
+        combo = self.config_widgets["device"]
+        current_val = combo.currentData() or "auto"
 
-                self.setup_cuda_checkboxes(device_count)
-                self.device_checkboxes.setVisible(True)
-            except ImportError:
-                self.device_checkboxes.setVisible(False)
+        # Remember previous selection
+        combo.blockSignals(True)
+        combo.clear()
+
+        # Auto (always first)
+        combo.addItem("Auto", "auto")
+
+        # Detected GPUs
+        self._detected_gpus = []
+        try:
+            devices = detect_local_devices()
+            for d in devices:
+                if d.backend == "cuda" and d.available:
+                    self._detected_gpus.append(d)
+                    combo.addItem(d.display_name, d.training_value)
+                elif d.backend == "cpu" and d.available:
+                    combo.addItem("CPU", "cpu")
+        except Exception:
+            # Fallback: CPU only
+            combo.addItem("CPU", "cpu")
+
+        # Default to auto if no match
+        idx = combo.findData(current_val)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
         else:
-            self.device_checkboxes.setVisible(False)
+            combo.setCurrentIndex(0)  # Auto
+
+        combo.blockSignals(False)
+
+    def _on_refresh_devices(self):
+        """Re-scan GPUs and refresh the device combo."""
+        self._populate_device_combo()
+        self._update_gpu_info_label()
+        self._update_test_gpu_btn()
+        self.append_training_log("Devices refreshed.")
+
+    def _on_test_gpu(self):
+        """Run a quick CUDA tensor test in a background thread."""
+        from anylabeling.services.training_center.device_service import test_gpu_quick
+        combo = self.config_widgets["device"]
+        device_value = combo.currentData() or "auto"
+
+        self.test_gpu_btn.setEnabled(False)
+        self.test_gpu_btn.setText("Testing...")
+
+        result = test_gpu_quick(device_value)
+        self._show_gpu_test_result(result)
+
+        self.test_gpu_btn.setEnabled(True)
+        self.test_gpu_btn.setText("Test GPU")
+
+    def _show_gpu_test_result(self, result: dict):
+        """Display GPU test result in a message box."""
+        if result["status"] == "PASS":
+            msg = (
+                f"GPU Test PASSED ✓\n\n"
+                f"Device: {result['device_name']}\n"
+                f"Total VRAM: {result['total_memory_gb']:.1f} GB\n"
+                f"Free VRAM: {result['free_memory_gb']:.1f} GB\n"
+                f"CUDA: {result['cuda_version']}\n"
+                f"PyTorch: {result['torch_version']}\n"
+                f"Test time: {result['elapsed_ms']:.1f} ms"
+            )
+            QMessageBox.information(self, "GPU Test", msg)
+        else:
+            msg = (
+                f"GPU Test FAILED ✗\n\n"
+                f"Error: {result.get('error', 'Unknown')}\n\n"
+                f"PyTorch: {result['torch_version']}\n"
+                f"CUDA: {result['cuda_version'] or 'N/A'}"
+            )
+            QMessageBox.warning(self, "GPU Test Failed", msg)
+
+    def _update_gpu_info_label(self):
+        """Update the GPU info label below the device selector."""
+        if not hasattr(self, 'gpu_info_label'):
+            return
+        from anylabeling.services.training_center.device_service import get_device_diagnostics
+        diag = get_device_diagnostics()
+
+        if diag["pytorch_cpu_only"]:
+            self.gpu_info_label.setText(
+                "⚠ Installed PyTorch is CPU-only. Install a CUDA-enabled PyTorch build for NVIDIA GPU training."
+            )
+            self.gpu_info_label.setStyleSheet("color: #e67e22; font-size: 11px;")
+        elif not diag["cuda_available"]:
+            self.gpu_info_label.setText(
+                "⚠ CUDA GPU not available (check NVIDIA driver and CUDA toolkit)."
+            )
+            self.gpu_info_label.setStyleSheet("color: #e67e22; font-size: 11px;")
+        elif diag["gpu_count"] > 0:
+            parts = []
+            for g in diag["gpus"]:
+                parts.append(f"{g['name']} · {g['total_memory_gb']:.1f} GB")
+            self.gpu_info_label.setText("✓ " + " | ".join(parts))
+            self.gpu_info_label.setStyleSheet("color: green; font-size: 11px;")
+        else:
+            self.gpu_info_label.setText("")
+        self.gpu_info_label.setVisible(bool(self.gpu_info_label.text()))
+
+    def _update_test_gpu_btn(self):
+        """Enable/disable Test GPU button based on CUDA availability."""
+        if not hasattr(self, 'test_gpu_btn'):
+            return
+        from anylabeling.services.training_center.device_service import get_device_diagnostics
+        diag = get_device_diagnostics()
+        has_gpu = diag["cuda_available"] and diag["gpu_count"] > 0
+        self.test_gpu_btn.setEnabled(has_gpu)
+        if not has_gpu and not diag["pytorch_cpu_only"]:
+            self.test_gpu_btn.setEnabled(True)  # Still allow testing to get error details
+
+    def on_device_changed(self, device_text):
+        """Handle device selection change."""
+        self.device_checkboxes.setVisible(False)
+        self._update_gpu_info_label()
 
     def init_basic_settings(self, parent_layout):
         group = QGroupBox(self.tr("Basic Settings"))
@@ -1062,18 +1162,38 @@ class GuidedTrainingWidget(QWidget):
         self.config_widgets["pose_config"].setVisible(False)
         pose_config_browse_btn.setVisible(False)
 
+        # ── Device (Auto / CPU / GPU detection) ──
         device_layout = QHBoxLayout()
         self.config_widgets["device"] = CustomComboBox()
-        self.config_widgets["device"].addItems(DEVICE_OPTIONS)
+        self._populate_device_combo()
         self.device_checkboxes = QWidget()
         self.device_checkboxes.setVisible(False)
         self.config_widgets["device"].currentTextChanged.connect(
             self.on_device_changed
         )
         device_layout.addWidget(self.config_widgets["device"])
+        # Refresh Devices button
+        self.refresh_devices_btn = QPushButton("↻")
+        self.refresh_devices_btn.setFixedWidth(32)
+        self.refresh_devices_btn.setToolTip("Refresh Devices")
+        self.refresh_devices_btn.clicked.connect(self._on_refresh_devices)
+        device_layout.addWidget(self.refresh_devices_btn)
+        # Test GPU button
+        self.test_gpu_btn = QPushButton("Test GPU")
+        self.test_gpu_btn.setToolTip("Run quick CUDA tensor test")
+        self.test_gpu_btn.clicked.connect(self._on_test_gpu)
+        self._update_test_gpu_btn()
+        device_layout.addWidget(self.test_gpu_btn)
         device_layout.addWidget(self.device_checkboxes)
         layout.addRow("Device:", device_layout)
         self.on_device_changed(self.config_widgets["device"].currentText())
+
+        # GPU info label
+        self.gpu_info_label = QLabel()
+        self.gpu_info_label.setStyleSheet("color: gray; font-size: 11px;")
+        self.gpu_info_label.setWordWrap(True)
+        layout.addRow("", self.gpu_info_label)
+        self._update_gpu_info_label()
 
         dataset_layout = QHBoxLayout()
         self.config_widgets["dataset_ratio"] = CustomSlider(
@@ -1563,10 +1683,26 @@ class GuidedTrainingWidget(QWidget):
                                 str(value / 100.0)
                             )
                     elif key == "device":
-                        index = self.config_widgets[key].findText(str(value))
-                        if index >= 0:
-                            self.config_widgets[key].setCurrentIndex(index)
-                            self.on_device_changed(str(value))
+                        from anylabeling.services.training_center.device_service import migrate_legacy_device
+                        migrated = migrate_legacy_device(str(value))
+                        # Find matching item by userData
+                        idx = -1
+                        for i in range(self.config_widgets[key].count()):
+                            if self.config_widgets[key].itemData(i) == migrated:
+                                idx = i
+                                break
+                        if idx >= 0:
+                            self.config_widgets[key].setCurrentIndex(idx)
+                        elif migrated.startswith("cuda:"):
+                            # GPU not found — fall back to Auto
+                            self.config_widgets[key].setCurrentIndex(0)
+                            logger.warning(
+                                "Saved device %s (%s) not available, falling back to Auto",
+                                value, migrated,
+                            )
+                        else:
+                            self.config_widgets[key].setCurrentIndex(0)  # Auto
+                        self.on_device_changed(self.config_widgets[key].currentText())
                     elif key == "optimizer":
                         index = self.config_widgets[key].findText(str(value))
                         if index >= 0:
@@ -1634,7 +1770,12 @@ class GuidedTrainingWidget(QWidget):
                 "name": get_widget_value("name") or "",
                 "model": (get_widget_value("model") or "").strip('"'),
                 "data": (get_widget_value("data") or "").strip('"'),
-                "device": get_widget_value("device"),
+                "device": (
+                    self.config_widgets["device"].currentData()
+                    if "device" in self.config_widgets
+                    and hasattr(self.config_widgets["device"], "currentData")
+                    else get_widget_value("device") or "auto"
+                ),
                 "dataset_ratio": (
                     get_widget_value("dataset_ratio") / 100.0
                     if get_widget_value("dataset_ratio") is not None
@@ -2525,27 +2666,21 @@ class GuidedTrainingWidget(QWidget):
                     data_path = os.path.join(temp_dir, "data.yaml")
 
             device_value = config["basic"]["device"]
-            if device_value == "cuda" and hasattr(self, "device_checkboxes"):
-                selected_gpus = []
-                if hasattr(self, "_cuda_layout") and self._cuda_layout:
-                    for i in range(self._cuda_layout.count()):
-                        widget = self._cuda_layout.itemAt(i).widget()
-                        if (
-                            widget
-                            and hasattr(widget, "isChecked")
-                            and widget.isChecked()
-                        ):
-                            gpu_text = widget.text()
-                            gpu_id = gpu_text.split()[-1]
-                            selected_gpus.append(int(gpu_id))
-                device_value = selected_gpus if selected_gpus else "cpu"
+            # Convert internal device format to Ultralytics-compatible
+            from anylabeling.services.training_center.device_service import (
+                resolve_training_device, migrate_legacy_device,
+            )
+            requested_device = migrate_legacy_device(str(device_value or "auto"))
+            ul_device = resolve_training_device(requested_device)
+            self._requested_device = requested_device
+            self._resolved_device = ul_device
 
             train_args = {
                 "data": data_path,
                 "model": config["basic"]["model"],
                 "project": config["basic"]["project"],
                 "name": config["basic"]["name"],
-                "device": device_value,
+                "device": ul_device,
             }
 
             # Add advanced parameters

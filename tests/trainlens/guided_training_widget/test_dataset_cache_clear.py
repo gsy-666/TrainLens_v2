@@ -426,13 +426,13 @@ class TestPreflightClassMetadata:
     def _make_widget_with_config(self, task_type="Detect"):
         """Create widget with config_widgets pointing to coco8."""
         w = _make_widget(image_list=[], task_type=task_type)
-        from anylabeling.views.training.widgets.ultralytics_widgets.custom_widgets import CustomLineEdit
+        from anylabeling.views.training.widgets.ultralytics_widgets.custom_widgets import CustomLineEdit, CustomComboBox
         w.config_widgets = {
             "data": CustomLineEdit(),
             "project": CustomLineEdit(),
             "name": CustomLineEdit(),
             "model": CustomLineEdit(),
-            "device": CustomLineEdit(),
+            "device": CustomComboBox(),
             "epochs": CustomLineEdit(),
             "batch": CustomLineEdit(),
             "imgsz": CustomLineEdit(),
@@ -441,7 +441,8 @@ class TestPreflightClassMetadata:
         w.config_widgets["project"].setText("/tmp/proj")
         w.config_widgets["name"].setText("exp")
         w.config_widgets["model"].setText("/tmp/model.pt")
-        w.config_widgets["device"].setText("cpu")
+        w.config_widgets["device"].addItems(["cpu"])
+        w.config_widgets["device"].setCurrentText("cpu")
         w.config_widgets["epochs"].setText("100")
         w.config_widgets["batch"].setText("16")
         w.config_widgets["imgsz"].setText("640")
@@ -853,7 +854,7 @@ class TestHistoryMetadata:
         """Create a widget with prepared dataset for training flow."""
         w = _make_widget(image_list=[], task_type="Detect")
         from anylabeling.views.training.widgets.ultralytics_widgets.custom_widgets import (
-            CustomLineEdit, CustomSlider,
+            CustomLineEdit, CustomSlider, CustomComboBox,
         )
         from PyQt6.QtWidgets import QLabel
         w.config_widgets = {
@@ -861,7 +862,7 @@ class TestHistoryMetadata:
             "project": CustomLineEdit(),
             "name": CustomLineEdit(),
             "model": CustomLineEdit(),
-            "device": CustomLineEdit(),
+            "device": CustomComboBox(),
             "epochs": CustomLineEdit(),
             "batch": CustomLineEdit(),
             "imgsz": CustomLineEdit(),
@@ -871,7 +872,8 @@ class TestHistoryMetadata:
         w.config_widgets["project"].setText(str(tmp_path / "runs"))
         w.config_widgets["name"].setText("exp")
         w.config_widgets["model"].setText(str(tmp_path / "models" / "yolo11n.pt"))
-        w.config_widgets["device"].setText("cpu")
+        w.config_widgets["device"].addItems(["cpu"])
+        w.config_widgets["device"].setCurrentText("cpu")
         w.config_widgets["epochs"].setText("10")
         w.config_widgets["batch"].setText("8")
         w.config_widgets["imgsz"].setText("640")
