@@ -182,3 +182,7 @@ pnnx*
 
 # calibration image
 calibration_*.npy
+
+# Web UI (web/frontend)
+node_modules/
+*.tsbuildinfo

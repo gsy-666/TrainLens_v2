@@ -1,0 +1,256 @@
+/* Welcome — pristine light, editorial offset composition.
+   Palette lock: paper #f8f7f5 / surface #fdfdfc / ink #18181b / mute #71717a
+   / hairline #e7e5e4 / accent #2563eb (single accent, used everywhere).
+   Radius lock: 12px. Font: Outfit Variable (self-hosted via fontsource). */
+
+.wl-root {
+  --paper: #f8f7f5;
+  --surface: #fdfdfc;
+  --ink: #18181b;
+  --mute: #71717a;
+  --hairline: #e7e5e4;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+
+  min-height: 100dvh;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "Outfit Variable", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  overflow: hidden;
+}
+
+.wl-layout {
+  min-height: 100dvh;
+  max-width: 1440px;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
+  align-items: center;
+  gap: 48px;
+  padding: 0 64px;
+}
+
+/* ---- left column ---- */
+.wl-left {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  max-width: 520px;
+  padding-top: 24px;
+}
+
+.wl-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 56px;
+}
+.wl-brand-mark {
+  width: 42px;
+  height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.wl-brand-name {
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.wl-headline {
+  margin: 0 0 18px;
+  font-size: 54px;
+  font-weight: 650;
+  line-height: 1.12;
+  letter-spacing: -0.03em;
+}
+.wl-headline .line { display: block; }
+
+.wl-sub {
+  margin: 0 0 32px;
+  font-size: 15.5px;
+  line-height: 1.75;
+  color: var(--mute);
+  max-width: 42ch;
+}
+
+/* ---- action panel ---- */
+.wl-panel {
+  width: 100%;
+  padding: 18px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  margin-bottom: 36px;
+}
+.wl-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--ink);
+}
+.wl-input-row {
+  display: flex;
+  gap: 8px;
+}
+.wl-input {
+  flex: 1;
+  min-width: 0;
+  height: 44px;
+  padding: 0 14px;
+  font-size: 14px;
+  font-family: inherit;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.wl-input::placeholder { color: #a1a1aa; }
+.wl-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+.wl-btn-ghost,
+.wl-btn-primary {
+  height: 44px;
+  padding: 0 16px;
+  font-size: 14px;
+  font-weight: 600;
+  font-family: inherit;
+  border-radius: 12px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  transition: transform 0.12s ease, background 0.15s ease, border-color 0.15s ease;
+}
+.wl-btn-ghost:active,
+.wl-btn-primary:active { transform: translateY(1px) scale(0.98); }
+
+.wl-btn-ghost {
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--hairline);
+}
+.wl-btn-ghost:hover { border-color: #a1a1aa; }
+
+.wl-btn-primary {
+  background: var(--accent);
+  color: #fdfdfc;
+  border: 1px solid var(--accent);
+}
+.wl-btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
+.wl-btn-primary:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.wl-demo {
+  margin-top: 12px;
+  padding: 0;
+  background: none;
+  border: none;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--accent);
+  cursor: pointer;
+}
+.wl-demo:hover { text-decoration: underline; }
+
+/* ---- features (no cards, plain 3-col) ---- */
+.wl-features {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+  padding-top: 24px;
+  border-top: 1px solid var(--hairline);
+  margin-bottom: 28px;
+}
+.wl-feature {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+.wl-feature-icon {
+  color: var(--accent);
+  font-size: 18px;
+  line-height: 1.4;
+}
+.wl-feature-title { font-size: 13.5px; font-weight: 600; }
+.wl-feature-desc { font-size: 12px; color: var(--mute); margin-top: 2px; line-height: 1.5; }
+
+.wl-foot {
+  font-size: 12px;
+  color: #a1a1aa;
+  letter-spacing: 0.02em;
+}
+
+/* ---- right visual: real annotation render, bleeding right ---- */
+.wl-right {
+  display: flex;
+  justify-content: flex-end;
+  height: 100dvh;
+  align-items: center;
+  /* bleed beyond the max-width gutter toward the viewport edge */
+  margin-right: calc((100vw - 1440px) / -2 - 64px);
+}
+.wl-visual {
+  margin: 0;
+  height: 82dvh;
+  max-width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 12px 0 0 12px;
+  border-right: none;
+  padding: 14px 0 14px 14px;
+  box-shadow: 0 24px 60px rgba(24, 24, 27, 0.10);
+  display: flex;
+  flex-direction: column;
+}
+.wl-visual img {
+  height: 100%;
+  min-height: 0;
+  flex: 1;
+  object-fit: cover;
+  object-position: left center;
+  border-radius: 8px 0 0 8px;
+  display: block;
+}
+.wl-visual figcaption {
+  padding: 10px 14px 2px 2px;
+  font-size: 12px;
+  color: var(--mute);
+}
+
+/* ---- collapse ---- */
+@media (max-width: 900px) {
+  .wl-layout {
+    grid-template-columns: 1fr;
+    gap: 32px;
+    padding: 40px 20px;
+  }
+  .wl-left { max-width: 100%; padding-top: 0; }
+  .wl-brand { margin-bottom: 32px; }
+  .wl-headline { font-size: 36px; }
+  .wl-right { height: auto; margin-right: 0; justify-content: center; }
+  .wl-visual {
+    height: 50dvh;
+    border-radius: 12px;
+    border: 1px solid var(--hairline);
+    padding: 10px;
+  }
+  .wl-visual img { border-radius: 8px; }
+  .wl-features { grid-template-columns: 1fr; gap: 12px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wl-btn-ghost,
+  .wl-btn-primary { transition: none; }
+}

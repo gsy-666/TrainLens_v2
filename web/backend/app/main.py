@@ -1,0 +1,68 @@
+"""X-AnyLabeling Web UI backend (FastAPI).
+
+Reuses the desktop codebase (anylabeling.*) for label file IO and
+auto-labeling model inference. Run from web/backend/:
+
+    uvicorn app.main:app --host 127.0.0.1 --port 8000
+
+When web/frontend/dist exists (npm run build), it is served at / so the
+whole app runs from this single process/port.
+"""
+
+import sys
+from pathlib import Path
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+
+# Make the repository root importable so `anylabeling.*` can be reused.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from .routers import (  # noqa: E402
+    export,
+    files,
+    fs,
+    labels,
+    models,
+    monitor,
+    predict,
+    training,
+    upload,
+    video,
+)
+
+app = FastAPI(title="X-AnyLabeling Web", version="0.1.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(files.router, prefix="/api", tags=["files"])
+app.include_router(fs.router, prefix="/api", tags=["fs"])
+app.include_router(labels.router, prefix="/api", tags=["labels"])
+app.include_router(models.router, prefix="/api", tags=["models"])
+app.include_router(predict.router, prefix="/api", tags=["predict"])
+app.include_router(export.router, prefix="/api", tags=["export"])
+app.include_router(upload.router, prefix="/api", tags=["upload"])
+app.include_router(video.router, prefix="/api", tags=["video"])
+app.include_router(training.router, prefix="/api", tags=["training"])
+app.include_router(monitor.router, prefix="/api", tags=["monitor"])
+
+
+@app.get("/api/health")
+def health():
+    return {"status": "ok"}
+
+
+# Serve the built frontend (single-process production mode). Mounted last
+# so /api/* routes win. html=True gives SPA-style index.html at /.
+_FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+if _FRONTEND_DIST.is_dir():
+    app.mount("/", StaticFiles(directory=_FRONTEND_DIST, html=True), name="web")
