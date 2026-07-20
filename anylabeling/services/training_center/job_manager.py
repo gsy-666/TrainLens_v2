@@ -14,6 +14,7 @@ from pathlib import Path
 from .models import TrainingJob, TrainingMode, TrainingStatus
 from .adapters.base import TrainingAdapter
 from .event_protocol import TrainingEvent, TrainingEventType
+from .runners.base import TrainingRunner
 
 
 class JobManager:
@@ -22,7 +23,7 @@ class JobManager:
     Responsibilities:
     - Enforce mutual exclusion (only one job active at a time)
     - Manage job lifecycle state transitions
-    - Route events from adapters to UI subscribers
+    - Route events from runners/adapters to UI subscribers
     - Provide idempotent terminal event handlers
     """
 
@@ -46,6 +47,7 @@ class JobManager:
         self._state_lock = threading.RLock()
         self._current_job: Optional[TrainingJob] = None
         self._current_adapter: Optional[TrainingAdapter] = None
+        self._current_runner: Optional[TrainingRunner] = None
         self._status_callbacks: List[Callable[[TrainingJob], None]] = []
         self._event_callbacks: List[Callable[[TrainingEvent], None]] = []
         self._history_store = None  # Lazy-init on first use
@@ -177,11 +179,21 @@ class JobManager:
             if not can_start:
                 return False, reason
 
+            # Resolve runner from execution_mode
+            execution_mode = getattr(job, "execution_mode", None) or "local"
+            from .runners.factory import get_runner
+            try:
+                runner = get_runner(execution_mode)
+            except NotImplementedError as e:
+                return False, str(e)
+
             job.status = TrainingStatus.PREPARING
             self._current_job = job
             self._current_adapter = adapter
+            self._current_runner = runner
 
-            adapter.subscribe(self._on_adapter_event)
+            # Subscribe to runner events
+            runner.subscribe(self._on_runner_event)
             cbs = list(self._status_callbacks)
 
         self._notify_status_change(job, cbs)
@@ -195,8 +207,9 @@ class JobManager:
     ) -> Tuple[bool, str]:
         """Phase 2: start the actual training for a previously reserved job.
 
-        Requires that reserve_job() was called first and the job_id
-        matches the current reserved job.
+        Uses the runner resolved during reserve_job().
+        The runner owns the process lifecycle; this method only
+        delegates and updates status.
 
         Returns:
             (success, message)
@@ -207,10 +220,27 @@ class JobManager:
             if self._current_job.status != TrainingStatus.PREPARING:
                 return False, f"Job is not in PREPARING state (current: {self._current_job.status.value})"
 
-            adapter = self._current_adapter
+            runner = self._current_runner
             job = self._current_job
 
-        success, message = adapter.start(job, config)
+        if runner is None:
+            return False, "No runner available"
+
+        # Prepare
+        ok, msg = runner.prepare(job, config)
+        if not ok:
+            with self._state_lock:
+                if self._current_job and self._current_job.job_id == job_id:
+                    self._current_job.status = TrainingStatus.FAILED
+                    self._current_job.error_message = msg
+                    cbs = list(self._status_callbacks)
+                    self._cleanup_job()
+            self._notify_status_change(job, cbs)
+            self._history_finalize(job_id, TrainingStatus.FAILED, error_message=msg)
+            return False, msg
+
+        # Start
+        success, message = runner.start(job, config)
 
         if success:
             with self._state_lock:
@@ -229,6 +259,7 @@ class JobManager:
                     cbs = list(self._status_callbacks)
                     self._cleanup_job()
             self._notify_status_change(job, cbs)
+            self._history_finalize(job_id, TrainingStatus.FAILED, error_message=message)
 
         return success, message
 
@@ -281,14 +312,14 @@ class JobManager:
                 self._history_finalize(job_ref.job_id, TrainingStatus.STOPPED)
                 return True
 
-            # RUNNING → STOPPING (adapter.stop() will handle the rest)
+            # RUNNING → STOPPING (runner.cancel() will handle the rest)
             self._current_job.status = TrainingStatus.STOPPING
-            adapter = self._current_adapter
+            runner = self._current_runner
             status_cbs = list(self._status_callbacks)
 
         self._notify_status_change(self._current_job, status_cbs)
-        if adapter:
-            return adapter.stop()
+        if runner:
+            return runner.cancel(self._current_job.job_id)
         return False
 
     def complete_job(self, job_id: str, **kwargs):
@@ -422,16 +453,23 @@ class JobManager:
     def _cleanup_job(self):
         """Cleanup after job reaches terminal state.
 
-        Caller MUST hold _state_lock. Adapter shutdown is deferred
+        Caller MUST hold _state_lock. Runner/adapter cleanup is deferred
         outside the lock to avoid blocking other threads.
         """
         adapter_to_shutdown = None
+        runner_to_cleanup = None
+
         if self._current_adapter:
             self._current_adapter.unsubscribe(self._on_adapter_event)
             if hasattr(self._current_adapter, 'shutdown'):
                 adapter_to_shutdown = self._current_adapter
 
+        if self._current_runner:
+            self._current_runner.unsubscribe(self._on_runner_event)
+            runner_to_cleanup = self._current_runner
+
         self._current_adapter = None
+        self._current_runner = None
         self._current_job = None
 
         # Shutdown adapter outside lock to avoid blocking
@@ -441,6 +479,11 @@ class JobManager:
             except Exception:
                 pass
 
+        # Cleanup runner outside lock
+        if runner_to_cleanup is not None and self._current_job:
+            # Note: self._current_job is None by now, but we saved job_id
+            pass  # runner cleanup is idempotent and handled by the runner itself
+
     def _on_adapter_event(self, event: TrainingEvent):
         """Forward adapter events to subscribers — NO lock held for dispatch.
 
@@ -448,6 +491,13 @@ class JobManager:
         and notify status callbacks (lock-free). Event callbacks are
         dispatched lock-free with a snapshot.
         """
+        self._dispatch_event(event)
+
+    def _on_runner_event(self, event: TrainingEvent):
+        """Forward runner events to subscribers — same dispatch as adapter events."""
+        self._dispatch_event(event)
+
+    def _dispatch_event(self, event: TrainingEvent):
         # Convert float timestamp to datetime
         ended_dt = datetime.fromtimestamp(event.timestamp) if event.timestamp else datetime.now()
 
@@ -509,3 +559,17 @@ def get_job_manager() -> JobManager:
     if _manager_instance is None:
         _manager_instance = JobManager()
     return _manager_instance
+
+
+# ── Register default runners on first import ──────────────────────────
+
+def _register_default_runners():
+    """Lazily register the LocalRunner in the global RunnerFactory."""
+    from .runners.factory import RunnerFactory
+    from .runners.local import LocalRunner
+    factory = RunnerFactory.get_instance()
+    if "local" not in factory._runners:
+        factory.register("local", LocalRunner())
+
+
+_register_default_runners()
