@@ -13,6 +13,7 @@ from PyQt6.QtCore import Qt, QObject, QProcess, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
+    QComboBox,
     QDialog,
     QFileDialog,
     QFormLayout,
@@ -1057,6 +1058,12 @@ class GuidedTrainingWidget(QWidget):
         self._update_test_gpu_btn()
         self.append_training_log("Devices refreshed.")
 
+    def _on_execution_mode_changed(self, idx: int):
+        """Toggle between Local and Remote SSH execution modes."""
+        mode = self.config_widgets["execution_mode"].currentData()
+        is_remote = mode == "remote"
+        self.remote_profile_widget.setVisible(is_remote)
+
     def _get_selected_training_device(self) -> dict:
         """Return the selected device's full training configuration.
 
@@ -1910,6 +1917,24 @@ print(json.dumps(result, ensure_ascii=False))
         self.gpu_info_label.setWordWrap(True)
         layout.addRow("", self.gpu_info_label)
         self._update_gpu_info_label()
+
+        # ── Execution mode (Local / Remote SSH) ──
+        exec_layout = QHBoxLayout()
+        self.config_widgets["execution_mode"] = QComboBox()
+        self.config_widgets["execution_mode"].addItem("Local", "local")
+        self.config_widgets["execution_mode"].addItem("Remote SSH", "remote")
+        self.config_widgets["execution_mode"].currentIndexChanged.connect(
+            self._on_execution_mode_changed
+        )
+        exec_layout.addWidget(QLabel("Execution:"))
+        exec_layout.addWidget(self.config_widgets["execution_mode"], 1)
+        layout.addRow("Execution:", exec_layout)
+
+        # Remote profile widget (hidden for local mode)
+        from anylabeling.views.training.remote.profile_widget import RemoteProfileWidget
+        self.remote_profile_widget = RemoteProfileWidget()
+        self.remote_profile_widget.setVisible(False)
+        layout.addRow(self.remote_profile_widget)
 
         dataset_layout = QHBoxLayout()
         self.config_widgets["dataset_ratio"] = CustomSlider(
@@ -4180,6 +4205,22 @@ print(json.dumps(result, ensure_ascii=False))
         resolved_device = dev_info["resolved_device"]
         device_name = dev_info["device_name"]
         execution_mode = dev_info["execution_mode"]
+
+        # Override execution_mode from UI selector (Local/Remote SSH)
+        if "execution_mode" in self.config_widgets:
+            ui_mode = self.config_widgets["execution_mode"].currentData()
+            if ui_mode and ui_mode != "local":
+                execution_mode = ui_mode
+
+        # Block remote mode (not yet implemented)
+        if execution_mode == "remote":
+            QMessageBox.information(
+                self, self.tr("Remote Training"),
+                self.tr("Remote training runner is not implemented yet.\n\n"
+                        "Please use Local mode for now.\n"
+                        "Remote SSH profiles can still be configured and tested.")
+            )
+            return
 
         # Hard validation: GPU tasks MUST have a runtime Python
         if requested_device.startswith("cuda") or (resolved_device and resolved_device not in ("cpu", "")):
