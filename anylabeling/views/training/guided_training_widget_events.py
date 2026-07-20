@@ -4,6 +4,8 @@ This module handles the mapping from unified TrainingEvents to widget UI updates
 Replaces direct TrainingManager signal connections.
 """
 
+import os
+
 
 def handle_unified_training_event(widget, event):
     """Handle unified TrainingEvent and update widget UI
@@ -87,9 +89,14 @@ def handle_unified_training_event(widget, event):
 
     elif event_type == TrainingEventType.COMPLETED:
         widget.training_status = "completed"
+        # Use real save_dir from worker (not guessed from project/name)
+        real_save_dir = event.payload.get("save_dir", "")
+        if real_save_dir and os.path.isdir(real_save_dir):
+            widget.current_project_path = real_save_dir
         widget.update_training_status_display()
         widget.stop_training_button.setVisible(False)
-        widget.start_training_button.setVisible(False)
+        widget.start_training_button.setVisible(True)
+        widget.start_training_button.setEnabled(True)
         widget.previous_button.setVisible(True)
         widget.export_button.setVisible(True)
         widget.progress_timer.stop()
@@ -97,6 +104,10 @@ def handle_unified_training_event(widget, event):
         widget.update_training_progress()
         widget.update_training_images()
         widget.append_training_log(widget.tr("Training completed successfully!"))
+
+        # Refresh metrics dashboard with real save_dir
+        if hasattr(widget, '_metrics_dashboard') and widget._metrics_dashboard:
+            widget._metrics_dashboard.update_output_dir("guided", real_save_dir)
 
         # Save to history
         _save_to_history(widget, "completed", None)

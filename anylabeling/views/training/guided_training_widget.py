@@ -3140,27 +3140,65 @@ print(json.dumps(result, ensure_ascii=False))
             self.log_display.append(text.strip())
 
     def _on_training_event_from_job(self, event):
-        """Handle unified training events from JobManager."""
-        if event.event_type == TrainingEventType.CONSOLE_OUTPUT:
-            log_message = event.payload.get("message", "")
-            if log_message:
-                self.append_training_log(log_message)
+        """Handle unified training events from JobManager.
+
+        Forwards all event types to handle_unified_training_event()
+        which handles COMPLETED, FAILED, STOPPED, WORKER_READY, etc.
+        """
+        from anylabeling.views.training.guided_training_widget_events import (
+            handle_unified_training_event,
+        )
+        handle_unified_training_event(self, event)
 
     def _on_job_status_change(self, job):
-        """Handle job status changes from JobManager."""
+        """Handle job status changes from JobManager.
+
+        Updates UI state and sets training_status string for display.
+        Terminal statuses are handled here; non-terminal events go
+        through handle_unified_training_event.
+        """
         if job.status == TrainingStatus.RUNNING:
             self.training_status = "training"
             self.start_training_button.setVisible(False)
             self.stop_training_button.setVisible(True)
+            self.stop_training_button.setEnabled(True)
             self.export_button.setVisible(False)
             self.previous_button.setVisible(False)
-        elif job.status.is_terminal():
+            self.update_training_status_display()
+        elif job.status == TrainingStatus.COMPLETED:
+            self.training_status = "completed"
+            self.update_training_status_display()
+            self.stop_training_button.setVisible(False)
+            self.start_training_button.setVisible(True)
+            self.start_training_button.setEnabled(True)
+            self.previous_button.setVisible(True)
+            self.export_button.setVisible(True)
+            self.progress_timer.stop()
+            self.image_timer.stop()
+        elif job.status == TrainingStatus.FAILED:
+            self.training_status = "error"
+            self.update_training_status_display()
             self.start_training_button.setVisible(True)
             self.start_training_button.setEnabled(True)
             self.stop_training_button.setVisible(False)
+            self.export_button.setVisible(False)
             self.previous_button.setVisible(True)
-            if job.status != TrainingStatus.FAILED:
-                self.export_button.setVisible(True)
+            self.progress_timer.stop()
+            self.image_timer.stop()
+        elif job.status == TrainingStatus.STOPPED:
+            self.training_status = "stop"
+            self.update_training_status_display()
+            self.start_training_button.setVisible(True)
+            self.start_training_button.setEnabled(True)
+            self.stop_training_button.setVisible(False)
+            self.export_button.setVisible(False)
+            self.previous_button.setVisible(True)
+            self.progress_timer.stop()
+            self.image_timer.stop()
+        elif job.status == TrainingStatus.PREPARING:
+            self.training_status = "preparing"
+            self.update_training_status_display()
+            self.start_training_button.setEnabled(False)
 
     def init_training_status(self, parent_layout):
         status_group = QGroupBox(self.tr("Training Status"))
@@ -4221,6 +4259,7 @@ print(json.dumps(result, ensure_ascii=False))
 
         # Store for prep thread / late signal validation
         self._prep_job_id = job_id
+        self._current_job_id = job_id  # for event handler guard
         self._prep_adapter = adapter
 
         # ── UI: preparing state ──
