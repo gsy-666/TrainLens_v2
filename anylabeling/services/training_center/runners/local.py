@@ -9,10 +9,13 @@ import sys
 import tempfile
 import threading
 import time
+import traceback as _traceback
 from pathlib import Path
 from typing import Callable, Dict, Any, List, Optional, Tuple
 
-from PyQt6.QtCore import QObject, QProcess, pyqtSignal, QTimer
+from PyQt6.QtCore import (
+    QObject, QProcess, QProcessEnvironment, pyqtSignal, QTimer,
+)
 
 from .base import TrainingRunner, RunnerCapability
 from ..models import TrainingJob, TrainingStatus
@@ -51,8 +54,11 @@ class _LocalProcessBridge(QObject):
         self._running_job_id: str = ""
         self._partial_line = ""
 
-    def launch(self, job_id: str, command: List[str], env: Dict[str, str] = None):
-        """Start QProcess with the given command."""
+    def launch(self, job_id: str, command: List[str], env: Dict[str, str] = None) -> bool:
+        """Start QProcess with the given command.
+
+        Returns True on success, False on failure (no exception raised).
+        """
         if self._proc is not None:
             _log.warning("Process still running; cleaning up first")
             self.cleanup()
@@ -60,31 +66,44 @@ class _LocalProcessBridge(QObject):
         self._running_job_id = job_id
         self._partial_line = ""
 
-        self._proc = QProcess(self)
-        self._proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        try:
+            self._proc = QProcess(self)
+            self._proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
 
-        if env:
-            proc_env = QProcess.systemEnvironment()
-            for k, v in env.items():
-                # Replace or add env vars
-                found = False
-                for i, entry in enumerate(proc_env):
-                    if entry.startswith(f"{k}="):
-                        proc_env[i] = f"{k}={v}"
-                        found = True
-                        break
-                if not found:
-                    proc_env.append(f"{k}={v}")
-            self._proc.setEnvironment(proc_env)
+            # Build process environment (system + overrides)
+            process_env = QProcessEnvironment.systemEnvironment()
+            if env:
+                for key, value in env.items():
+                    if value is not None:
+                        process_env.insert(str(key), str(value))
 
-        self._proc.readyReadStandardOutput.connect(self._on_stdout)
-        self._proc.finished.connect(self._on_finished)
-        self._proc.errorOccurred.connect(self._on_error)
+            self._proc.setProcessEnvironment(process_env)
 
-        program = command[0]
-        args = command[1:] if len(command) > 1 else []
-        _log.info("LocalRunner: QProcess program=%s args=%s", program, args)
-        self._proc.start(program, args)
+            # Wire signals
+            self._proc.readyReadStandardOutput.connect(self._on_stdout)
+            self._proc.finished.connect(self._on_finished)
+            self._proc.errorOccurred.connect(self._on_error)
+
+            # Set program and arguments explicitly
+            program = command[0]
+            args = command[1:] if len(command) > 1 else []
+            self._proc.setProgram(program)
+            self._proc.setArguments(args)
+
+            # Set working directory to worker script's parent (not cwd-dependent)
+            worker_dir = os.path.dirname(os.path.abspath(command[1])) if len(command) > 1 else ""
+            if worker_dir and os.path.isdir(worker_dir):
+                self._proc.setWorkingDirectory(worker_dir)
+
+            _log.info("LocalRunner: QProcess program=%s args=%s wd=%s", program, args[:3], worker_dir)
+            self._proc.start()
+            return True
+
+        except (AttributeError, OSError, RuntimeError) as e:
+            _log.error("Failed to launch QProcess: %s\n%s", e, _traceback.format_exc())
+            self.cleanup()
+            self.process_error.emit(f"Failed to start local training worker: {e}")
+            return False
 
     def _on_stdout(self):
         """Read stdout and emit full lines."""
@@ -245,7 +264,10 @@ class LocalRunner(TrainingRunner):
         return True, "ready"
 
     def start(self, job: TrainingJob, config: Dict[str, Any]) -> Tuple[bool, str]:
-        """Launch the training worker."""
+        """Launch the training worker.
+
+        Catches all exceptions to prevent crashing the GUI main loop.
+        """
         if self._active_job_id:
             return False, "Runner already has an active job"
 
@@ -257,26 +279,37 @@ class LocalRunner(TrainingRunner):
 
         python_exe = _resolve_python_executable(job)
 
-        # Build payload
-        payload_path = _create_training_payload(config)
+        try:
+            # Build payload
+            payload_path = _create_training_payload(config)
 
-        # Build command
-        worker_script = _resolve_worker_script()
-        command = [python_exe, worker_script, "--payload", payload_path]
+            # Build command
+            worker_script = _resolve_worker_script()
+            command = [python_exe, worker_script, "--payload", payload_path]
 
-        _log.info(
-            "Runner: %s\nExecution mode: %s\nRuntime Python: %s\nWorker script: %s\n"
-            "Requested device: %s\nResolved device: %s",
-            self.runner_id, self.execution_mode, python_exe, worker_script,
-            getattr(job, "requested_device", ""),
-            getattr(job, "resolved_device", ""),
-        )
+            _log.info(
+                "Runner: %s\nExecution mode: %s\nRuntime Python: %s\nWorker script: %s\n"
+                "Requested device: %s\nResolved device: %s",
+                self.runner_id, self.execution_mode, python_exe, worker_script,
+                getattr(job, "requested_device", ""),
+                getattr(job, "resolved_device", ""),
+            )
 
-        env = os.environ.copy()
-        env["PYTHONIOENCODING"] = "utf-8"
-        self._bridge.launch(job.job_id, command, env)
+            env = os.environ.copy()
+            env["PYTHONIOENCODING"] = "utf-8"
+            ok = self._bridge.launch(job.job_id, command, env)
+            if not ok:
+                self._active_job_id = ""
+                self._job = None
+                return False, "Failed to start local training worker (see log for details)"
 
-        return True, "Worker process started"
+            return True, "Worker process started"
+
+        except Exception as e:
+            _log.error("LocalRunner.start exception: %s\n%s", e, _traceback.format_exc())
+            self._active_job_id = ""
+            self._job = None
+            return False, f"Failed to start local training worker: {e}"
 
     def cancel(self, job_id: str) -> bool:
         """Request graceful shutdown."""

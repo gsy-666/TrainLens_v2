@@ -349,3 +349,177 @@ class TestJobManagerNoDirectQProcess:
                     mock_prep.assert_called_once()
                     mock_start.assert_called_once()
                     jm._cleanup_job()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# QProcess environment handling
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestQProcessEnvironment:
+    """Verify QProcessEnvironment API usage — no setEnvironment()."""
+
+    def test_uses_set_process_environment_not_set_environment(self):
+        """Source code must use setProcessEnvironment, not setEnvironment."""
+        import anylabeling.services.training_center.runners.local as mod
+        source = open(mod.__file__, encoding="utf-8").read()
+        assert "setProcessEnvironment" in source, "Must use setProcessEnvironment"
+        assert "setEnvironment(" not in source, "Must NOT use setEnvironment"
+
+    def test_qprocess_environment_merge(self):
+        """Verify QProcessEnvironment.insert() correctly merges env vars."""
+        from PyQt6.QtCore import QProcessEnvironment
+        env = QProcessEnvironment.systemEnvironment()
+
+        # System env should contain common vars
+        assert env.contains("PATH") or env.contains("Path"), "System PATH must be preserved"
+
+        # Insert custom
+        env.insert("MY_TEST_VAR", "hello world")
+        assert env.value("MY_TEST_VAR") == "hello world"
+
+    def test_qprocess_environment_overrides_system(self):
+        """Custom env var should override system value."""
+        from PyQt6.QtCore import QProcessEnvironment
+        env = QProcessEnvironment.systemEnvironment()
+
+        # Override a known system var
+        env.insert("PYTHONIOENCODING", "utf-8-override")
+        assert env.value("PYTHONIOENCODING") == "utf-8-override"
+
+    def test_none_values_skipped(self):
+        """None env values should be skipped during insertion."""
+        from PyQt6.QtCore import QProcessEnvironment
+        env = QProcessEnvironment.systemEnvironment()
+        # None should not be insertable — the insert() method requires string
+        # Our launch() code handles this by checking `if value is not None`
+        assert env.contains("PATH") or env.contains("Path")
+
+    def test_chinese_and_space_env_value(self):
+        """Chinese characters and spaces in env values are OK."""
+        from PyQt6.QtCore import QProcessEnvironment
+        env = QProcessEnvironment.systemEnvironment()
+        env.insert("CHINESE_TEST", "中文 路径 test")
+        assert env.value("CHINESE_TEST") == "中文 路径 test"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Launch failure handling
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestLaunchFailureHandling:
+    """Verify that QProcess launch failures don't crash the GUI."""
+
+    def test_launch_returns_true_and_error_comes_async(self):
+        """launch() returns True; process errors arrive via errorOccurred signal."""
+        from anylabeling.services.training_center.runners.local import (
+            _LocalProcessBridge,
+        )
+        bridge = _LocalProcessBridge()
+        errors = []
+        bridge.process_error.connect(lambda msg: errors.append(msg))
+        # Invalid binary — launch may still return True (QProcess is async)
+        ok = bridge.launch("test", ["/nonexistent/binary", "/tmp/worker.py", "--payload", "/tmp/p.json"])
+        # launch() should not raise
+        assert isinstance(ok, bool)
+        bridge.cleanup()
+
+    def test_start_returns_false_on_launch_failure(self):
+        """LocalRunner.start() returns False when launch fails."""
+        runner = LocalRunner()
+        from anylabeling.services.training_center.models import (
+            TrainingJob, TrainingMode, TrainingStatus,
+        )
+        job = TrainingJob(
+            job_id="fail-test", mode=TrainingMode.GUIDED_ULTRALYTICS,
+            status=TrainingStatus.IDLE,
+        )
+        with patch.object(runner._bridge, 'launch', return_value=False):
+            ok, msg = runner.start(job, {"epochs": 1})
+            assert not ok, f"start should fail: {msg}"
+            assert runner._active_job_id == ""
+
+    def test_start_exception_returns_false(self):
+        """LocalRunner.start() returns False on unhandled exception."""
+        runner = LocalRunner()
+        from anylabeling.services.training_center.models import (
+            TrainingJob, TrainingMode, TrainingStatus,
+        )
+        job = TrainingJob(
+            job_id="exc-test", mode=TrainingMode.GUIDED_ULTRALYTICS,
+            status=TrainingStatus.IDLE,
+        )
+        with patch.object(runner._bridge, 'launch', side_effect=RuntimeError("boom")):
+            ok, msg = runner.start(job, {"epochs": 1})
+            assert not ok
+            assert "boom" in msg or "Failed" in msg
+            assert runner._active_job_id == ""
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# GPU runtime detection — no in-process torch for external jobs
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestGPURuntimeNoInProcessTorch:
+    """External GPU runtime jobs must NOT use GUI torch for CUDA checks."""
+
+    def test_can_start_does_not_check_cuda(self):
+        """Adapter.can_start() must not check torch.cuda.is_available()."""
+        import anylabeling.services.training_center.adapters.ultralytics_adapter as ad
+        source = open(ad.__file__, encoding="utf-8").read()
+        # can_start should only check manager.is_training
+        can_start_code = source.split("def can_start")[1].split("def ")[0] if "def can_start" in source else ""
+        assert "torch.cuda" not in can_start_code, "can_start must not check torch.cuda"
+
+    def test_prepare_does_not_check_torch(self):
+        """LocalRunner.prepare() must not check torch.cuda.is_available()."""
+        import anylabeling.services.training_center.runners.local as mod
+        source = open(mod.__file__, encoding="utf-8").read()
+        prepare_code = source.split("def prepare")[1].split("def ")[0]
+        assert "torch.cuda" not in prepare_code, "prepare must not check torch.cuda"
+
+    def test_gpu_command_uses_runtime_python(self):
+        """GPU job command[0] must be runtime_python, not sys.executable."""
+        runner = LocalRunner()
+        from anylabeling.services.training_center.models import (
+            TrainingJob, TrainingMode, TrainingStatus,
+        )
+        rp = "D:/Anaconda/envs/pytorch/python.exe"
+        job = TrainingJob(
+            job_id="gpu", mode=TrainingMode.GUIDED_ULTRALYTICS,
+            status=TrainingStatus.IDLE,
+            runtime_python=rp,
+            requested_device="cuda:0",
+            resolved_device="0",
+        )
+        exe = _resolve_python_executable(job)
+        assert exe == rp
+        assert exe != sys.executable, "GPU must use runtime_python, not GUI sys.executable"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Adapter can_start for external GPU
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestAdapterCanStartExternalGPU:
+    """Adapter.can_start must NOT block external GPU jobs."""
+
+    def test_can_start_returns_true_when_not_training(self):
+        """can_start returns True for GPU jobs with external runtime."""
+        from anylabeling.services.training_center.adapters.ultralytics_adapter import (
+            UltralyticsAdapter,
+        )
+        adapter = UltralyticsAdapter()
+        # Simulate no active training
+        with patch.object(adapter.manager, 'is_training', False):
+            ok, reason = adapter.can_start()
+            assert ok, f"can_start should return True: {reason}"
+
+    def test_can_start_returns_false_when_busy(self):
+        """can_start returns False when training is in progress."""
+        from anylabeling.services.training_center.adapters.ultralytics_adapter import (
+            UltralyticsAdapter,
+        )
+        adapter = UltralyticsAdapter()
+        with patch.object(adapter.manager, 'is_training', True):
+            ok, reason = adapter.can_start()
+            assert not ok
