@@ -564,12 +564,15 @@ def get_job_manager() -> JobManager:
 # ── Register default runners on first import ──────────────────────────
 
 def _register_default_runners():
-    """Lazily register the LocalRunner in the global RunnerFactory."""
+    """Lazily register the LocalRunner and SSHRemoteRunner in the global RunnerFactory."""
     from .runners.factory import RunnerFactory
     from .runners.local import LocalRunner
+    from .runners.ssh_remote import SSHRemoteRunner
     factory = RunnerFactory.get_instance()
     if "local" not in factory._runners:
         factory.register("local", LocalRunner())
+    if "remote" not in factory._runners:
+        factory.register("remote", SSHRemoteRunner())
 
 
 _register_default_runners()

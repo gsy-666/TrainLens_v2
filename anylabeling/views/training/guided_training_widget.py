@@ -4212,15 +4212,33 @@ print(json.dumps(result, ensure_ascii=False))
             if ui_mode and ui_mode != "local":
                 execution_mode = ui_mode
 
-        # Block remote mode (not yet implemented)
+        # Remote mode: validate profile (profile may stay None for local)
+        remote_profile = None
         if execution_mode == "remote":
-            QMessageBox.information(
-                self, self.tr("Remote Training"),
-                self.tr("Remote training runner is not implemented yet.\n\n"
-                        "Please use Local mode for now.\n"
-                        "Remote SSH profiles can still be configured and tested.")
+            profile_widget = getattr(self, 'remote_profile_widget', None)
+            if not profile_widget:
+                QMessageBox.critical(self, self.tr("Remote Not Configured"),
+                    self.tr("Please configure a remote SSH profile first."))
+                return
+            remote_profile = profile_widget.get_profile()
+            if not remote_profile:
+                QMessageBox.critical(self, self.tr("No Profile Selected"),
+                    self.tr("Please select or create a remote SSH profile."))
+                return
+            if not remote_profile.host:
+                QMessageBox.critical(self, self.tr("Profile Incomplete"),
+                    self.tr("Remote host is not configured."))
+                return
+            # Store remote info on job
+            runtime_id = remote_profile.profile_id
+            runtime_python = remote_profile.remote_python
+            device_name = remote_profile.host
+            self.append_training_log(
+                f"Execution mode: Remote SSH\n"
+                f"Remote host: {remote_profile.host}:{remote_profile.port}\n"
+                f"Remote Python: {remote_profile.remote_python}\n"
+                f"Remote workspace: {remote_profile.remote_workspace}"
             )
-            return
 
         # Hard validation: GPU tasks MUST have a runtime Python
         if requested_device.startswith("cuda") or (resolved_device and resolved_device not in ("cpu", "")):
@@ -4267,7 +4285,7 @@ print(json.dumps(result, ensure_ascii=False))
         self.current_job = TrainingJob(
             job_id=job_id,
             mode=TrainingMode.GUIDED_ULTRALYTICS,
-            status=TrainingStatus.IDLE,  # reserve_job will set PREPARING
+            status=TrainingStatus.IDLE,
             created_at=datetime.datetime.now(),
             started_at=None,
             ended_at=None,
@@ -4288,6 +4306,13 @@ print(json.dumps(result, ensure_ascii=False))
             requested_device=requested_device,
             resolved_device=resolved_device,
             execution_mode=execution_mode or "local",
+            # Remote SSH fields
+            remote_profile_id=remote_profile.profile_id if remote_profile else None,
+            remote_host=remote_profile.host if remote_profile else None,
+            remote_port=remote_profile.port if remote_profile else None,
+            remote_username=remote_profile.username if remote_profile else None,
+            remote_workspace=remote_profile.remote_workspace if remote_profile else None,
+            remote_python=remote_profile.remote_python if remote_profile else None,
         )
 
         adapter = UltralyticsAdapter()

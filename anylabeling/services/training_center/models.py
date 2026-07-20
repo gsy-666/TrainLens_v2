@@ -77,6 +77,19 @@ class TrainingJob:
     resolved_device: Optional[str] = None
     execution_mode: Optional[str] = None  # "local" | "remote"
 
+    # Remote SSH
+    remote_profile_id: Optional[str] = None
+    remote_host: Optional[str] = None
+    remote_port: Optional[int] = None
+    remote_username: Optional[str] = None
+    remote_workspace: Optional[str] = None
+    remote_python: Optional[str] = None
+    remote_job_dir: Optional[str] = None
+    remote_output_directory: Optional[str] = None
+
+    # Session-only (not persisted)
+    _session_password: Optional[str] = None
+
     # Training config (for Guided history display)
     task: Optional[str] = None
     model: Optional[str] = None
@@ -110,6 +123,12 @@ class TrainingJob:
             "requested_device": self.requested_device,
             "resolved_device": self.resolved_device,
             "execution_mode": self.execution_mode,
+            "remote_profile_id": self.remote_profile_id,
+            "remote_host": self.remote_host,
+            "remote_port": self.remote_port,
+            "remote_workspace": self.remote_workspace,
+            "remote_python": self.remote_python,
+            "remote_output_directory": self.remote_output_directory,
         }
 
     @property
