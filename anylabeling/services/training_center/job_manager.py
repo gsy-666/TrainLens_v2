@@ -182,9 +182,24 @@ class JobManager:
             # Resolve runner from execution_mode
             execution_mode = getattr(job, "execution_mode", None) or "local"
             from .runners.factory import get_runner
+
+            # Log runner selection (deterministic, visible in training console)
+            import logging as _logging_jm
+            _log_jm = _logging_jm.getLogger(__name__)
+            runner_type_name = "Unknown"
+            try:
+                _preview = get_runner(execution_mode)
+                runner_type_name = type(_preview).__name__
+            except Exception:
+                pass
+            _log_jm.info(
+                "Execution mode raw: %r → normalized: %s | Runner: %s",
+                getattr(job, "execution_mode", None), execution_mode, runner_type_name,
+            )
+
             try:
                 runner = get_runner(execution_mode)
-            except NotImplementedError as e:
+            except (ValueError, NotImplementedError) as e:
                 return False, str(e)
 
             job.status = TrainingStatus.PREPARING
@@ -583,8 +598,8 @@ def _register_default_runners():
     factory = RunnerFactory.get_instance()
     if "local" not in factory._runners:
         factory.register("local", LocalRunner())
-    if "remote" not in factory._runners:
-        factory.register("remote", SSHRemoteRunner())
+    if "remote_ssh" not in factory._runners:
+        factory.register("remote_ssh", SSHRemoteRunner())
 
 
 _register_default_runners()

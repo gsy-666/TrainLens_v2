@@ -32,10 +32,10 @@ class TestRunnerFactory:
         assert isinstance(result, LocalRunner)
 
     def test_unimplemented_remote_raises(self):
-        """Unregistered mode raises NotImplementedError."""
+        """Unregistered mode raises ValueError."""
         factory = RunnerFactory()
-        with pytest.raises(NotImplementedError, match="not implemented"):
-            factory.create("remote")
+        with pytest.raises(ValueError, match="Unsupported"):
+            factory.create("unknown_mode")
 
     def test_get_returns_none_for_unknown(self):
         """factory.get() returns None for unregistered mode."""

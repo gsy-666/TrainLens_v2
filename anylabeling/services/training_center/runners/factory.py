@@ -34,11 +34,12 @@ class RunnerFactory:
         """Get or create a runner for the given execution mode.
 
         Raises:
-            NotImplementedError: when execution_mode is not registered.
+            ValueError: when execution_mode is not registered.
+            Never silently falls back to LocalRunner.
         """
         if execution_mode not in self._runners:
-            raise NotImplementedError(
-                f"Runner for execution_mode='{execution_mode}' is not implemented. "
+            raise ValueError(
+                f"Unsupported execution mode: {execution_mode!r}. "
                 f"Available: {list(self._runners.keys())}"
             )
         return self._runners[execution_mode]
@@ -51,6 +52,7 @@ class RunnerFactory:
 def get_runner(execution_mode: str) -> TrainingRunner:
     """Convenience: get a runner from the global factory.
 
-    Raises NotImplementedError for unimplemented modes.
+    Raises ValueError for unimplemented modes.
+    Never silently returns LocalRunner.
     """
     return RunnerFactory.get_instance().create(execution_mode)

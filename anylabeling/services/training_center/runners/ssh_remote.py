@@ -126,13 +126,13 @@ class SSHRemoteRunner(TrainingRunner):
 
     @property
     def execution_mode(self) -> str:
-        return "remote"
+        return "remote_ssh"
 
     @property
     def capability(self) -> RunnerCapability:
         return RunnerCapability(
             name="SSHRemoteRunner",
-            execution_mode="remote",
+            execution_mode="remote_ssh",
             max_workers=1,
             supports_gpu=True,
             supports_cancel=True,

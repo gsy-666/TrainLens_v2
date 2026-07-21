@@ -1061,7 +1061,7 @@ class GuidedTrainingWidget(QWidget):
     def _on_execution_mode_changed(self, idx: int):
         """Toggle between Local and Remote SSH execution modes."""
         mode = self.config_widgets["execution_mode"].currentData()
-        is_remote = mode == "remote"
+        is_remote = mode == "remote_ssh"
         self.remote_profile_widget.setVisible(is_remote)
 
     def _get_selected_training_device(self) -> dict:
@@ -1922,7 +1922,7 @@ print(json.dumps(result, ensure_ascii=False))
         exec_layout = QHBoxLayout()
         self.config_widgets["execution_mode"] = QComboBox()
         self.config_widgets["execution_mode"].addItem("Local", "local")
-        self.config_widgets["execution_mode"].addItem("Remote SSH", "remote")
+        self.config_widgets["execution_mode"].addItem("Remote SSH", "remote_ssh")
         self.config_widgets["execution_mode"].currentIndexChanged.connect(
             self._on_execution_mode_changed
         )
@@ -4209,12 +4209,12 @@ print(json.dumps(result, ensure_ascii=False))
         # Override execution_mode from UI selector (Local/Remote SSH)
         if "execution_mode" in self.config_widgets:
             ui_mode = self.config_widgets["execution_mode"].currentData()
-            if ui_mode and ui_mode != "local":
-                execution_mode = ui_mode
+            if ui_mode and ui_mode == "remote_ssh":
+                execution_mode = "remote_ssh"
 
         # Remote mode: validate profile (profile may stay None for local)
         remote_profile = None
-        if execution_mode == "remote":
+        if execution_mode == "remote_ssh":
             profile_widget = getattr(self, 'remote_profile_widget', None)
             if not profile_widget:
                 QMessageBox.critical(self, self.tr("Remote Not Configured"),
@@ -4337,7 +4337,7 @@ print(json.dumps(result, ensure_ascii=False))
         # ── UI: preparing state ──
         self.training_status = "preparing"
         self.update_training_status_display()
-        if execution_mode == "remote":
+        if execution_mode == "remote_ssh":
             self.append_training_log(self.tr("Preparing remote job..."))
         else:
             self.append_training_log(self.tr("Preparing training..."))
@@ -4398,7 +4398,7 @@ print(json.dumps(result, ensure_ascii=False))
             return
 
         mode = getattr(self.current_job, 'execution_mode', 'local') or 'local'
-        if mode == 'remote':
+        if mode == 'remote_ssh':
             self.append_training_log(self.tr("Remote worker process started, waiting for ready..."))
         else:
             self.append_training_log(self.tr("Job reserved, waiting for worker..."))
