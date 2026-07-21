@@ -162,45 +162,66 @@ class SSHConnectionService:
         except Exception as e:
             return False, f"Unexpected error: {e}"
 
-    def execute_script(self, script: str, python_path: str = "python3",
-                        timeout: int = 30) -> Tuple[int, str, str]:
-        """Execute a Python script on the remote host via stdin piping.
+    def execute(
+        self,
+        command: str,
+        *,
+        stdin_data: Optional[str] = None,
+        timeout: int = 30,
+        get_pty: bool = False,
+    ) -> Tuple[int, str, str]:
+        """Execute a command on the remote host.
 
-        The script is sent through stdin — NOT embedded in shell quotes.
-        This avoids all shell quoting/escaping issues.
+        Supports both plain shell commands and stdin-piped scripts.
 
         Args:
-            script: Python source code (validated locally via compile())
-            python_path: Remote Python executable path
-            timeout: Command timeout in seconds
+            command: Shell command (paths must be shlex.quote()'d by caller).
+            stdin_data: If set, written to stdin; channel shutdown_write after.
+            timeout: Command timeout in seconds.
+            get_pty: Request a pseudo-terminal (needed for some interactive commands).
 
         Returns:
             (exit_code, stdout, stderr)
         """
         if not self.is_connected or not self._client:
-            return -1, "", "Not connected"
+            raise RuntimeError("SSH connection is not established")
 
-        # Validate script locally before sending
-        try:
-            compile(script, "<trainlens_remote_diagnostics>", "exec")
-        except SyntaxError as e:
-            return -1, "", f"Local compile check failed: {e}"
-
-        command = f"{shlex.quote(python_path)} -"
         try:
             stdin, stdout, stderr = self._client.exec_command(
-                command, timeout=timeout,
+                command, timeout=timeout, get_pty=get_pty,
             )
-            stdin.write(script)
-            stdin.flush()
-            stdin.channel.shutdown_write()
+
+            if stdin_data is not None:
+                if isinstance(stdin_data, str):
+                    stdin.write(stdin_data)
+                else:
+                    stdin.write(stdin_data)
+                stdin.flush()
+                stdin.channel.shutdown_write()
 
             exit_code = stdout.channel.recv_exit_status()
             out = stdout.read().decode("utf-8", errors="replace").strip()
             err = stderr.read().decode("utf-8", errors="replace").strip()
             return exit_code, out, err
         except Exception as e:
+            if "SSH connection" in str(e):
+                raise
             return -1, "", str(e)
+
+    def execute_script(self, script: str, python_path: str = "python3",
+                        timeout: int = 30) -> Tuple[int, str, str]:
+        """Execute a Python script on the remote host via stdin piping.
+
+        Convenience wrapper around execute() for Python scripts.
+        The script is validated with compile() before sending.
+        """
+        try:
+            compile(script, "<trainlens_remote_script>", "exec")
+        except SyntaxError as e:
+            return -1, "", f"Local compile check failed: {e}"
+
+        command = f"{shlex.quote(python_path)} -"
+        return self.execute(command, stdin_data=script, timeout=timeout)
 
     def close(self):
         if self._client:
