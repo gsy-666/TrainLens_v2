@@ -7,6 +7,7 @@ All network I/O runs on background threads — GUI never blocks.
 import json
 import logging
 import os
+import posixpath
 import tempfile
 import threading
 import time
@@ -232,16 +233,24 @@ class SSHRemoteRunner(TrainingRunner):
             except Exception as e:
                 raise OSError(f"SFTP open failed: {e}")
 
-            # 4. Create remote job directory
+            # 4. Create remote job directory structure
             _stage("creating job directory")
             remote_base = self._profile.remote_workspace.rstrip("/")
             self._remote_job_dir = f"{remote_base}/trainlens/jobs/{job.job_id}"
+
+            # Create full directory tree
+            dirs = [
+                "config", "dataset", "inputs/model",
+                "logs", "runs", "status",
+            ]
             code, out, err = self._ssh.execute(
-                f"mkdir -p {_shquote(self._remote_job_dir)}/{{dataset,config,runs,logs,status}}",
+                f"mkdir -p " + " ".join(
+                    _shquote(posixpath.join(self._remote_job_dir, d)) for d in dirs
+                ),
                 timeout=10,
             )
             if code != 0:
-                raise OSError(f"Failed to create remote directory: {err}")
+                raise OSError(f"Failed to create remote job directories: {err}")
 
             # 5. Rewrite dataset YAML and upload
             _stage("rewriting dataset YAML")
@@ -252,16 +261,58 @@ class SSHRemoteRunner(TrainingRunner):
             data_yaml = config.get("data", "")
             if data_yaml and os.path.isfile(data_yaml):
                 dataset_dir = os.path.dirname(os.path.abspath(data_yaml))
-                self._upload_dir(dataset_dir, f"{self._remote_job_dir}/dataset")
+                remote_dataset = posixpath.join(self._remote_job_dir, "dataset")
+                _sftp_mkdir_p(self._sftp, remote_dataset)
+                self._upload_dir(dataset_dir, remote_dataset)
 
             # 7. Upload model
             _stage("uploading model")
             model_path = config.get("model", "")
+            remote_model_path = ""
             if model_path and os.path.isfile(model_path):
-                self._sftp.put(
-                    model_path,
-                    f"{self._remote_job_dir}/model/{os.path.basename(model_path)}",
-                )
+                model_name = os.path.basename(model_path)
+                model_size = os.path.getsize(model_path)
+                remote_model_dir = posixpath.join(self._remote_job_dir, "inputs", "model")
+                remote_model_path = posixpath.join(remote_model_dir, model_name)
+
+                _sftp_mkdir_p(self._sftp, remote_model_dir)
+
+                self._emit_event(create_console_output_event(
+                    job_id=job.job_id, timestamp=time.time(),
+                    message=(
+                        f"Local model source: {model_path}\n"
+                        f"Local model exists: True\n"
+                        f"Local model size: {model_size}\n"
+                        f"Remote model directory: {remote_model_dir}\n"
+                        f"Remote model destination: {remote_model_path}"
+                    ),
+                    source="ssh_remote",
+                ))
+
+                # Atomic upload via .part temp file
+                remote_part = remote_model_path + ".part"
+                try:
+                    self._sftp.put(model_path, remote_part)
+                    # Verify size
+                    remote_stat = self._sftp.stat(remote_part)
+                    if remote_stat.st_size != model_size:
+                        raise OSError(
+                            f"Upload size mismatch: local={model_size} remote={remote_stat.st_size}"
+                        )
+                    # Rename to final
+                    self._sftp.rename(remote_part, remote_model_path)
+                    self._emit_event(create_console_output_event(
+                        job_id=job.job_id, timestamp=time.time(),
+                        message="Model upload completed and verified",
+                        source="ssh_remote",
+                    ))
+                except Exception:
+                    # Clean up .part on failure
+                    try:
+                        self._sftp.remove(remote_part)
+                    except Exception:
+                        pass
+                    raise
 
             # 8. Upload worker script
             _stage("uploading worker")
@@ -269,29 +320,34 @@ class SSHRemoteRunner(TrainingRunner):
                 os.path.dirname(__file__), "..", "..", "auto_training",
                 "ultralytics", "training_worker.py",
             )
-            self._sftp.put(local_worker, f"{self._remote_job_dir}/training_worker.py")
+            remote_worker = posixpath.join(self._remote_job_dir, "training_worker.py")
+            self._sftp.put(local_worker, remote_worker)
 
-            # 9. Upload job config
+            # 9. Upload job config (with all paths rewritten to Linux)
             _stage("uploading config")
             remote_config = dict(config)
-            remote_config["data"] = f"{self._remote_job_dir}/config/data.yaml"
-            remote_model = f"{self._remote_job_dir}/model/{os.path.basename(model_path)}" if model_path else config.get("model", "")
-            if remote_model:
-                remote_config["model"] = remote_model
+            remote_config["data"] = posixpath.join(self._remote_job_dir, "config", "data.yaml")
+            if remote_model_path:
+                remote_config["model"] = remote_model_path
+            # Rewrite project to remote runs directory
+            remote_config["project"] = posixpath.join(self._remote_job_dir, "runs")
 
-            import tempfile as _tmp
-            fd, tmp = _tmp.mkstemp(suffix=".json")
+            remote_config_dir = posixpath.join(self._remote_job_dir, "config")
+            _sftp_mkdir_p(self._sftp, remote_config_dir)
+
+            fd, tmp = tempfile.mkstemp(suffix=".json")
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(remote_config, f, ensure_ascii=False)
-            self._sftp.put(tmp, f"{self._remote_job_dir}/config/job_config.json")
+            remote_config_path = posixpath.join(remote_config_dir, "job_config.json")
+            self._sftp.put(tmp, remote_config_path)
             os.unlink(tmp)
 
             # 10. Launch remote worker
             _stage("launching worker")
             remote_py = self._profile.remote_python or "python3"
-            remote_worker = f"{self._remote_job_dir}/training_worker.py"
-            remote_config_path = f"{self._remote_job_dir}/config/job_config.json"
-            command = f"{_shquote(remote_py)} {_shquote(remote_worker)} --config {_shquote(remote_config_path)}"
+            remote_worker = posixpath.join(self._remote_job_dir, "training_worker.py")
+            remote_cfg = posixpath.join(self._remote_job_dir, "config", "job_config.json")
+            command = f"{_shquote(remote_py)} {_shquote(remote_worker)} --config {_shquote(remote_cfg)}"
 
             _log.info("Remote command: %s", command[:200])
             transport = self._ssh._client.get_transport()
@@ -342,14 +398,11 @@ class SSHRemoteRunner(TrainingRunner):
     def _upload_dir(self, local_dir: str, remote_dir: str):
         """Recursively upload a directory via SFTP."""
         sftp = self._sftp
-        try:
-            sftp.stat(remote_dir)
-        except IOError:
-            sftp.mkdir(remote_dir)
+        _sftp_mkdir_p(sftp, remote_dir)
 
         for item in os.listdir(local_dir):
             local_path = os.path.join(local_dir, item)
-            remote_path = f"{remote_dir}/{item}"
+            remote_path = posixpath.join(remote_dir, item)
             if os.path.isfile(local_path):
                 sftp.put(local_path, remote_path)
             elif os.path.isdir(local_path):
@@ -361,7 +414,7 @@ class SSHRemoteRunner(TrainingRunner):
         with open(local_yaml_path, "r", encoding="utf-8") as f:
             data = _yaml_lib.safe_load(f)
 
-        remote_dataset = f"{self._remote_job_dir}/dataset"
+        remote_dataset = posixpath.join(self._remote_job_dir, "dataset")
         data["path"] = remote_dataset
         if "train" in data:
             data["train"] = "images/train"
@@ -370,7 +423,8 @@ class SSHRemoteRunner(TrainingRunner):
         if "test" in data:
             data["test"] = "images/test"
 
-        remote_yaml = f"{self._remote_job_dir}/config/data.yaml"
+        remote_yaml = posixpath.join(self._remote_job_dir, "config", "data.yaml")
+        _sftp_mkdir_p(self._sftp, posixpath.dirname(remote_yaml))
         fd, tmp = tempfile.mkstemp(suffix=".yaml")
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             _yaml_lib.dump(data, f, default_flow_style=False)
@@ -601,6 +655,30 @@ class SSHRemoteRunner(TrainingRunner):
         self._active_job_id = ""
         self._job = None
         self._config = {}
+
+
+def _sftp_mkdir_p(sftp, remote_dir: str):
+    """Recursively create a remote directory (like mkdir -p).
+
+    Uses posixpath to split the path and create each level.
+    Directory already exists → no error.
+    """
+    remote_dir = remote_dir.rstrip("/")
+    if not remote_dir:
+        return
+    parts = remote_dir.split("/")
+    current = ""
+    for part in parts:
+        if not part:
+            continue
+        current = current + "/" + part
+        try:
+            sftp.stat(current)
+        except IOError:
+            try:
+                sftp.mkdir(current)
+            except IOError:
+                pass  # race: another thread/session created it
 
 
 def _shquote(s: str) -> str:
