@@ -400,3 +400,7 @@ class RemoteProfileWidget(QGroupBox):
 
     def get_profile(self) -> Optional[RemoteProfile]:
         return self._profile
+
+    def get_session_password(self) -> str:
+        """Return current session password (never persisted)."""
+        return self._pw_edit.text()

@@ -170,6 +170,15 @@ class SSHRemoteRunner(TrainingRunner):
         if not profile.host:
             return False, "Remote host is not configured"
 
+        if not profile.remote_python:
+            return False, "Remote Python path is not configured"
+
+        # Password check for password auth
+        if profile.auth_method.value == "password":
+            pwd = getattr(job, "_session_password", "") or ""
+            if not pwd:
+                return False, "Password is required for the selected SSH profile"
+
         self._profile = profile
         self._password = getattr(job, "_session_password", "") or ""
 
@@ -186,8 +195,21 @@ class SSHRemoteRunner(TrainingRunner):
         self._stop_requested = False
         self._terminal_event_sent = False
 
+        def _stage(msg: str):
+            _log.info("Remote stage: %s", msg)
+            self._emit_event(create_console_output_event(
+                job_id=job.job_id, timestamp=time.time(),
+                message=f"Remote stage: {msg}", source="ssh_remote",
+            ))
+
         try:
-            # 1. Connect SSH
+            # 1. Validate profile
+            _stage("validating profile")
+            if not self._profile:
+                raise ValueError("Remote profile not set")
+
+            # 2. Connect SSH
+            _stage("connecting SSH")
             self._ssh = SSHConnectionService()
             ok, msg = self._ssh.connect(
                 self._profile,
@@ -195,44 +217,89 @@ class SSHRemoteRunner(TrainingRunner):
                 on_host_key=self._on_host_key,
             )
             if not ok:
-                self._emit_event(create_failed_event(
-                    job_id=job.job_id, timestamp=time.time(),
-                    error=f"SSH connection failed: {msg}",
-                    source="ssh_remote",
-                ))
-                self._terminal_event_sent = True
-                return False, f"SSH connection failed: {msg}"
+                raise ConnectionError(f"SSH connection failed: {msg}")
 
             fingerprint = msg if ":" in msg else ""
             if fingerprint and self._profile:
                 self._profile.known_host_fingerprint = fingerprint
                 get_profile_store().save(self._profile)
 
-            # 2. Create remote job directory
+            # 3. Open SFTP
+            _stage("opening SFTP")
+            import paramiko
+            try:
+                self._sftp = self._ssh._client.open_sftp()
+            except Exception as e:
+                raise OSError(f"SFTP open failed: {e}")
+
+            # 4. Create remote job directory
+            _stage("creating job directory")
             remote_base = self._profile.remote_workspace.rstrip("/")
             self._remote_job_dir = f"{remote_base}/trainlens/jobs/{job.job_id}"
-            code, out, err = self._ssh.execute(f"mkdir -p {_shquote(self._remote_job_dir)}/{{dataset,config,runs,logs,status}}", timeout=10)
+            code, out, err = self._ssh.execute(
+                f"mkdir -p {_shquote(self._remote_job_dir)}/{{dataset,config,runs,logs,status}}",
+                timeout=10,
+            )
             if code != 0:
-                return False, f"Failed to create remote directory: {err}"
+                raise OSError(f"Failed to create remote directory: {err}")
 
-            # 3. SFTP upload
-            import paramiko
-            self._sftp = self._ssh._client.open_sftp()
-            self._upload_files(job, config)
+            # 5. Rewrite dataset YAML and upload
+            _stage("rewriting dataset YAML")
+            self._rewrite_data_yaml(config.get("data", ""))
 
-            # 4. Build remote command
+            # 6. Upload dataset
+            _stage("uploading dataset")
+            data_yaml = config.get("data", "")
+            if data_yaml and os.path.isfile(data_yaml):
+                dataset_dir = os.path.dirname(os.path.abspath(data_yaml))
+                self._upload_dir(dataset_dir, f"{self._remote_job_dir}/dataset")
+
+            # 7. Upload model
+            _stage("uploading model")
+            model_path = config.get("model", "")
+            if model_path and os.path.isfile(model_path):
+                self._sftp.put(
+                    model_path,
+                    f"{self._remote_job_dir}/model/{os.path.basename(model_path)}",
+                )
+
+            # 8. Upload worker script
+            _stage("uploading worker")
+            local_worker = os.path.join(
+                os.path.dirname(__file__), "..", "..", "auto_training",
+                "ultralytics", "training_worker.py",
+            )
+            self._sftp.put(local_worker, f"{self._remote_job_dir}/training_worker.py")
+
+            # 9. Upload job config
+            _stage("uploading config")
+            remote_config = dict(config)
+            remote_config["data"] = f"{self._remote_job_dir}/config/data.yaml"
+            remote_model = f"{self._remote_job_dir}/model/{os.path.basename(model_path)}" if model_path else config.get("model", "")
+            if remote_model:
+                remote_config["model"] = remote_model
+
+            import tempfile as _tmp
+            fd, tmp = _tmp.mkstemp(suffix=".json")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(remote_config, f, ensure_ascii=False)
+            self._sftp.put(tmp, f"{self._remote_job_dir}/config/job_config.json")
+            os.unlink(tmp)
+
+            # 10. Launch remote worker
+            _stage("launching worker")
             remote_py = self._profile.remote_python or "python3"
             remote_worker = f"{self._remote_job_dir}/training_worker.py"
-            remote_config = f"{self._remote_job_dir}/config/job_config.json"
-            command = f"{_shquote(remote_py)} {_shquote(remote_worker)} --config {_shquote(remote_config)}"
+            remote_config_path = f"{self._remote_job_dir}/config/job_config.json"
+            command = f"{_shquote(remote_py)} {_shquote(remote_worker)} --config {_shquote(remote_config_path)}"
 
-            # 5. Launch remote process
-            _log.info("Remote command: %s", command)
+            _log.info("Remote command: %s", command[:200])
             transport = self._ssh._client.get_transport()
             channel = transport.open_session()
             channel.exec_command(command)
 
-            # 6. Start streaming
+            # 11. Start streaming stdout
+            _stage("streaming output")
             self._stream_worker = _RemoteStreamWorker(channel)
             self._stream_thread = QThread(self._parent)
             self._stream_worker.moveToThread(self._stream_thread)
@@ -253,73 +320,24 @@ class SSHRemoteRunner(TrainingRunner):
                 source="ssh_remote",
             ))
 
-            return True, "Worker process started"
+            return True, "Remote worker process started"
 
         except Exception as e:
-            _log.error("SSHRemoteRunner.start: %s\n%s", e, _traceback.format_exc())
+            error_msg = str(e)
+            # Sanitize: never log passwords
+            if self._password and self._password in error_msg:
+                error_msg = error_msg.replace(self._password, "***")
+            _log.error("SSHRemoteRunner.start: %s", error_msg, exc_info=True)
+
             self._emit_event(create_failed_event(
                 job_id=job.job_id, timestamp=time.time(),
-                error=f"Remote start failed: {e}",
+                error=error_msg,
                 source="ssh_remote",
             ))
             self._terminal_event_sent = True
             self._cleanup_resources()
-            return False, f"Remote start failed: {e}"
+            return False, error_msg
 
-    def _upload_files(self, job: TrainingJob, config: Dict[str, Any]):
-        """Upload dataset, model, worker script, and config via SFTP."""
-        _log.info("Uploading files to %s", self._remote_job_dir)
-        sftp = self._sftp
-
-        def _ensure_remote_dir(path):
-            try:
-                sftp.stat(path)
-            except IOError:
-                parts = path.strip("/").split("/")
-                for i in range(1, len(parts) + 1):
-                    d = "/" + "/".join(parts[:i])
-                    try:
-                        sftp.stat(d)
-                    except IOError:
-                        sftp.mkdir(d)
-
-        # Remote worker script
-        local_worker = os.path.join(
-            os.path.dirname(__file__), "..", "..", "auto_training",
-            "ultralytics", "training_worker.py",
-        )
-        remote_worker = f"{self._remote_job_dir}/training_worker.py"
-        sftp.put(local_worker, remote_worker)
-
-        # Job config
-        _ensure_remote_dir(f"{self._remote_job_dir}/config")
-        config_path = f"{self._remote_job_dir}/config/job_config.json"
-
-        # Rewrite data.yaml and model path for remote
-        remote_config = dict(config)
-        data_yaml = config.get("data", "")
-        if data_yaml:
-            remote_config["data"] = self._rewrite_data_yaml(data_yaml)
-        model = config.get("model", "")
-        if model and os.path.isfile(model):
-            remote_model = f"{self._remote_job_dir}/model/{os.path.basename(model)}"
-            _ensure_remote_dir(f"{self._remote_job_dir}/model")
-            sftp.put(model, remote_model)
-            remote_config["model"] = remote_model
-
-        # Write config to temp and upload
-        fd, tmp = tempfile.mkstemp(suffix=".json")
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(remote_config, f, ensure_ascii=False)
-        sftp.put(tmp, config_path)
-        os.unlink(tmp)
-
-        # Upload dataset images and labels
-        if data_yaml and os.path.isfile(data_yaml):
-            import yaml as _yaml_lib
-            dataset_dir = os.path.dirname(os.path.abspath(data_yaml))
-            _ensure_remote_dir(f"{self._remote_job_dir}/dataset")
-            self._upload_dir(dataset_dir, f"{self._remote_job_dir}/dataset")
 
     def _upload_dir(self, local_dir: str, remote_dir: str):
         """Recursively upload a directory via SFTP."""

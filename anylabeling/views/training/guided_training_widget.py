@@ -4313,6 +4313,12 @@ print(json.dumps(result, ensure_ascii=False))
             remote_username=remote_profile.username if remote_profile else None,
             remote_workspace=remote_profile.remote_workspace if remote_profile else None,
             remote_python=remote_profile.remote_python if remote_profile else None,
+            # Session password (memory only, never persisted)
+            _session_password=(
+                profile_widget.get_session_password()
+                if (remote_profile and remote_profile.auth_method.value == "password")
+                else None
+            ),
         )
 
         adapter = UltralyticsAdapter()
@@ -4331,7 +4337,10 @@ print(json.dumps(result, ensure_ascii=False))
         # ── UI: preparing state ──
         self.training_status = "preparing"
         self.update_training_status_display()
-        self.append_training_log(self.tr("Preparing training..."))
+        if execution_mode == "remote":
+            self.append_training_log(self.tr("Preparing remote job..."))
+        else:
+            self.append_training_log(self.tr("Preparing training..."))
         self.start_training_button.setEnabled(False)
         self.stop_training_button.setVisible(True)
         self.export_button.setVisible(False)
@@ -4388,7 +4397,11 @@ print(json.dumps(result, ensure_ascii=False))
             self._reset_start_ui()
             return
 
-        self.append_training_log(self.tr(f"Job reserved, waiting for worker..."))
+        mode = getattr(self.current_job, 'execution_mode', 'local') or 'local'
+        if mode == 'remote':
+            self.append_training_log(self.tr("Remote worker process started, waiting for ready..."))
+        else:
+            self.append_training_log(self.tr("Job reserved, waiting for worker..."))
 
     def _on_prep_error(self, error_msg):
         """Called on GUI thread when background preparation fails."""
