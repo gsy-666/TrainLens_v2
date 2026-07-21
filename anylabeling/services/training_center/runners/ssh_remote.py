@@ -483,16 +483,32 @@ class SSHRemoteRunner(TrainingRunner):
                 message=data.get("message", ""),
                 source="ssh_remote",
             ))
+        elif event_type == "epoch_metrics":
+            # Forward as structured EPOCH_METRICS event for progress + metrics
+            self._emit_event(TrainingEvent(
+                schema_version=1, job_id=job_id,
+                event_type=TrainingEventType.EPOCH_METRICS,
+                timestamp=ts,
+                payload=data, source="ssh_remote",
+            ))
         elif event_type == "training_completed":
             if not self._terminal_event_sent:
+                save_dir = data.get("save_dir", "")
+                # Download artifacts before marking completed
+                self._emit_event(create_console_output_event(
+                    job_id=job_id, timestamp=ts,
+                    message=f"Remote stage: downloading artifacts\nRemote save directory: {save_dir}",
+                    source="ssh_remote",
+                ))
+                local_dir = self._download_results(job_id, save_dir)
+
                 self._emit_event(create_completed_event(
                     job_id=job_id, timestamp=ts,
                     source="ssh_remote",
                     results=data.get("results"),
-                    save_dir=data.get("save_dir", self._remote_job_dir + "/runs"),
+                    save_dir=local_dir or save_dir,
                 ))
                 self._terminal_event_sent = True
-                self._download_results(job_id)
         elif event_type == "training_error":
             if not self._terminal_event_sent:
                 self._emit_event(create_failed_event(
@@ -564,47 +580,100 @@ class SSHRemoteRunner(TrainingRunner):
 
     # ── download ──
 
-    def _download_results(self, job_id: str):
-        """Download artifacts from remote to local store."""
+    def _download_results(self, job_id: str, remote_save_dir: str = "") -> str:
+        """Download artifacts from remote to local store.
+
+        Returns the local directory path, or empty string on failure.
+        """
+        if not remote_save_dir:
+            remote_save_dir = posixpath.join(self._remote_job_dir, "runs")
+
         local_base = os.path.join(
             os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
             "TrainLens", "remote_runs", job_id,
         )
         os.makedirs(local_base, exist_ok=True)
 
+        sftp = self._sftp
+        if not sftp:
+            _log.warning("No SFTP connection for artifact download")
+            return ""
+
+        downloaded = []
         patterns = [
-            "runs/*/weights/best.pt",
-            "runs/*/weights/last.pt",
-            "runs/*/results.csv",
-            "runs/*/args.yaml",
-            "runs/*/results.png",
-            "runs/*/confusion_matrix*.png",
-            "runs/*/train_batch*.jpg",
-            "runs/*/val_batch*.jpg",
-            "logs/*.log",
-            "status/status.json",
+            "results.csv", "args.yaml",
+            "weights/best.pt", "weights/last.pt",
+        ]
+        optional = [
+            "results.png", "confusion_matrix.png",
+            "confusion_matrix_normalized.png",
+            "PR_curve.png", "P_curve.png", "R_curve.png", "F1_curve.png",
         ]
 
+        def _try_dl(rel: str):
+            remote_path = posixpath.join(remote_save_dir, rel)
+            local_path = os.path.join(local_base, os.path.basename(rel))
+            try:
+                sftp.stat(remote_path)
+                sftp.get(remote_path, local_path)
+                downloaded.append(rel)
+                self._emit_event(create_console_output_event(
+                    job_id=job_id, timestamp=time.time(),
+                    message=f"Downloaded {rel}",
+                    source="ssh_remote",
+                ))
+            except Exception:
+                pass
+
+        for pattern in patterns:
+            _try_dl(pattern)
+
+        for pattern in optional:
+            _try_dl(pattern)
+
+        # Also try to find results.csv in a subdirectory (runs/expN/results.csv)
         try:
-            for pattern in patterns:
-                try:
-                    import fnmatch
-                    remote_dir = os.path.dirname(f"{self._remote_job_dir}/{pattern}")
-                    # Find matching files
-                    base_pattern = os.path.basename(pattern)
+            # Look for a subdirectory under remote_save_dir that has results.csv
+            # If remote_save_dir itself doesn't have results.csv
+            if "results.csv" not in downloaded:
+                for entry in sftp.listdir(remote_save_dir):
+                    sub = posixpath.join(remote_save_dir, entry)
                     try:
-                        files = self._sftp.listdir(remote_dir)
+                        sftp.stat(posixpath.join(sub, "results.csv"))
+                        # Found a run subdirectory — download from there
+                        for pattern in patterns:
+                            remote_path = posixpath.join(sub, pattern)
+                            local_path = os.path.join(local_base, os.path.basename(pattern))
+                            try:
+                                sftp.get(remote_path, local_path)
+                                downloaded.append(f"{entry}/{pattern}")
+                            except Exception:
+                                pass
+                        for pattern in optional:
+                            remote_path = posixpath.join(sub, pattern)
+                            local_path = os.path.join(local_base, os.path.basename(pattern))
+                            try:
+                                sftp.get(remote_path, local_path)
+                                downloaded.append(f"{entry}/{pattern}")
+                            except Exception:
+                                pass
+                        break
                     except IOError:
                         continue
-                    for f in files:
-                        if fnmatch.fnmatch(f, base_pattern):
-                            remote_path = f"{remote_dir}/{f}"
-                            local_path = os.path.join(local_base, f)
-                            self._sftp.get(remote_path, local_path)
-                except Exception:
-                    pass
         except Exception as e:
-            _log.warning("Partial download: %s", e)
+            _log.warning("Remote directory listing failed: %s", e)
+
+        self._emit_event(create_console_output_event(
+            job_id=job_id, timestamp=time.time(),
+            message=(
+                f"Remote artifact synchronization completed\n"
+                f"Downloaded: {len(downloaded)} files\n"
+                f"Local path: {local_base}"
+            ),
+            source="ssh_remote",
+        ))
+
+        return local_base
 
     # ── cancel ──
 

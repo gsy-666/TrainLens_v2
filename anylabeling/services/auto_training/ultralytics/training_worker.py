@@ -129,6 +129,8 @@ def main():
 
     # ── Run training ──
     save_dir = ""
+    epochs_completed = 0
+    best_metric = None
     try:
         sys.stdout = log_stream
         sys.stderr = log_stream
@@ -149,6 +151,30 @@ def main():
         model = YOLO(model_path)
         train_args["verbose"] = False
         train_args["show"] = False
+
+        # ── Register epoch_metrics callback ──
+        total_epochs = train_args.get("epochs", 1)
+
+        def on_fit_epoch_end(trainer):
+            nonlocal epochs_completed, best_metric
+            epochs_completed = trainer.epoch + 1
+            metrics = {}
+            for k, v in trainer.metrics.items():
+                try:
+                    metrics[str(k)] = round(float(v), 6)
+                except (TypeError, ValueError):
+                    metrics[str(k)] = str(v)
+            best_metric = trainer.best_fitness if hasattr(trainer, 'best_fitness') else None
+            try:
+                best_metric = round(float(best_metric), 6) if best_metric is not None else None
+            except (TypeError, ValueError):
+                pass
+            emit_event("epoch_metrics", output_stream=old_stdout,
+                       epoch=epochs_completed, total_epochs=total_epochs,
+                       metrics=metrics, best_metric=best_metric)
+
+        model.add_callback("on_fit_epoch_end", on_fit_epoch_end)
+
         result = model.train(**train_args)
         save_dir = str(result.save_dir) if hasattr(result, "save_dir") else ""
     except Exception as e:
@@ -163,7 +189,10 @@ def main():
 
     emit_event("training_completed", output_stream=old_stdout,
                results="Training completed successfully",
-               save_dir=save_dir)
+               save_dir=save_dir,
+               epochs_completed=epochs_completed,
+               total_epochs=total_epochs,
+               best_metric=best_metric)
 
 
 if __name__ == "__main__":
