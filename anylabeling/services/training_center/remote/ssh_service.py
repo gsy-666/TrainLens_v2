@@ -5,6 +5,7 @@ All network operations run on a QThread worker — never blocks the GUI.
 
 import logging
 import os
+import shlex
 import threading
 import time
 from io import StringIO
@@ -161,16 +162,39 @@ class SSHConnectionService:
         except Exception as e:
             return False, f"Unexpected error: {e}"
 
-    def execute(self, command: str, timeout: int = 30) -> Tuple[int, str, str]:
-        """Execute a command on the remote host.
+    def execute_script(self, script: str, python_path: str = "python3",
+                        timeout: int = 30) -> Tuple[int, str, str]:
+        """Execute a Python script on the remote host via stdin piping.
+
+        The script is sent through stdin — NOT embedded in shell quotes.
+        This avoids all shell quoting/escaping issues.
+
+        Args:
+            script: Python source code (validated locally via compile())
+            python_path: Remote Python executable path
+            timeout: Command timeout in seconds
 
         Returns:
             (exit_code, stdout, stderr)
         """
         if not self.is_connected or not self._client:
             return -1, "", "Not connected"
+
+        # Validate script locally before sending
         try:
-            stdin, stdout, stderr = self._client.exec_command(command, timeout=timeout)
+            compile(script, "<trainlens_remote_diagnostics>", "exec")
+        except SyntaxError as e:
+            return -1, "", f"Local compile check failed: {e}"
+
+        command = f"{shlex.quote(python_path)} -"
+        try:
+            stdin, stdout, stderr = self._client.exec_command(
+                command, timeout=timeout,
+            )
+            stdin.write(script)
+            stdin.flush()
+            stdin.channel.shutdown_write()
+
             exit_code = stdout.channel.recv_exit_status()
             out = stdout.read().decode("utf-8", errors="replace").strip()
             err = stderr.read().decode("utf-8", errors="replace").strip()

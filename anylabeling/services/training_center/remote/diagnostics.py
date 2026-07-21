@@ -97,8 +97,24 @@ print(json.dumps(result))
 
 
 def build_diagnostic_script(workspace: str) -> str:
-    """Build the remote diagnostic Python script."""
-    return DIAGNOSTIC_SCRIPT.replace("{workspace}", workspace.replace("\\", "\\\\"))
+    """Build the remote diagnostic Python script.
+
+    The workspace is embedded as a Python raw string (r"...") to handle
+    backslashes and special characters correctly.
+    The script is validated with compile() before sending via stdin.
+    """
+    # Use repr() for safe Python string literal embedding
+    ws_literal = repr(str(workspace))
+    script = DIAGNOSTIC_SCRIPT.replace("{workspace}", ws_literal)
+
+    # Validate locally before sending
+    try:
+        compile(script, "<trainlens_remote_diagnostics>", "exec")
+    except SyntaxError as e:
+        _log.error("Diagnostic script failed local compile: %s", e)
+        raise ValueError(f"Diagnostic script has syntax errors: {e}") from e
+
+    return script
 
 
 def parse_diagnostic_output(stdout: str) -> Dict[str, Any]:
@@ -157,7 +173,10 @@ def run_remote_diagnostics(
     # 2. Remote Python
     progress("Checking Python...")
     py = profile.remote_python or "python3"
-    code, out, err = ssh.execute(f'"{py}" -c "import sys; print(sys.executable); print(sys.version)"', timeout=15)
+    code, out, err = ssh.execute_script(
+        "import sys; print(sys.executable); print(sys.version)",
+        python_path=py, timeout=15,
+    )
     if code == 0:
         lines = out.strip().split("\n")
         py_path = lines[0].strip() if lines else ""
@@ -170,13 +189,11 @@ def run_remote_diagnostics(
             f"Python not found at '{py}': {err or out}",
             {"exit_code": code, "stderr": err})
 
-    # 3. Full diagnostics via remote Python JSON script
+    # 3. Full diagnostics via remote Python (stdin piping — no shell quoting)
     progress("Running diagnostics...")
+    py = profile.remote_python or "python3"
     script = build_diagnostic_script(profile.remote_workspace or "/tmp")
-    code, out, err = ssh.execute(
-        f'"{profile.remote_python or "python3"}" -c "{script}"',
-        timeout=30,
-    )
+    code, out, err = ssh.execute_script(script, python_path=py, timeout=30)
     if code != 0:
         add("diag", "Remote Diagnostics", DiagnosticStatus.ERROR,
             f"Script failed (exit {code}): {err or out}")
