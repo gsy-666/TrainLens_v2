@@ -346,8 +346,22 @@ class SSHRemoteRunner(TrainingRunner):
             _stage("launching worker")
             remote_py = self._profile.remote_python or "python3"
             remote_worker = posixpath.join(self._remote_job_dir, "training_worker.py")
-            remote_cfg = posixpath.join(self._remote_job_dir, "config", "job_config.json")
-            command = f"{_shquote(remote_py)} {_shquote(remote_worker)} --config {_shquote(remote_cfg)}"
+            # Worker CLI contract: --payload <json_file_path>
+            remote_payload = posixpath.join(self._remote_job_dir, "config", "job_config.json")
+            command = (
+                f"{_shquote(remote_py)} {_shquote(remote_worker)} "
+                f"--payload {_shquote(remote_payload)}"
+            )
+
+            self._emit_event(create_console_output_event(
+                job_id=job.job_id, timestamp=time.time(),
+                message=(
+                    f"Worker CLI contract: --payload\n"
+                    f"Remote worker: {remote_worker}\n"
+                    f"Remote payload: {remote_payload}"
+                ),
+                source="ssh_remote",
+            ))
 
             _log.info("Remote command: %s", command[:200])
             transport = self._ssh._client.get_transport()
@@ -527,7 +541,12 @@ class SSHRemoteRunner(TrainingRunner):
             else:
                 self._emit_event(create_failed_event(
                     job_id=self._active_job_id, timestamp=time.time(),
-                    error=f"Remote process exited with code {exit_code}",
+                    error=(
+                        f"Remote worker exited before ready with code {exit_code}.\n"
+                        f"Check the remote log for details:\n"
+                        f"  ssh {self._profile.username}@{self._profile.host} "
+                        f"'cat {self._remote_job_dir}/logs/*.log'"
+                    ),
                     source="ssh_remote",
                 ))
             self._terminal_event_sent = True
