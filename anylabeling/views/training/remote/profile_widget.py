@@ -1,5 +1,6 @@
 """Remote Profile Editor Widget."""
 
+import logging
 import os
 import uuid
 from typing import Optional
@@ -17,6 +18,9 @@ from anylabeling.services.training_center.remote.models import (
 )
 from anylabeling.services.training_center.remote.storage import get_profile_store
 from anylabeling.services.training_center.remote.diagnostics_worker import DiagnosticsWorker
+
+
+_log = logging.getLogger(__name__)
 
 
 class HostKeyDialog(QDialog):
@@ -344,6 +348,10 @@ class RemoteProfileWidget(QGroupBox):
             self._worker.confirm_host_key(False, False)
 
     def _on_item(self, item: DiagnosticItem):
+        _log.info("Diagnostic item received by UI: [%s] %s", item.status.value, item.label)
+        self._render_item(item)
+
+    def _render_item(self, item: DiagnosticItem):
         color = {
             DiagnosticStatus.PASS: "green",
             DiagnosticStatus.WARNING: "orange",
@@ -357,7 +365,19 @@ class RemoteProfileWidget(QGroupBox):
 
     def _on_diagnostics_finished(self, results: list):
         self._results = results
-        self._results_text.append("\n--- Diagnostics Complete ---")
+        _log.info("Diagnostics finished: %d items received", len(results))
+
+        # Fallback: render any items not yet added to the text widget
+        # (handles cases where item_found signals were missed)
+        current_text = self._results_text.toPlainText()
+        for item in results:
+            # Check if this item's label already appears in the output
+            if item.label not in current_text:
+                _log.info("Rendering missed item: [%s] %s", item.status.value, item.label)
+                self._render_item(item)
+
+        self._results_text.append(f"\n--- Diagnostics Complete ({len(results)} items) ---")
+        self._cleanup_thread()
         self._cleanup_thread()
 
     def _on_diagnostics_error(self, err: str):

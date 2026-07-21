@@ -45,9 +45,31 @@ class DiagnosticsWorker(QObject):
     def run(self):
         """Main worker entry point (runs on QThread)."""
         results: List[DiagnosticItem] = []
+        _log.info("Diagnostics worker started for %s@%s:%d",
+                   self._profile.username, self._profile.host, self._profile.port)
+
+        def _add_item(stage: str, label: str, status: DiagnosticStatus,
+                      message: str = "", details: dict = None) -> DiagnosticItem:
+            item = DiagnosticItem(stage=stage, label=label, status=status,
+                                  message=message, details=details or {})
+            results.append(item)
+            _log.info("Diagnostic item: [%s] %s: %s", status.value, label, message[:80])
+            try:
+                self.item_found.emit(item)
+            except Exception as e:
+                _log.warning("Failed to emit item_found: %s", e)
+            return item
 
         try:
             self._ssh = SSHConnectionService()
+
+            # ── Validate password ──
+            if self._profile.auth_method.value == "password" and not self._password:
+                _add_item("connection", "Authentication",
+                          DiagnosticStatus.ERROR,
+                          "Authentication failed: password is required for password auth.")
+                self.finished.emit(results)
+                return
 
             # ── Connect ──
             self.stage_changed.emit("Connecting via SSH...")
@@ -73,30 +95,26 @@ class DiagnosticsWorker(QObject):
                 password=self._password,
                 on_host_key=on_host_key,
             )
+            _log.info("SSH connection result: ok=%s msg=%s", ok, msg[:100] if msg else "")
+
             if self._cancelled:
-                results.append(DiagnosticItem(
-                    stage="connection", label="Connection",
-                    status=DiagnosticStatus.ERROR, message="Cancelled by user",
-                ))
+                _add_item("connection", "Connection",
+                          DiagnosticStatus.ERROR, "Cancelled by user")
                 self.finished.emit(results)
                 return
 
             if not ok:
-                results.append(DiagnosticItem(
-                    stage="connection", label="Connection",
-                    status=DiagnosticStatus.ERROR, message=msg,
-                ))
+                _add_item("connection", "SSH Connection",
+                          DiagnosticStatus.ERROR, msg)
                 self.finished.emit(results)
                 return
 
             # Save fingerprint
             fingerprint = msg if ":" in msg else self._ssh.get_fingerprint()
-            results.append(DiagnosticItem(
-                stage="connection", label="SSH Connection",
-                status=DiagnosticStatus.PASS,
-                message=f"Connected to {self._profile.host}:{self._profile.port} · {fingerprint}",
-                details={"fingerprint": fingerprint},
-            ))
+            _add_item("connection", "SSH Connection",
+                      DiagnosticStatus.PASS,
+                      f"Connected to {self._profile.host}:{self._profile.port} · {fingerprint}",
+                      {"fingerprint": fingerprint})
 
             # ── Run diagnostics ──
             diag_results = run_remote_diagnostics(
@@ -107,14 +125,17 @@ class DiagnosticsWorker(QObject):
                 if self._cancelled:
                     break
                 results.append(item)
-                self.item_found.emit(item)
+                _log.info("Diagnostic item (remote): [%s] %s: %s",
+                          item.status.value, item.label, item.message[:80])
+                try:
+                    self.item_found.emit(item)
+                except Exception as e:
+                    _log.warning("Failed to emit item_found: %s", e)
 
         except Exception as e:
             _log.error("Diagnostics failed: %s", e, exc_info=True)
-            results.append(DiagnosticItem(
-                stage="fatal", label="Fatal Error",
-                status=DiagnosticStatus.ERROR, message=str(e),
-            ))
+            _add_item("fatal", "Fatal Error",
+                      DiagnosticStatus.ERROR, str(e))
         finally:
             if self._ssh:
                 try:
@@ -123,4 +144,5 @@ class DiagnosticsWorker(QObject):
                     pass
             self._ssh = None
 
+        _log.info("Diagnostics finished: %d items", len(results))
         self.finished.emit(results)
