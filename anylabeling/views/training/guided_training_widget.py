@@ -4280,7 +4280,9 @@ print(json.dumps(result, ensure_ascii=False))
             # CPU or Auto without external runtime — safe to use GUI Python
             from anylabeling.services.training_center.device_service import resolve_training_device
             resolved_device = resolve_training_device(requested_device)
-            execution_mode = "local"
+            # Preserve remote_ssh if already set (don't overwrite to local)
+            if execution_mode != "remote_ssh":
+                execution_mode = "local"
 
         self.current_job = TrainingJob(
             job_id=job_id,
@@ -4320,6 +4322,43 @@ print(json.dumps(result, ensure_ascii=False))
                 else None
             ),
         )
+
+        # ── Hard assertion: execution_mode must be preserved ──
+        selected_mode = self.config_widgets["execution_mode"].currentData() if "execution_mode" in self.config_widgets else "local"
+        job_mode = self.current_job.execution_mode or "local"
+        self.append_training_log(
+            f"Guided selection mode: {selected_mode!r}\n"
+            f"Job execution mode before reserve: {job_mode!r}"
+        )
+        if selected_mode != job_mode:
+            QMessageBox.critical(
+                self, self.tr("Internal Error"),
+                self.tr(
+                    "Execution mode lost while creating job:\n"
+                    f"Selected: {selected_mode!r}\n"
+                    f"Job: {job_mode!r}"
+                )
+            )
+            self.current_job = None
+            return
+
+        # Remote mode: validate required fields
+        if job_mode == "remote_ssh":
+            required_fields = {
+                "remote_profile_id": self.current_job.remote_profile_id,
+                "remote_host": self.current_job.remote_host,
+                "remote_username": self.current_job.remote_username,
+                "remote_workspace": self.current_job.remote_workspace,
+                "remote_python": self.current_job.remote_python,
+            }
+            missing = [k for k, v in required_fields.items() if not v]
+            if missing:
+                QMessageBox.critical(
+                    self, self.tr("Remote Job Incomplete"),
+                    self.tr(f"Remote job is missing fields: {', '.join(missing)}")
+                )
+                self.current_job = None
+                return
 
         adapter = UltralyticsAdapter()
         ok, msg = self.job_manager.reserve_job(self.current_job, adapter)
