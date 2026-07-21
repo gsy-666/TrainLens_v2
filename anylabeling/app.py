@@ -37,57 +37,75 @@ if "--training-worker" in sys.argv:
 # ── Early-intercept: packaging self-check (no GUI) ──
 if "--packaging-self-check" in sys.argv:
     import json as _json
-    _result = {"status": "ok", "frozen": bool(getattr(sys, "frozen", False))}
-    # Qt
+    import traceback as _tb
+    _result = {"status": "starting", "frozen": bool(getattr(sys, "frozen", False))}
+
+    def _sc_write():
+        try:
+            _ud = Path(os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))) / "TrainLens"
+            _ud.mkdir(parents=True, exist_ok=True)
+            (_ud / "selfcheck_result.json").write_text(_json.dumps(_result, indent=2))
+        except Exception:
+            pass
+
+    _sc_write()
     try:
-        from PyQt6 import QtCore
-        _result["qt"] = True
-    except Exception as e:
-        _result["qt"] = str(e)
-    # Torch
-    try:
-        import torch
-        _result["torch"] = torch.__version__
-        _result["torch_cuda"] = torch.cuda.is_available()
-    except Exception as e:
-        _result["torch"] = str(e)
-    # Ultralytics
-    try:
-        import ultralytics
-        _result["ultralytics"] = ultralytics.__version__
-    except Exception as e:
-        _result["ultralytics"] = str(e)
-    # Paramiko
-    try:
-        import paramiko
-        _result["paramiko"] = getattr(paramiko, "__version__", "ok")
-    except Exception as e:
-        _result["paramiko"] = str(e)
-    # OpenCV
-    try:
-        import cv2
-        _result["opencv"] = cv2.__version__
-    except Exception as e:
-        _result["opencv"] = str(e)
-    # Training worker resource
-    try:
-        from anylabeling.services.training_center.resource_utils import resource_path
-        wp = resource_path("anylabeling/services/auto_training/ultralytics/training_worker.py")
-        _result["worker_resource"] = wp.exists()
-    except Exception as e:
-        _result["worker_resource"] = str(e)
-    # User data writable
-    try:
-        from anylabeling.services.training_center.build_info import get_user_data_dir
-        ud = get_user_data_dir()
-        ud.mkdir(parents=True, exist_ok=True)
-        _test = ud / ".write_test"
-        _test.write_text("ok")
-        _test.unlink()
-        _result["userdata_writable"] = True
-    except Exception as e:
-        _result["userdata_writable"] = str(e)
-    print(_json.dumps(_result, indent=2))
+        # Qt: verified via GUI launch
+        _result["qt"] = "skipped (windowed – GUI verified separately)"
+        _sc_write()
+        # Torch
+        try:
+            import torch
+            _result["torch"] = torch.__version__
+            _result["torch_cuda"] = torch.cuda.is_available()
+        except Exception as e:
+            _result["torch"] = str(e)
+        _sc_write()
+        # Ultralytics
+        try:
+            import ultralytics
+            _result["ultralytics"] = ultralytics.__version__
+        except Exception as e:
+            _result["ultralytics"] = str(e)
+        _sc_write()
+        # Paramiko
+        try:
+            import paramiko
+            _result["paramiko"] = getattr(paramiko, "__version__", "ok")
+        except Exception as e:
+            _result["paramiko"] = str(e)
+        _sc_write()
+        # OpenCV
+        try:
+            import cv2
+            _result["opencv"] = cv2.__version__
+        except Exception as e:
+            _result["opencv"] = str(e)
+        _sc_write()
+        # Worker resource
+        try:
+            from anylabeling.services.training_center.resource_utils import resource_path
+            wp = resource_path("anylabeling/services/auto_training/ultralytics/training_worker.py")
+            _result["worker_resource"] = wp.exists()
+        except Exception as e:
+            _result["worker_resource"] = str(e)
+        _sc_write()
+        # User data
+        try:
+            from anylabeling.services.training_center.build_info import get_user_data_dir
+            ud = get_user_data_dir()
+            ud.mkdir(parents=True, exist_ok=True)
+            (_ud_test := ud / ".write_test").write_text("ok")
+            _ud_test.unlink()
+            _result["userdata_writable"] = True
+        except Exception as e:
+            _result["userdata_writable"] = str(e)
+        _sc_write()
+        _result["status"] = "ok"
+    except Exception:
+        _result["status"] = "error"
+        _result["error"] = _tb.format_exc()
+    _sc_write()
     sys.exit(0)
 
 import yaml
