@@ -20,6 +20,76 @@ from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
+# ── Early-intercept: training-worker mode (must not import Qt) ──
+if "--training-worker" in sys.argv:
+    # Parse just enough to get the payload path
+    _worker_parser = argparse.ArgumentParser(add_help=False)
+    _worker_parser.add_argument("--training-worker", action="store_true")
+    _worker_parser.add_argument("--payload", type=str, required=True)
+    _worker_args, _ = _worker_parser.parse_known_args()
+    if _worker_args.training_worker and _worker_args.payload:
+        from anylabeling.services.auto_training.ultralytics.training_worker import main as worker_main
+        # Override sys.argv so the worker's own argparse works
+        sys.argv = [sys.argv[0], "--payload", _worker_args.payload]
+        worker_main()
+        sys.exit(0)
+
+# ── Early-intercept: packaging self-check (no GUI) ──
+if "--packaging-self-check" in sys.argv:
+    import json as _json
+    _result = {"status": "ok", "frozen": bool(getattr(sys, "frozen", False))}
+    # Qt
+    try:
+        from PyQt6 import QtCore
+        _result["qt"] = True
+    except Exception as e:
+        _result["qt"] = str(e)
+    # Torch
+    try:
+        import torch
+        _result["torch"] = torch.__version__
+        _result["torch_cuda"] = torch.cuda.is_available()
+    except Exception as e:
+        _result["torch"] = str(e)
+    # Ultralytics
+    try:
+        import ultralytics
+        _result["ultralytics"] = ultralytics.__version__
+    except Exception as e:
+        _result["ultralytics"] = str(e)
+    # Paramiko
+    try:
+        import paramiko
+        _result["paramiko"] = getattr(paramiko, "__version__", "ok")
+    except Exception as e:
+        _result["paramiko"] = str(e)
+    # OpenCV
+    try:
+        import cv2
+        _result["opencv"] = cv2.__version__
+    except Exception as e:
+        _result["opencv"] = str(e)
+    # Training worker resource
+    try:
+        from anylabeling.services.training_center.resource_utils import resource_path
+        wp = resource_path("anylabeling/services/auto_training/ultralytics/training_worker.py")
+        _result["worker_resource"] = wp.exists()
+    except Exception as e:
+        _result["worker_resource"] = str(e)
+    # User data writable
+    try:
+        from anylabeling.services.training_center.build_info import get_user_data_dir
+        ud = get_user_data_dir()
+        ud.mkdir(parents=True, exist_ok=True)
+        _test = ud / ".write_test"
+        _test.write_text("ok")
+        _test.unlink()
+        _result["userdata_writable"] = True
+    except Exception as e:
+        _result["userdata_writable"] = str(e)
+    print(_json.dumps(_result, indent=2))
+    sys.exit(0)
+
 import yaml
 from PyQt6 import QtCore, QtGui, QtWidgets
 
@@ -307,6 +377,45 @@ def main():
     qt_platform = config_from_args.pop("qt_platform", None)
 
     logger.setLevel(getattr(logging, logger_level.upper()))
+
+    # ── File logging (survives even without console) ──
+    try:
+        from anylabeling.services.training_center.build_info import (
+            get_log_dir, ensure_user_dirs, get_build_info,
+        )
+        ensure_user_dirs()
+        _log_dir = get_log_dir()
+        _file_handler = logging.FileHandler(
+            str(_log_dir / "trainlens.log"),
+            encoding="utf-8", delay=True,
+        )
+        _file_handler.setLevel(logging.DEBUG)
+        _file_handler.setFormatter(logging.Formatter(
+            "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        ))
+        logging.getLogger().addHandler(_file_handler)
+        _bi = get_build_info()
+        logging.getLogger("anylabeling").info(
+            "TrainLens %s (frozen=%s) | Python %s | %s",
+            _bi["trainlens_version"], _bi["frozen"],
+            _bi["python_version"], _bi["platform"],
+        )
+        logging.getLogger("anylabeling").info(
+            "User data: %s", _bi["user_data_dir"],
+        )
+        # Also log uncaught exceptions to file
+        def _log_uncaught(exc_type, exc_value, exc_tb):
+            import traceback
+            logging.getLogger("anylabeling").critical(
+                "Uncaught exception:\n%s",
+                "".join(traceback.format_exception(exc_type, exc_value, exc_tb)),
+            )
+            sys.__excepthook__(exc_type, exc_value, exc_tb)
+        sys.excepthook = _log_uncaught
+    except Exception:
+        pass  # File logging is best-effort; never prevent GUI launch
+
     logger.info(
         f"🚀 {gradient_text(f'X-AnyLabeling v{__version__} launched!')}"
     )

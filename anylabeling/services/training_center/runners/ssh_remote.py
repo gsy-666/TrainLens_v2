@@ -316,10 +316,7 @@ class SSHRemoteRunner(TrainingRunner):
 
             # 8. Upload worker script
             _stage("uploading worker")
-            local_worker = os.path.join(
-                os.path.dirname(__file__), "..", "..", "auto_training",
-                "ultralytics", "training_worker.py",
-            )
+            local_worker = str(_resolve_worker_for_upload())
             remote_worker = posixpath.join(self._remote_job_dir, "training_worker.py")
             self._sftp.put(local_worker, remote_worker)
 
@@ -772,3 +769,15 @@ def _sftp_mkdir_p(sftp, remote_dir: str):
 def _shquote(s: str) -> str:
     """Shell-quote a single argument for SSH remote execution."""
     return "'" + str(s).replace("'", "'\\''") + "'"
+
+
+def _resolve_worker_for_upload() -> str:
+    """Return local path to training_worker.py for SSH upload.
+
+    In frozen (PyInstaller) mode, the worker is bundled as a data file.
+    In source mode, it's resolved relative to the project root.
+    """
+    from ..resource_utils import resource_path
+    return str(resource_path(
+        "anylabeling/services/auto_training/ultralytics/training_worker.py"
+    ))

@@ -258,8 +258,10 @@ class LocalRunner(TrainingRunner):
 
         # Worker script check
         worker_path = _resolve_worker_script()
-        if not os.path.isfile(worker_path):
-            return False, f"Worker script not found: {worker_path}"
+        from ..resource_utils import is_frozen
+        if not is_frozen():
+            if not os.path.isfile(worker_path):
+                return False, f"Worker script not found: {worker_path}"
 
         return True, "ready"
 
@@ -285,14 +287,21 @@ class LocalRunner(TrainingRunner):
 
             # Build command
             worker_script = _resolve_worker_script()
-            command = [python_exe, worker_script, "--payload", payload_path]
+            from ..resource_utils import is_frozen
+            if is_frozen() and python_exe == sys.executable:
+                # Frozen + bundled CPU: invoke same EXE in training-worker mode
+                command = [sys.executable, "--training-worker", "--payload", payload_path]
+            else:
+                # Source mode OR external GPU runtime
+                command = [python_exe, worker_script, "--payload", payload_path]
 
             _log.info(
                 "Runner: %s\nExecution mode: %s\nRuntime Python: %s\nWorker script: %s\n"
-                "Requested device: %s\nResolved device: %s",
+                "Requested device: %s\nResolved device: %s\nFrozen: %s",
                 self.runner_id, self.execution_mode, python_exe, worker_script,
                 getattr(job, "requested_device", ""),
                 getattr(job, "resolved_device", ""),
+                is_frozen(),
             )
 
             env = os.environ.copy()
@@ -521,11 +530,19 @@ def _resolve_python_executable(job: TrainingJob) -> str:
 
 
 def _resolve_worker_script() -> str:
-    """Return absolute path to the standalone training worker script."""
-    return os.path.join(
-        os.path.dirname(__file__), "..", "..", "auto_training",
-        "ultralytics", "training_worker.py",
-    )
+    """Return absolute path to the standalone training worker script.
+
+    In frozen (PyInstaller) mode, the worker is compiled into the EXE
+    and invoked via `sys.executable --training-worker`. This function
+    returns the path only for source-mode usage.
+    """
+    from ..resource_utils import resource_path, is_frozen
+    if is_frozen():
+        # Frozen: worker is part of the EXE, return sentinel
+        return ":frozen:"
+    return str(resource_path(
+        "anylabeling/services/auto_training/ultralytics/training_worker.py"
+    ))
 
 
 def _create_training_payload(train_args: Dict[str, Any]) -> str:
