@@ -210,23 +210,22 @@ class JobManager:
         Uses the runner resolved during reserve_job().
         The runner owns the process lifecycle; this method only
         delegates and updates status.
-
-        Returns:
-            (success, message)
         """
+        runner: Optional[TrainingRunner] = None
+        job: Optional[TrainingJob] = None
+
         with self._state_lock:
             if not self._validate_job_id(job_id):
                 return False, "Job ID mismatch or no reserved job"
             if self._current_job.status != TrainingStatus.PREPARING:
                 return False, f"Job is not in PREPARING state (current: {self._current_job.status.value})"
-
             runner = self._current_runner
             job = self._current_job
 
         if runner is None:
             return False, "No runner available"
 
-        # Prepare
+        # ── Prepare ──
         ok, msg = runner.prepare(job, config)
         if not ok:
             with self._state_lock:
@@ -234,31 +233,44 @@ class JobManager:
                     self._current_job.status = TrainingStatus.FAILED
                     self._current_job.error_message = msg
                     cbs = list(self._status_callbacks)
+                    job_ref = self._current_job
                     self._cleanup_job()
-            self._notify_status_change(job, cbs)
+                else:
+                    return False, msg
+            self._notify_status_change(job_ref, cbs)
             self._history_finalize(job_id, TrainingStatus.FAILED, error_message=msg)
             return False, msg
 
-        # Start
-        success, message = runner.start(job, config)
+        # ── Start ──
+        try:
+            success, message = runner.start(job, config)
+        except Exception as exc:
+            success = False
+            message = f"Runner start exception: {exc}"
 
         if success:
             with self._state_lock:
+                cbs = list(self._status_callbacks)
                 if self._current_job and self._current_job.job_id == job_id:
                     self._current_job.status = TrainingStatus.RUNNING
                     self._current_job.started_at = datetime.now()
-                    cbs = list(self._status_callbacks)
-            self._notify_status_change(self._current_job, cbs)
-            self._history_update(job_id, status=TrainingStatus.RUNNING.value,
-                                 started_at=self._current_job.started_at.isoformat() if self._current_job.started_at else None)
+                job_ref = self._current_job
+            if job_ref:
+                self._notify_status_change(job_ref, cbs)
+                self._history_update(job_id, status=TrainingStatus.RUNNING.value,
+                                     started_at=job_ref.started_at.isoformat() if job_ref.started_at else None)
         else:
             with self._state_lock:
+                cbs = list(self._status_callbacks)
                 if self._current_job and self._current_job.job_id == job_id:
                     self._current_job.status = TrainingStatus.FAILED
                     self._current_job.error_message = message
-                    cbs = list(self._status_callbacks)
+                    job_ref = self._current_job
                     self._cleanup_job()
-            self._notify_status_change(job, cbs)
+                else:
+                    job_ref = None
+            if job_ref:
+                self._notify_status_change(job_ref, cbs)
             self._history_finalize(job_id, TrainingStatus.FAILED, error_message=message)
 
         return success, message
