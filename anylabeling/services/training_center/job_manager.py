@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Optional, Tuple, Dict, Any, Callable, List
 from pathlib import Path
 
-from .models import TrainingJob, TrainingMode, TrainingStatus
+from .models import TrainingJob, TrainingMode, TrainingStatus, normalize_execution_mode
 from .adapters.base import TrainingAdapter
 from .event_protocol import TrainingEvent, TrainingEventType
 from .runners.base import TrainingRunner
@@ -180,27 +180,23 @@ class JobManager:
                 return False, reason
 
             # Resolve runner from execution_mode
-            execution_mode = getattr(job, "execution_mode", None) or "local"
+            execution_mode_raw = getattr(job, "execution_mode", None) or "local"
+            execution_mode = normalize_execution_mode(execution_mode_raw)
             from .runners.factory import get_runner
-
-            # Log runner selection (deterministic, visible in training console)
-            import logging as _logging_jm
-            _log_jm = _logging_jm.getLogger(__name__)
-            runner_type_name = "Unknown"
-            try:
-                _preview = get_runner(execution_mode)
-                runner_type_name = type(_preview).__name__
-            except Exception:
-                pass
-            _log_jm.info(
-                "Execution mode raw: %r → normalized: %s | Runner: %s",
-                getattr(job, "execution_mode", None), execution_mode, runner_type_name,
-            )
 
             try:
                 runner = get_runner(execution_mode)
             except (ValueError, NotImplementedError) as e:
                 return False, str(e)
+
+            # Log runner selection to training console
+            import logging as _logging_jm
+            _log_jm = _logging_jm.getLogger(__name__)
+            _log_jm.info(
+                "Execution mode raw: %r → normalized: %r | Runner: %s (%s)",
+                execution_mode_raw, execution_mode,
+                type(runner).__name__, type(runner).__module__,
+            )
 
             job.status = TrainingStatus.PREPARING
             self._current_job = job
@@ -239,6 +235,36 @@ class JobManager:
 
         if runner is None:
             return False, "No runner available"
+
+        # ── Hard runner type check ──
+        from .runners.local import LocalRunner
+        from .runners.ssh_remote import SSHRemoteRunner
+
+        mode = normalize_execution_mode(getattr(job, "execution_mode", None))
+        if mode == "remote_ssh" and not isinstance(runner, SSHRemoteRunner):
+            raise RuntimeError(
+                f"Remote SSH job was assigned to {type(runner).__name__} "
+                f"(expected SSHRemoteRunner)"
+            )
+        if mode == "local" and not isinstance(runner, LocalRunner):
+            raise RuntimeError(
+                f"Local job was assigned to {type(runner).__name__} "
+                f"(expected LocalRunner)"
+            )
+
+        # Emit runner selection to training console
+        from .event_protocol import create_console_output_event
+        import time as _time
+        runner_event = create_console_output_event(
+            job_id=job_id, timestamp=_time.time(),
+            message=(
+                f"Execution mode raw: {getattr(job, 'execution_mode', None)!r}\n"
+                f"Runner selected: {type(runner).__name__}\n"
+                f"Runner module: {type(runner).__module__}"
+            ),
+            source="job_manager",
+        )
+        self._notify_event_callbacks(runner_event)
 
         # ── Prepare ──
         ok, msg = runner.prepare(job, config)

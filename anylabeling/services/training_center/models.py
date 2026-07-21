@@ -45,6 +45,35 @@ class TrainingStatus(Enum):
         )
 
 
+# ── Execution mode normalization ────────────────────────────────────
+
+_EXECUTION_MODE_ALIASES = {
+    "local": "local",
+    "remote_ssh": "remote_ssh",
+    # Legacy aliases (stripped on normalization, never persisted)
+    "remote": "remote_ssh",
+    "ssh_remote": "remote_ssh",
+}
+
+
+def normalize_execution_mode(value) -> str:
+    """Convert any execution mode representation to canonical value.
+
+    Only valid canonical values: 'local', 'remote_ssh'.
+    Raises ValueError for unknown values.
+    NEVER returns LocalRunner as a default.
+    """
+    if value is None:
+        return "local"
+    raw = str(value).strip().lower()
+    if raw not in _EXECUTION_MODE_ALIASES:
+        raise ValueError(
+            f"Unsupported execution mode: {value!r}. "
+            f"Valid values: {list(_EXECUTION_MODE_ALIASES.keys())}"
+        )
+    return _EXECUTION_MODE_ALIASES[raw]
+
+
 @dataclass
 class TrainingJob:
     """Unified training job representation"""

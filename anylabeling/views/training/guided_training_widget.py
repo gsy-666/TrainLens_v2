@@ -4397,6 +4397,11 @@ print(json.dumps(result, ensure_ascii=False))
             self._reset_start_ui()
             return
 
+        # Guard: only show waiting if job is still active (not already FAILED)
+        current = self.job_manager.get_current_job()
+        if current and current.status.is_terminal():
+            return
+
         mode = getattr(self.current_job, 'execution_mode', 'local') or 'local'
         if mode == 'remote_ssh':
             self.append_training_log(self.tr("Remote worker process started, waiting for ready..."))
