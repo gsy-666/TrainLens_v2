@@ -45,6 +45,7 @@ export default function TrainingCenter({ onBack }: Props) {
   const [model, setModel] = useState("yolov8n.pt");
   const [data, setData] = useState("");
   const [project, setProject] = useState("");
+  const projectTouched = useRef(false);
   const [name, setName] = useState("train");
   const [device, setDevice] = useState("cpu");
   const [deviceInfo, setDeviceInfo] = useState<api.DeviceInfo | null>(null);
@@ -160,6 +161,20 @@ export default function TrainingCenter({ onBack }: Props) {
       })
       .catch(() => undefined);
   }, []);
+
+  // output dir follows the dataset location until the user overrides it
+  useEffect(() => {
+    if (projectTouched.current) return;
+    const d = data.trim();
+    if (!d) {
+      setProject("");
+      return;
+    }
+    const dir = d.replace(/[/\\][^/\\]*$/, "");
+    if (dir && dir !== d) {
+      setProject(`${dir}/runs`);
+    }
+  }, [data]);
 
   useEffect(() => {
     loadHistory();
@@ -347,9 +362,17 @@ export default function TrainingCenter({ onBack }: Props) {
                 </Button>
               </div>
               <div>
-                <div style={{ marginBottom: 4 }}>输出目录</div>
+                <div style={{ marginBottom: 4 }}>输出目录（默认跟随数据集位置，可修改）</div>
                 <Space.Compact style={{ width: "100%" }}>
-                  <Input value={project} onChange={(e) => setProject(e.target.value)} disabled={running} placeholder="runs 输出根目录" />
+                  <Input
+                    value={project}
+                    onChange={(e) => {
+                      projectTouched.current = true;
+                      setProject(e.target.value);
+                    }}
+                    disabled={running}
+                    placeholder="runs 输出根目录"
+                  />
                   <Button icon={<FolderOpenOutlined />} onClick={() => setBrowse("project")} disabled={running} />
                 </Space.Compact>
               </div>
@@ -552,6 +575,7 @@ export default function TrainingCenter({ onBack }: Props) {
         title="选择输出目录"
         onCancel={() => setBrowse(null)}
         onSelect={(p) => {
+          projectTouched.current = true;
           setProject(p);
           setBrowse(null);
         }}

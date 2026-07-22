@@ -10,9 +10,6 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from anylabeling.services.auto_training.ultralytics.config import (
-    get_default_project_dir,
-)
 from anylabeling.services.auto_training.ultralytics.general import (
     create_yolo_dataset,
 )
@@ -88,13 +85,13 @@ async def training_quickstart(req: QuickstartRequest):
     except Exception as e:  # noqa
         raise HTTPException(status_code=500, detail=f"数据集生成失败: {e}")
 
-    # 2. start training
+    # 2. start training — artifacts live next to the dataset by default
     ts = datetime.datetime.now().strftime("%m%d_%H%M")
     params = {
         "task": task.lower(),
         "model": model,
         "data": str(Path(dataset_dir) / "data.yaml"),
-        "project": get_default_project_dir(),
+        "project": str(Path(dataset_dir) / "runs"),
         "name": f"{task.lower()}_{ts}",
         "device": device,
         "epochs": req.epochs,
