@@ -157,7 +157,16 @@ export default function ModelPanel() {
         setShapesExternal([...shapes, ...predicted]);
       }
       const secs = ((performance.now() - t0) / 1000).toFixed(1);
-      message.success(`推理完成：${predicted.length} 个形状（${secs}s）`);
+      if (predicted.length === 0) {
+        message.warning(
+          loaded?.type === "segment_anything_3" && !textPrompt.trim()
+            ? "未分割出目标：SAM3 是文本引导模型，请先在文本提示框填写类别（如 gauge.）"
+            : `未检测到目标（${secs}s）。可尝试降低置信度阈值，或检查文本提示`,
+          5
+        );
+      } else {
+        message.success(`推理完成：${predicted.length} 个形状（${secs}s）`);
+      }
     } catch (e) {
       const err = e as { response?: { data?: { detail?: string } }; message: string };
       message.error(`推理失败: ${err.response?.data?.detail ?? err.message}`);
