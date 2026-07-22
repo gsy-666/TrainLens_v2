@@ -220,7 +220,7 @@ if msvc_runtime_binaries:
 
 pyz = PYZ(a.pure, a.zipped_data)
 
-# ── ONE-FILE EXE (no BUNDLE — Windows standalone) ─────────────────────
+# ── ONEDIR (EXE + COLLECT) — stable for complex Qt apps ─────────────
 
 exe = EXE(
     pyz,
@@ -235,4 +235,15 @@ exe = EXE(
     runtime_tmpdir=None,
     console=False,
     icon=_p('anylabeling', 'resources', 'images', 'icon.ico'),
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name='TrainLens',
 )

@@ -9,7 +9,11 @@ def configure_ort_dll_search_path():
         return
 
     base_dir = sys._MEIPASS
-    search_dirs = [os.path.join(base_dir, "onnxruntime", "capi"), base_dir]
+    search_dirs = [
+        os.path.join(base_dir, "onnxruntime", "capi"),
+        os.path.join(base_dir, "PyQt6", "Qt6", "bin"),  # Qt6Core.dll etc.
+        base_dir,
+    ]
     valid_dirs = [
         directory for directory in search_dirs if os.path.isdir(directory)
     ]
