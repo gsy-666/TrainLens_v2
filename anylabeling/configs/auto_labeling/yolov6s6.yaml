@@ -1,10 +1,13 @@
 type: yolov6
 name: yolov6s6-r20230520
-provider: MeiTuan
-display_name: YOLOv6s6
+display_name: YOLOv6s6 MeiTuan
 model_path: https://github.com/CVHub520/X-AnyLabeling/releases/download/v0.1.0/yolov6s6.onnx
-iou_threshold: 0.45
-conf_threshold: 0.25
+input_width: 1280
+input_height: 1280
+stride: 64
+nms_threshold: 0.45
+confidence_threshold: 0.4
+classes:
 classes:
   - person
   - bicycle

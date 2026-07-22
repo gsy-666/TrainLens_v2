@@ -1,5 +1,0 @@
-type: remote_server
-name: remote_server-r20251104
-provider: CVHub
-display_name: Remote-Server
-timeout: 180

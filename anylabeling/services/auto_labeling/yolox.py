@@ -1,16 +1,17 @@
+import logging
 import os
+
 import cv2
 import numpy as np
-from PyQt6 import QtCore
-from PyQt6.QtCore import QCoreApplication
+import onnxruntime as ort
+from PyQt5 import QtCore
+from PyQt5.QtCore import QCoreApplication
 
 from anylabeling.app_info import __preferred_device__
 from anylabeling.views.labeling.shape import Shape
-from anylabeling.views.labeling.logger import logger
 from anylabeling.views.labeling.utils.opencv import qt_img_to_rgb_cv_img
 from .model import Model
 from .types import AutoLabelingResult
-from .engines.build_onnx_engine import OnnxBaseModel
 
 
 class YOLOX(Model):
@@ -22,20 +23,15 @@ class YOLOX(Model):
             "name",
             "display_name",
             "model_path",
+            "input_width",
+            "input_height",
             "p6",
-            "iou_threshold",
-            "conf_threshold",
+            "score_threshold",
+            "nms_threshold",
+            "confidence_threshold",
             "classes",
         ]
-        widgets = [
-            "button_run",
-            "input_conf",
-            "edit_conf",
-            "input_iou",
-            "edit_iou",
-            "toggle_preserve_existing_annotations",
-            "button_classes_filter",
-        ]
+        widgets = ["button_run"]
         output_modes = {
             "rectangle": QCoreApplication.translate("Model", "Rectangle"),
         }
@@ -44,89 +40,65 @@ class YOLOX(Model):
     def __init__(self, model_config, on_message) -> None:
         # Run the parent class's init method
         super().__init__(model_config, on_message)
-        model_name = self.config["type"]
+
         model_abs_path = self.get_model_abs_path(self.config, "model_path")
         if not model_abs_path or not os.path.isfile(model_abs_path):
             raise FileNotFoundError(
                 QCoreApplication.translate(
-                    "Model",
-                    f"Could not download or initialize {model_name} model.",
+                    "Model", "Could not download or initialize YOLOv6 model."
                 )
             )
-        self.net = OnnxBaseModel(model_abs_path, __preferred_device__)
+
+        self.sess_opts = ort.SessionOptions()
+        if "OMP_NUM_THREADS" in os.environ:
+            self.sess_opts.inter_op_num_threads = int(os.environ["OMP_NUM_THREADS"])
+        self.providers = ['CPUExecutionProvider']
+        if __preferred_device__ == "GPU":
+            self.providers = ['CUDAExecutionProvider']
+
+        self.net = ort.InferenceSession(
+                        model_abs_path, 
+                        providers=self.providers,
+                        sess_options=self.sess_opts,
+                    )
         self.p6 = self.config["p6"]
         self.classes = self.config["classes"]
-        self.input_shape = self.net.get_input_shape()[-2:]
-        self.nms_thres = self.config["iou_threshold"]
-        self.conf_thres = self.config["conf_threshold"]
-        self.filter_classes = None
-        self.replace = True
+        self.input_size = (self.config["input_height"], self.config["input_width"])
 
-    def set_auto_labeling_conf(self, value):
-        """set auto labeling confidence threshold"""
-        if value > 0:
-            self.conf_thres = value
-
-    def set_auto_labeling_iou(self, value):
-        """set auto labeling iou threshold"""
-        if value > 0:
-            self.nms_thres = value
-
-    def set_auto_labeling_preserve_existing_annotations_state(self, state):
-        """Toggle the preservation of existing annotations based on the checkbox state."""
-        self.replace = not state
-
-    def set_auto_labeling_filter_classes(self, class_names):
-        """Set filter classes by name."""
-        if not class_names or len(class_names) == len(self.classes):
-            self.filter_classes = None
-        else:
-            self.filter_classes = class_names
-
-    def preprocess(self, input_image):
+    def pre_process(self, img, net, swap=(2, 0, 1)):
         """
         Pre-process the input RGB image before feeding it to the network.
         """
-        if len(input_image.shape) == 3:
-            padded_img = (
-                np.ones(
-                    (self.input_shape[0], self.input_shape[1], 3),
-                    dtype=np.uint8,
-                )
-                * 114
-            )
+        if len(img.shape) == 3:
+            padded_img = np.ones((self.input_size[0], self.input_size[1], 3), dtype=np.uint8) * 114
         else:
-            padded_img = np.ones(self.input_shape, dtype=np.uint8) * 114
+            padded_img = np.ones(self.input_size, dtype=np.uint8) * 114
 
-        ratio_hw = min(
-            self.input_shape[0] / input_image.shape[0],
-            self.input_shape[1] / input_image.shape[1],
-        )
+        r = min(self.input_size[0] / img.shape[0], self.input_size[1] / img.shape[1])
         resized_img = cv2.resize(
-            input_image,
-            (
-                int(input_image.shape[1] * ratio_hw),
-                int(input_image.shape[0] * ratio_hw),
-            ),
+            img,
+            (int(img.shape[1] * r), int(img.shape[0] * r)),
             interpolation=cv2.INTER_LINEAR,
         ).astype(np.uint8)
-        padded_img[
-            : int(input_image.shape[0] * ratio_hw),
-            : int(input_image.shape[1] * ratio_hw),
-        ] = resized_img
+        padded_img[: int(img.shape[0] * r), : int(img.shape[1] * r)] = resized_img
 
-        padded_img = padded_img.transpose((2, 0, 1))
+        padded_img = padded_img.transpose(swap)
         padded_img = np.ascontiguousarray(padded_img, dtype=np.float32)
-        return padded_img[None, :, :, :], ratio_hw
 
-    def postprocess(self, outputs):
+        ort_inputs = {net.get_inputs()[0].name: padded_img[None, :, :, :]}
+        outputs = net.run(None, ort_inputs)
+
+        return r, outputs
+
+    def post_process(self, outputs):
         """
-        Post-process the network's output.
+        Post-process the network's output, to get the bounding boxes, key-points and
+        their confidence scores.
         """
         grids = []
         expanded_strides = []
         p6 = self.p6
-        img_size = self.input_shape
+        img_size = self.input_size
         strides = [8, 16, 32] if not p6 else [8, 16, 32, 64]
 
         hsizes = [img_size[0] // stride for stride in strides]
@@ -157,62 +129,45 @@ class YOLOX(Model):
         try:
             image = qt_img_to_rgb_cv_img(image, image_path)
         except Exception as e:  # noqa
-            logger.warning("Could not inference model")
-            logger.warning(e)
+            logging.warning("Could not inference model")
+            logging.warning(e)
             return []
 
-        blob, ratio_hw = self.preprocess(image)
-        outputs = self.net.get_ort_inference(blob)
-        predictions = self.postprocess(outputs)[0]
-        results = self.rescale(predictions, ratio_hw)
+        ratio, outputs = self.pre_process(image, self.net)
+        predictions = self.post_process(outputs[0])[0]
+        results = self.rescale(predictions, ratio)
 
         shapes = []
-        final_boxes, final_scores, final_cls_inds = (
-            results[:, :4],
-            results[:, 4],
-            results[:, 5],
-        )
-        for box, score, cls_inds in zip(
-            final_boxes, final_scores, final_cls_inds
-        ):
-            if score < self.conf_thres:
+        final_boxes, final_scores, final_cls_inds = results[:, :4], results[:, 4], results[:, 5]
+        for box, score, cls_inds in zip(final_boxes, final_scores, final_cls_inds):
+            if score < self.config["score_threshold"]:
                 continue
             x1, y1, x2, y2 = box
-            score = float(score)
-            label = str(self.classes[int(cls_inds)])
-            if self.filter_classes and label not in self.filter_classes:
-                continue
-            rectangle_shape = Shape(
-                label=label, score=score, shape_type="rectangle"
-            )
+            rectangle_shape = Shape(label=self.classes[int(cls_inds)], shape_type="rectangle", flags={})
             rectangle_shape.add_point(QtCore.QPointF(x1, y1))
-            rectangle_shape.add_point(QtCore.QPointF(x2, y1))
             rectangle_shape.add_point(QtCore.QPointF(x2, y2))
-            rectangle_shape.add_point(QtCore.QPointF(x1, y2))
             shapes.append(rectangle_shape)
 
-        result = AutoLabelingResult(shapes, replace=self.replace)
+        result = AutoLabelingResult(shapes, replace=True)
 
         return result
-
+    
     def rescale(self, predictions, ratio):
-        """Rescale the output to the original image shape"""
+        '''Rescale the output to the original image shape'''
 
-        nms_thr = self.nms_thres
-        score_thr = self.conf_thres
+        nms_thr = self.config["nms_threshold"]
+        score_thr = self.config["confidence_threshold"]
 
         boxes = predictions[:, :4]
         scores = predictions[:, 4:5] * predictions[:, 5:]
 
         boxes_xyxy = np.ones_like(boxes)
-        boxes_xyxy[:, 0] = boxes[:, 0] - boxes[:, 2] / 2.0
-        boxes_xyxy[:, 1] = boxes[:, 1] - boxes[:, 3] / 2.0
-        boxes_xyxy[:, 2] = boxes[:, 0] + boxes[:, 2] / 2.0
-        boxes_xyxy[:, 3] = boxes[:, 1] + boxes[:, 3] / 2.0
+        boxes_xyxy[:, 0] = boxes[:, 0] - boxes[:, 2]/2.
+        boxes_xyxy[:, 1] = boxes[:, 1] - boxes[:, 3]/2.
+        boxes_xyxy[:, 2] = boxes[:, 0] + boxes[:, 2]/2.
+        boxes_xyxy[:, 3] = boxes[:, 1] + boxes[:, 3]/2.
         boxes_xyxy /= ratio
-        dets = self.multiclass_nms_class_agnostic(
-            boxes_xyxy, scores, nms_thr=nms_thr, score_thr=score_thr
-        )
+        dets = self.multiclass_nms_class_agnostic(boxes_xyxy, scores, nms_thr=nms_thr, score_thr=score_thr)
 
         return dets
 
@@ -230,12 +185,7 @@ class YOLOX(Model):
         keep = self.nms(valid_boxes, valid_scores, nms_thr)
         if keep:
             dets = np.concatenate(
-                [
-                    valid_boxes[keep],
-                    valid_scores[keep, None],
-                    valid_cls_inds[keep, None],
-                ],
-                1,
+                [valid_boxes[keep], valid_scores[keep, None], valid_cls_inds[keep, None]], 1
             )
         return dets
 

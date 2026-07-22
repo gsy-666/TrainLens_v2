@@ -1,10 +1,12 @@
 type: yolov8
 name: yolov8m-r20230520
-provider: Ultralytics
-display_name: YOLOv8m
+display_name: YOLOv8m Ultralytics
 model_path: https://github.com/CVHub520/X-AnyLabeling/releases/download/v0.1.0/yolov8m.onnx
-iou_threshold: 0.45
-conf_threshold: 0.25
+input_width: 640
+input_height: 640
+score_threshold: 0.5
+nms_threshold: 0.45
+confidence_threshold: 0.45
 classes:
   - person
   - bicycle
