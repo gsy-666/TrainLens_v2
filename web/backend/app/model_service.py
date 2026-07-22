@@ -15,6 +15,7 @@ import anylabeling.config as anylabeling_config
 from anylabeling.config import get_work_directory
 from anylabeling.services.auto_labeling import _AUTO_LABELING_MARKS_MODELS
 from anylabeling.services.auto_labeling.model_manager import ModelManager
+from anylabeling.services.auto_labeling.types import AutoLabelingResult
 
 
 def _ensure_user_config():
@@ -128,28 +129,35 @@ class WebModelService:
         iou: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Blocking prediction. Run in a worker thread."""
-        if not self.loaded_info():
+        cfg = self.manager.loaded_model_config
+        if not cfg or not cfg.get("model"):
             raise RuntimeError("No model loaded")
-        if conf is not None:
-            self.manager.set_auto_labeling_conf(conf)
-        if iou is not None:
-            self.manager.set_auto_labeling_iou(iou)
+        model = cfg["model"]
+        if conf is not None and hasattr(model, "set_auto_labeling_conf"):
+            model.set_auto_labeling_conf(conf)
+        if iou is not None and hasattr(model, "set_auto_labeling_iou"):
+            model.set_auto_labeling_iou(iou)
 
         # `image` is only used as a not-None sentinel: the model loads the
         # pixels from `filename` itself (see qt_img_to_rgb_cv_img).
-        result = self.manager.predict_shapes(
-            image=True,
-            filename=image_path,
-            text_prompt=text_prompt if text_prompt else None,
-            batch=True,
-        )
+        if text_prompt:
+            result = model.predict_shapes(True, image_path, text_prompt=text_prompt)
+        else:
+            result = model.predict_shapes(True, image_path)
+
         if result is None:
             raise RuntimeError(self.status_message or "Prediction failed")
-        shapes = [s.to_dict() for s in result.shapes]
+        if isinstance(result, AutoLabelingResult):
+            return {
+                "shapes": [s.to_dict() for s in result.shapes],
+                "replace": result.replace,
+                "description": getattr(result, "description", "") or "",
+            }
+        # some models return a bare shape list
         return {
-            "shapes": shapes,
-            "replace": result.replace,
-            "description": result.description or "",
+            "shapes": [s.to_dict() for s in result],
+            "replace": False,
+            "description": "",
         }
 
 

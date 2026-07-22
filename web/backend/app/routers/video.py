@@ -316,11 +316,12 @@ def _save_frame_labels(index: int, shapes: list, flags: dict, other: dict):
 def _run_track(req: TrackRequest):
     svc = get_model_service()
     model = svc.manager.loaded_model_config["model"]
-    if req.conf is not None:
-        svc.manager.set_auto_labeling_conf(req.conf)
-    if req.iou is not None:
-        svc.manager.set_auto_labeling_iou(req.iou)
-    svc.manager.set_auto_labeling_reset_tracker()
+    if req.conf is not None and hasattr(model, "set_auto_labeling_conf"):
+        model.set_auto_labeling_conf(req.conf)
+    if req.iou is not None and hasattr(model, "set_auto_labeling_iou"):
+        model.set_auto_labeling_iou(req.iou)
+    if hasattr(svc.manager, "set_auto_labeling_reset_tracker"):
+        svc.manager.set_auto_labeling_reset_tracker()
 
     end = video_session.frame_count - 1
     if req.end_frame is not None:

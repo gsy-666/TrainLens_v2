@@ -12,6 +12,7 @@ from anylabeling.services.auto_labeling.types import AutoLabelingResult
 from anylabeling.utils import GenericWorker
 
 from anylabeling.config import get_config, save_config
+from anylabeling.views.labeling.logger import logger
 
 
 class ModelManager(QObject):
