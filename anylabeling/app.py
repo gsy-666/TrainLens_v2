@@ -42,6 +42,7 @@ if "--packaging-self-check" in sys.argv:
     import json as _json
     import traceback as _tb
     _result = {"status": "starting", "frozen": bool(getattr(sys, "frozen", False))}
+    _exit_code = 0
 
     def _sc_write():
         try:
@@ -55,6 +56,23 @@ if "--packaging-self-check" in sys.argv:
     try:
         # Executable path
         _result["executable"] = sys.executable
+        _sc_write()
+        # QtCore — real import test. In frozen mode, PyQt6 DLLs are in
+        # _MEIPASS/PyQt6/Qt6/bin; ensure they are on the DLL search path.
+        try:
+            if getattr(sys, "frozen", False):
+                _qt_bin = Path(getattr(sys, "_MEIPASS", ".")) / "PyQt6" / "Qt6" / "bin"
+                if _qt_bin.exists() and hasattr(os, "add_dll_directory"):
+                    os.add_dll_directory(str(_qt_bin))
+            from PyQt6.QtCore import QT_VERSION_STR, PYQT_VERSION_STR
+            _result["qtcore_import"] = True
+            _result["qt_version"] = QT_VERSION_STR
+            _result["pyqt_version"] = PYQT_VERSION_STR
+        except Exception as e:
+            _result["qtcore_import"] = False
+            _result["qtcore_error"] = repr(e)
+            _result["status"] = "error"
+            _exit_code = 1
         _sc_write()
         # Torch
         try:
@@ -103,12 +121,14 @@ if "--packaging-self-check" in sys.argv:
         except Exception as e:
             _result["userdata_writable"] = str(e)
         _sc_write()
-        _result["status"] = "ok"
+        if _result.get("status") != "error":
+            _result["status"] = "ok"
     except Exception:
         _result["status"] = "error"
         _result["error"] = _tb.format_exc()
+        _exit_code = 1
     _sc_write()
-    sys.exit(0)
+    sys.exit(_exit_code)
 
 import yaml
 from PyQt6 import QtCore, QtGui, QtWidgets
