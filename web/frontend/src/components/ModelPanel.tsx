@@ -387,7 +387,7 @@ export default function ModelPanel() {
         <div style={{ marginTop: 8 }}>
           <Input
             size="small"
-            placeholder="文本提示（Grounding 类模型，可留空）"
+            placeholder="文本提示：多类用英文句号分隔，如 person. car."
             value={textPrompt}
             onChange={(e) => setTextPrompt(e.target.value)}
             style={{ marginBottom: 6 }}
