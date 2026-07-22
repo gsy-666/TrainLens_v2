@@ -69,6 +69,8 @@ export default function ModelPanel() {
       const d = await api.getModels();
       setModels(d.models);
       setLoaded(d.loaded);
+      // keep the dropdown in sync with the actually loaded model
+      if (d.loaded) setSelectedCfg(d.loaded.config_file);
     } catch (e) {
       console.error(e);
     }
@@ -277,6 +279,7 @@ export default function ModelPanel() {
         }))}
         disabled={loading}
         size="small"
+        dropdownMatchSelectWidth={360}
       />
 
       <Space style={{ marginTop: 8, width: "100%" }} size={4}>
