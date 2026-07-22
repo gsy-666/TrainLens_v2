@@ -102,6 +102,7 @@ class BatchPredictRequest(BaseModel):
     preserve_existing: bool = False
     conf: Optional[float] = None
     iou: Optional[float] = None
+    text_prompt: Optional[str] = None
 
 
 def _run_batch(req: BatchPredictRequest):
@@ -120,7 +121,9 @@ def _run_batch(req: BatchPredictRequest):
             svc.batch_state["current_image"] = name
             try:
                 image_path = session.resolve_image(name)
-                result = svc.predict(str(image_path), None, req.conf, req.iou)
+                result = svc.predict(
+                    str(image_path), req.text_prompt, req.conf, req.iou
+                )
                 new_shapes = result["shapes"]
 
                 existing_shapes = []

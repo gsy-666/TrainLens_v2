@@ -183,7 +183,8 @@ export default function ModelPanel() {
         images.map((i) => i.filename),
         preserve,
         conf,
-        iou
+        iou,
+        textPrompt || undefined
       );
       const timer = window.setInterval(async () => {
         const s = await api.getBatchStatus();
@@ -206,7 +207,7 @@ export default function ModelPanel() {
       const err = e as { response?: { data?: { detail?: string } }; message: string };
       message.error(`批量任务失败: ${err.response?.data?.detail ?? err.message}`);
     }
-  }, [images, preserve, conf, iou, markAllLabeled, reloadCurrent]);
+  }, [images, preserve, conf, iou, textPrompt, markAllLabeled, reloadCurrent]);
 
   const onUndoBatch = useCallback(async () => {
     setUndoing(true);
