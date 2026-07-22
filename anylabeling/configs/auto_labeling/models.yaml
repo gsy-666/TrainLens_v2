@@ -50,3 +50,5 @@
   config_file: ":/yolov5s_resnet50.yaml"
 - model_name: "rtdetr_r50-r20230520"
   config_file: ":/rtdetr_r50.yaml"
+- model_name: "sam3_vit_h-r20260426"
+  config_file: ":/sam3_vit_h.yaml"

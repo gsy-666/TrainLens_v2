@@ -164,7 +164,7 @@ class ModelManager(QObject):
             or "display_name" not in model_config
             or "name" not in model_config
             or model_config["type"]
-            not in ["segment_anything", "yolov5", "yolov6", "yolov7", "yolov8", "yolox", "yolov5_cls", "yolov6_face", "rtdetr"]
+            not in ["segment_anything", "segment_anything_3", "yolov5", "yolov6", "yolov7", "yolov8", "yolox", "yolov5_cls", "yolov6_face", "rtdetr"]
         ):
             self.new_model_status.emit(
                 self.tr(
@@ -396,6 +396,30 @@ class ModelManager(QObject):
                         )
                     )
                 )
+                return
+
+            # Request next files for prediction
+            self.request_next_files_requested.emit()
+        elif model_config["type"] == "segment_anything_3":
+            from .segment_anything_3 import SegmentAnything3
+
+            try:
+                model_config["model"] = SegmentAnything3(
+                    model_config, on_message=self.new_model_status.emit
+                )
+                self.auto_segmentation_model_selected.emit()
+                logger.info(
+                    f"✅ Model loaded successfully: {model_config['type']}"
+                )
+            except Exception as e:  # noqa
+                logger.error(
+                    f"❌ Error in loading model: {model_config['type']} "
+                    f"with error: {str(e)}"
+                )
+                template = "Error in loading model: {error_message}"
+                translated_template = self.tr(template)
+                error_text = translated_template.format(error_message=str(e))
+                self.new_model_status.emit(error_text)
                 return
 
             # Request next files for prediction

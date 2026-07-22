@@ -11,6 +11,7 @@ config files in configs/auto_labeling/ are listed here.
 # ── Custom models (have dedicated service implementations) ──────────────
 _CUSTOM_MODELS = [
     "segment_anything",
+    "segment_anything_3",
     "yolov5",
     "yolov6",
     "yolov7",
@@ -32,6 +33,7 @@ _CACHED_AUTO_LABELING_MODELS = [
 # ── set_auto_labeling_marks ─────────────────────────────────────────────
 _AUTO_LABELING_MARKS_MODELS = [
     "segment_anything",
+    "segment_anything_3",
 ]
 
 

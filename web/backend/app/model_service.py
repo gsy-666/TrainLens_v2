@@ -44,9 +44,12 @@ class WebModelService:
         self.batch_state: Optional[Dict[str, Any]] = None
 
         # bridge Qt signals -> plain attributes (direct connection: the
-        # emit happens in the same thread that runs _load_model)
-        self.manager.download_progress.connect(self._on_download_progress)
-        self.manager.new_model_status.connect(self._on_status_message)
+        # emit happens in the same thread that runs _load_model). Some
+        # signals don't exist on reduced ModelManager variants.
+        if hasattr(self.manager, "download_progress"):
+            self.manager.download_progress.connect(self._on_download_progress)
+        if hasattr(self.manager, "new_model_status"):
+            self.manager.new_model_status.connect(self._on_status_message)
 
     # ---- signal bridges -----------------------------------------------------
     def _on_download_progress(self, downloaded: int, total: int):
