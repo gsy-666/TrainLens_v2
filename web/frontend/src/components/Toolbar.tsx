@@ -9,6 +9,7 @@ import {
   ExportOutlined,
   FolderOpenOutlined,
   FontSizeOutlined,
+  HomeOutlined,
   LeftOutlined,
   LineOutlined,
   NodeIndexOutlined,
@@ -56,6 +57,7 @@ export default function Toolbar({ onOpenDir, onOpenVideo, onExport }: Props) {
     prevImage,
     requestFit,
     copyPrevFrame,
+    closeSession,
     currentIndex,
     images,
   } = useStudio();
@@ -75,6 +77,9 @@ export default function Toolbar({ onOpenDir, onOpenVideo, onExport }: Props) {
       }}
     >
       <Space size={4}>
+        <Tooltip title="返回首页">
+          <Button icon={<HomeOutlined />} onClick={closeSession} />
+        </Tooltip>
         <Tooltip title="打开目录">
           <Button icon={<FolderOpenOutlined />} onClick={onOpenDir}>
             打开目录
