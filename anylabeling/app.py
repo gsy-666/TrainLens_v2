@@ -57,13 +57,15 @@ if "--packaging-self-check" in sys.argv:
         # Executable path
         _result["executable"] = sys.executable
         _sc_write()
-        # QtCore — real import test. In frozen mode, PyQt6 DLLs are in
-        # _MEIPASS/PyQt6/Qt6/bin; ensure they are on the DLL search path.
+        # QtCore — real import test. PyInstaller's PyQt6 runtime hook
+        # (which sets QT_PLUGIN_PATH, PATH, etc.) must run first.
         try:
             if getattr(sys, "frozen", False):
-                _qt_bin = Path(getattr(sys, "_MEIPASS", ".")) / "PyQt6" / "Qt6" / "bin"
-                if _qt_bin.exists() and hasattr(os, "add_dll_directory"):
-                    os.add_dll_directory(str(_qt_bin))
+                try:
+                    from pyi_rth_pyqt6 import _pyi_rthook
+                    _pyi_rthook()
+                except Exception:
+                    pass
             from PyQt6.QtCore import QT_VERSION_STR, PYQT_VERSION_STR
             _result["qtcore_import"] = True
             _result["qt_version"] = QT_VERSION_STR
