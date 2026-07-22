@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { Modal } from "antd";
+import { message, Modal } from "antd";
 import gsap from "gsap";
 import { useGSAP } from "@gsap/react";
 import {
