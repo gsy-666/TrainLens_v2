@@ -5,9 +5,9 @@ from copy import deepcopy
 import cv2
 import numpy as np
 import onnxruntime
-from PyQt5 import QtCore
-from PyQt5.QtCore import QThread
-from PyQt5.QtCore import QCoreApplication
+from PyQt6 import QtCore
+from PyQt6.QtCore import QThread
+from PyQt6.QtCore import QCoreApplication
 
 from anylabeling.utils import GenericWorker
 from anylabeling.views.labeling.shape import Shape

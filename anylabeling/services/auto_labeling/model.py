@@ -6,7 +6,7 @@ import onnx
 import urllib.request
 from urllib.parse import urlparse
 
-from PyQt5.QtCore import QCoreApplication
+from PyQt6.QtCore import QCoreApplication
 
 import ssl
 
@@ -21,8 +21,8 @@ socket.setdefaulttimeout(240)  # Prevent timeout when downloading models
 from abc import abstractmethod
 
 
-from PyQt5.QtCore import QFile, QObject
-from PyQt5.QtGui import QImage
+from PyQt6.QtCore import QFile, QObject
+from PyQt6.QtGui import QImage
 
 from .types import AutoLabelingResult
 from anylabeling.views.labeling.label_file import LabelFile, LabelFileError
