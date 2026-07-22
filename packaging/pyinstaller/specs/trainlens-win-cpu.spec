@@ -218,6 +218,24 @@ a.binaries = _strip_msvc_runtime_binaries(a.binaries)
 if msvc_runtime_binaries:
     a.binaries += _to_binary_toc_entries(msvc_runtime_binaries)
 
+# ── Relocate PyQt6 DLLs: move from PyQt6/Qt6/bin to PyQt6/ ─────────
+# QtCore.pyd is in PyQt6/ but Qt6Core.dll is in PyQt6/Qt6/bin/.
+# Windows searches for .pyd dependencies in the .pyd's directory first,
+# so Qt6Core.dll in PyQt6/Qt6/bin/ is NOT found. Move all DLLs up.
+_relocated = []
+_qt_relocated = 0
+for _name, _src, _btype in list(a.binaries):
+    if isinstance(_name, str) and _btype == 'BINARY':
+        _norm_name = _name.replace('\\', '/')
+        if _norm_name.startswith('PyQt6/Qt6/bin/'):
+            _new_name = 'PyQt6/' + _norm_name[len('PyQt6/Qt6/bin/'):]
+            _relocated.append((_new_name, _src, _btype))
+            _qt_relocated += 1
+            continue
+    _relocated.append((_name, _src, _btype))
+a.binaries = _relocated
+print(f"  Relocated {_qt_relocated} PyQt6 DLLs from Qt6/bin/ → PyQt6/")
+
 pyz = PYZ(a.pure, a.zipped_data)
 
 # ── ONEDIR (EXE + COLLECT) — stable for complex Qt apps ─────────────
