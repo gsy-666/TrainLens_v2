@@ -21,12 +21,7 @@ export default function TokenGate() {
     <div className="tg-root">
       <div className="tg-card">
         <div className="tg-mark" aria-hidden>
-          <svg viewBox="0 0 48 48" width="26" height="26" fill="none">
-            <rect x="6" y="10" width="22" height="16" rx="2.5" stroke="#2563eb" strokeWidth="3" />
-            <path d="M32 18l8 5-8 5v-10z" fill="#2563eb" />
-            <circle cx="14" cy="35" r="4" stroke="#18181b" strokeWidth="3" />
-            <path d="M24 35h12" stroke="#18181b" strokeWidth="3" strokeLinecap="round" />
-          </svg>
+          <img src="/logo-icon.png" alt="TrainLens logo" width="26" height="26" />
         </div>
         <h1 className="tg-title">输入访问令牌</h1>
         <p className="tg-sub">

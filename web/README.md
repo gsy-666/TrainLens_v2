@@ -1,5 +1,9 @@
 # TrainLens Web UI
 
+<p>
+  <img src="frontend/public/logo.png" alt="TrainLens" width="200" />
+</p>
+
 桌面版 X-AnyLabeling(https://github.com/CVHub520/X-AnyLabeling) 的 Web 实现：**React 前端 + FastAPI 后端**，标注 JSON 与桌面版逐字段兼容，AI 推理、格式导出、训练管线直接复用桌面版代码，两个版本可以打开同一份数据集无缝协作。
 
 ![标注效果](frontend/public/annotation-preview.jpg)
