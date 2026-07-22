@@ -46,12 +46,26 @@ class UltralyticsDialog(QDialog):
         self.resize(*DEFAULT_WINDOW_SIZE)
         self.setMinimumSize(*DEFAULT_WINDOW_SIZE)
 
+        # Extract callbacks from parent (typically LabelWidget)
+        host = parent
+        open_folder_callback = None
+        get_image_list_callback = None
+
+        if host and hasattr(host, 'open_folder_dialog'):
+            open_folder_callback = host.open_folder_dialog
+
+        if host and hasattr(host, 'image_list'):
+            # image_list is a property, wrap in lambda
+            get_image_list_callback = lambda: host.image_list
+
         # Create the training widget with dependency injection
         self.training_widget = GuidedTrainingWidget(
             parent=parent,
             job_manager=job_manager,
             ultralytics_adapter=ultralytics_adapter,
-            history_store=history_store
+            history_store=history_store,
+            open_folder_callback=open_folder_callback,
+            get_image_list_callback=get_image_list_callback
         )
 
         # Layout with no margins
