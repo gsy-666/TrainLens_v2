@@ -23,6 +23,7 @@ import {
   ExperimentOutlined,
   FolderOpenOutlined,
   StopOutlined,
+  ThunderboltOutlined,
 } from "@ant-design/icons";
 import * as api from "../api/client";
 import DirBrowserModal from "../components/DirBrowserModal";
@@ -46,6 +47,7 @@ export default function TrainingCenter({ onBack }: Props) {
   const [project, setProject] = useState("");
   const [name, setName] = useState("train");
   const [device, setDevice] = useState("cpu");
+  const [deviceInfo, setDeviceInfo] = useState<api.DeviceInfo | null>(null);
   const [epochs, setEpochs] = useState(100);
   const [batch, setBatch] = useState(16);
   const [imgsz, setImgsz] = useState(640);
@@ -56,10 +58,11 @@ export default function TrainingCenter({ onBack }: Props) {
   const [prepTask, setPrepTask] = useState("Detect");
   const [prepRatio, setPrepRatio] = useState(0.9);
   const [preparing, setPreparing] = useState(false);
+  const [quickstarting, setQuickstarting] = useState(false);
+  const [starting, setStarting] = useState(false);
 
   // runtime
   const [issues, setIssues] = useState<api.PreflightIssue[] | null>(null);
-  const [checking, setChecking] = useState(false);
   const [status, setStatus] = useState<api.TrainingStatusResponse | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [metrics, setMetrics] = useState<api.MetricSeries[]>([]);
@@ -147,6 +150,17 @@ export default function TrainingCenter({ onBack }: Props) {
     }
   }, []);
 
+  // device auto-detection on mount
+  useEffect(() => {
+    api
+      .getDevice()
+      .then((d) => {
+        setDeviceInfo(d);
+        setDevice(d.recommended);
+      })
+      .catch(() => undefined);
+  }, []);
+
   useEffect(() => {
     loadHistory();
     const t = window.setInterval(loadHistory, 10000);
@@ -154,24 +168,42 @@ export default function TrainingCenter({ onBack }: Props) {
   }, [loadHistory]);
 
   // ---- actions ---------------------------------------------------------------
-  const onPreflight = useCallback(async () => {
-    setChecking(true);
-    setIssues(null);
+  const onQuickstart = useCallback(async () => {
+    setQuickstarting(true);
+    const hide = message.loading("正在自动生成数据集并启动训练…", 0);
     try {
-      const r = await api.trainingPreflight(formPayload());
-      setIssues(r.issues);
-      if (r.can_start) message.success("预检查通过，可以开始训练");
-      else message.warning("预检查发现需要处理的问题");
+      const r = await api.quickstart({ epochs });
+      const trainMatch = r.dataset_info.match(/Train images: (\d+)/);
+      const valMatch = r.dataset_info.match(/Val images: (\d+)/);
+      message.success(
+        `已自动开训：${r.task_type} · ${r.model} · ${r.device} · train ${trainMatch?.[1] ?? "?"} 张 / val ${valMatch?.[1] ?? "?"} 张`,
+        6
+      );
     } catch (e) {
       const err = e as { response?: { data?: { detail?: string } }; message: string };
-      message.error(`预检查失败: ${err.response?.data?.detail ?? err.message}`);
+      const detail = err.response?.data?.detail ?? err.message;
+      if (String(detail).includes("No image directory")) {
+        message.warning("请先在标注页打开一个数据集目录，再使用一键训练", 5);
+      } else {
+        message.error(`一键训练失败: ${detail}`, 5);
+      }
     } finally {
-      setChecking(false);
+      hide();
+      setQuickstarting(false);
     }
-  }, [formPayload]);
+  }, [epochs]);
 
   const onStart = useCallback(async () => {
+    setStarting(true);
+    setIssues(null);
     try {
+      // preflight runs automatically; only failures interrupt the flow
+      const pre = await api.trainingPreflight(formPayload());
+      if (!pre.can_start) {
+        setIssues(pre.issues);
+        message.warning("预检查发现需要处理的问题，已阻止启动");
+        return;
+      }
       const s = await api.guidedStart(formPayload());
       setStatus(s);
       setLogs([]);
@@ -181,6 +213,8 @@ export default function TrainingCenter({ onBack }: Props) {
     } catch (e) {
       const err = e as { response?: { data?: { detail?: string } }; message: string };
       message.error(`启动失败: ${err.response?.data?.detail ?? err.message}`);
+    } finally {
+      setStarting(false);
     }
   }, [formPayload]);
 
@@ -246,7 +280,25 @@ export default function TrainingCenter({ onBack }: Props) {
       <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
         {/* 左：新建任务 */}
         <div style={{ width: 380, overflow: "auto", padding: 12 }}>
-          <Card size="small" title="新建训练任务（Ultralytics）" style={{ marginBottom: 12 }}>
+          <Card size="small" style={{ marginBottom: 12 }}>
+            <Button
+              type="primary"
+              size="large"
+              block
+              icon={<ThunderboltOutlined />}
+              loading={quickstarting}
+              disabled={running}
+              onClick={onQuickstart}
+            >
+              一键训练（当前标注数据集）
+            </Button>
+            <div style={{ fontSize: 12, color: "#999", marginTop: 8 }}>
+              自动推断任务类型、生成数据集、选择设备和模型，零配置直接开训。
+              需要先在标注页打开数据集目录。
+            </div>
+          </Card>
+
+          <Card size="small" title="自定义训练（Ultralytics）" style={{ marginBottom: 12 }}>
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               <div>
                 <div style={{ marginBottom: 4 }}>任务类型</div>
@@ -263,7 +315,20 @@ export default function TrainingCenter({ onBack }: Props) {
               </div>
               <div>
                 <div style={{ marginBottom: 4 }}>模型（.pt 路径或模型名）</div>
-                <Input value={model} onChange={(e) => setModel(e.target.value)} disabled={running} />
+                <Select
+                  style={{ width: "100%" }}
+                  value={model}
+                  onChange={setModel}
+                  disabled={running}
+                  options={[
+                    "yolov8n.pt",
+                    "yolov8s.pt",
+                    "yolov8m.pt",
+                    "yolov8n-seg.pt",
+                    "yolo11n.pt",
+                    "yolo11s.pt",
+                  ].map((m) => ({ value: m, label: m }))}
+                />
               </div>
               <div>
                 <div style={{ marginBottom: 4 }}>数据集 YAML</div>
@@ -294,7 +359,16 @@ export default function TrainingCenter({ onBack }: Props) {
                   <Input value={name} onChange={(e) => setName(e.target.value)} disabled={running} />
                 </div>
                 <div style={{ flex: 1 }}>
-                  <div style={{ marginBottom: 4 }}>设备</div>
+                  <div style={{ marginBottom: 4 }}>
+                    设备
+                    {deviceInfo && (
+                      <span style={{ fontSize: 11, color: "#999", marginLeft: 6 }}>
+                        {deviceInfo.gpus.length > 0 && deviceInfo.cuda_available
+                          ? `检测到 ${deviceInfo.gpus[0].name}`
+                          : "CPU 模式"}
+                      </span>
+                    )}
+                  </div>
                   <Select
                     style={{ width: "100%" }}
                     value={device}
@@ -302,7 +376,12 @@ export default function TrainingCenter({ onBack }: Props) {
                     disabled={running}
                     options={[
                       { value: "cpu", label: "CPU" },
-                      { value: "0", label: "GPU 0" },
+                      ...(deviceInfo?.cuda_available
+                        ? deviceInfo.gpus.map((g) => ({
+                            value: String(g.index),
+                            label: `GPU ${g.index} · ${g.name}`,
+                          }))
+                        : []),
                     ]}
                   />
                 </div>
@@ -360,12 +439,15 @@ export default function TrainingCenter({ onBack }: Props) {
                 ]}
               />
               <Space>
-                <Button onClick={onPreflight} loading={checking} disabled={running || !data || !project}>
-                  预检查
-                </Button>
                 {!running ? (
-                  <Button type="primary" icon={<CaretRightOutlined />} onClick={onStart} disabled={!data || !project}>
-                    开始训练
+                  <Button
+                    type="primary"
+                    icon={<CaretRightOutlined />}
+                    onClick={onStart}
+                    loading={starting}
+                    disabled={!data || !project}
+                  >
+                    检查并启动
                   </Button>
                 ) : (
                   <Button danger icon={<StopOutlined />} onClick={onStop}>

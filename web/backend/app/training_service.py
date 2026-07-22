@@ -44,6 +44,9 @@ def _resolve_output_dir(project: str, name: str) -> Path:
 
 class WebTrainingService:
     def __init__(self):
+        from .web_runner import register_web_runner
+
+        register_web_runner()  # QProcess-based LocalRunner needs a Qt loop
         self.jm = get_job_manager()
         self.events: deque = deque(maxlen=5000)
         self.seq = 0

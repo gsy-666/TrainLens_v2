@@ -310,6 +310,24 @@ export default function RunMonitor({ onBack }: Props) {
         onSelect={(p) => {
           setWorkspace(p);
           setBrowseOpen(false);
+          // 选完即扫，无需再点「扫描」
+          setTimeout(() => {
+            setScanning(true);
+            api
+              .monitorScan(p)
+              .then((info) => {
+                setWsInfo(info);
+                if (info.detected_scripts.length > 0)
+                  setScript(info.detected_scripts[0].path);
+                if (info.detected_environments.length > 0)
+                  setPythonPath(info.detected_environments[0].python_path);
+                message.success(
+                  `扫描完成：${info.detected_scripts.length} 个脚本，${info.detected_environments.length} 个环境`
+                );
+              })
+              .catch((e) => message.error(`扫描失败: ${e?.response?.data?.detail ?? e.message}`))
+              .finally(() => setScanning(false));
+          }, 0);
         }}
       />
     </div>
