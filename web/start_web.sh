@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-#  X-AnyLabeling Web - 一键启动 (Linux / macOS)
+#  TrainLens - 一键启动 (Linux / macOS)
 # ============================================================
 set -e
 cd "$(dirname "$0")"
@@ -9,7 +9,7 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PY="$ROOT/.venv/bin/python"
 
 echo "=========================================="
-echo "  X-AnyLabeling Web 一键启动"
+echo "  TrainLens 一键启动"
 echo "=========================================="
 
 # ---- 1. Python 环境 ----

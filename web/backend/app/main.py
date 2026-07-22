@@ -1,4 +1,4 @@
-"""X-AnyLabeling Web UI backend (FastAPI).
+"""TrainLens Web UI backend (FastAPI).
 
 Reuses the desktop codebase (anylabeling.*) for label file IO and
 auto-labeling model inference. Run from web/backend/:
@@ -36,7 +36,7 @@ from .routers import (  # noqa: E402
 )
 from .auth import TokenAuthMiddleware  # noqa: E402
 
-app = FastAPI(title="X-AnyLabeling Web", version="0.1.0")
+app = FastAPI(title="TrainLens", version="1.0.0")
 
 app.add_middleware(TokenAuthMiddleware)
 

@@ -1,6 +1,6 @@
 @echo off
 rem ============================================================
-rem  X-AnyLabeling Web - 一键启动
+rem  TrainLens - 一键启动
 rem  双击即可：检查依赖 -> 构建前端 -> 启动服务 -> 打开浏览器
 rem
 rem  远程访问用法（在云服务器上）：
@@ -13,7 +13,7 @@ set "ROOT=%~dp0.."
 set "PY=%ROOT%\.venv\Scripts\python.exe"
 
 echo ==========================================
-echo   X-AnyLabeling Web 一键启动
+echo   TrainLens 一键启动
 echo ==========================================
 
 rem ---- 1. Python 环境 ----

@@ -100,7 +100,7 @@ export default function Welcome() {
                 <path d="M24 35h12" stroke="#18181b" strokeWidth="3" strokeLinecap="round" />
               </svg>
             </span>
-            <span className="wl-brand-name">X-AnyLabeling</span>
+            <span className="wl-brand-name">TrainLens</span>
           </div>
 
           <h1 className="wl-headline">
@@ -174,7 +174,7 @@ export default function Welcome() {
         {/* right: real product visual, bleeding off the right edge */}
         <div className="wl-right">
           <figure className="wl-visual">
-            <img src="/annotation-preview.jpg" alt="X-AnyLabeling 真实标注效果预览" />
+            <img src="/annotation-preview.jpg" alt="TrainLens 真实标注效果预览" />
             <figcaption>真实标注效果：assets/demo.jpg</figcaption>
           </figure>
         </div>

@@ -1,4 +1,4 @@
-"""Launcher for the X-AnyLabeling web backend.
+"""Launcher for the TrainLens web backend.
 
     python start.py [--host 127.0.0.1] [--port 8000] [--token XXX]
 
@@ -25,7 +25,7 @@ def _p(msg=""):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="X-AnyLabeling Web launcher")
+    parser = argparse.ArgumentParser(description="TrainLens Web launcher")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--token", default=None, help="access token for remote use")
@@ -42,7 +42,7 @@ def main():
         os.environ["XANYLABELING_WEB_TOKEN"] = token
 
     _p("=" * 56)
-    _p("  X-AnyLabeling Web")
+    _p("  TrainLens Web")
     _p("=" * 56)
     if public:
         try:
