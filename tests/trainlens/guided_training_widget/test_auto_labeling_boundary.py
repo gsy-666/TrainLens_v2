@@ -15,10 +15,11 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../.
 # ── Baseline snapshot (from original X-AnyLabeling commit 7ca5b981) ──────
 # These values MUST NOT change with training-related modifications.
 
-BASELINE_MODEL_COUNT = 28  # Number of .yaml model configs in auto_labeling/
+BASELINE_MODEL_COUNT = 29  # 28 baseline + SAM3 (restored by user)
 
 BASELINE_MODEL_NAMES = sorted([
     "rtdetr_r50",
+    "sam3_vit_h",
     "segment_anything_vit_b",
     "segment_anything_vit_b_quant",
     "segment_anything_vit_h_quant",

@@ -1,15 +1,33 @@
+class DownloadCancelledError(Exception):
+    """Raised when a model download is cancelled by the user."""
+
+    pass
+
+
+class DownloadCancelledError(Exception):
+    """Raised when a model download is cancelled by the user."""
+
+    pass
+
+
 class AutoLabelingResult:
-    def __init__(self, shapes, replace=True):
+    def __init__(self, shapes, replace=True, description="", image_path=None):
         """Initialize AutoLabelingResult
 
         Args:
             shapes (List[Shape]): List of shapes to add to the canvas.
             replace (bool, optional): Replaces all current shapes with
             new shapes. Defaults to True.
+            description (str, optional): Description of the image.
+            Defaults to "".
+            image_path (str, optional): Source image path used for
+            prediction. Defaults to None.
         """
 
         self.shapes = shapes
         self.replace = replace
+        self.description = description
+        self.image_path = image_path
 
 
 class AutoLabelingMode:
