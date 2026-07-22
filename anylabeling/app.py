@@ -36,6 +36,9 @@ if "--training-worker" in sys.argv:
 
 # ── Early-intercept: packaging self-check (no GUI) ──
 if "--packaging-self-check" in sys.argv:
+    # Prevent anylabeling.__init__ from importing Qt-dependent view modules
+    os.environ["ANYLABELING_SKIP_VIEW_IMPORTS"] = "1"
+
     import json as _json
     import traceback as _tb
     _result = {"status": "starting", "frozen": bool(getattr(sys, "frozen", False))}
@@ -50,8 +53,8 @@ if "--packaging-self-check" in sys.argv:
 
     _sc_write()
     try:
-        # Qt: verified via GUI launch
-        _result["qt"] = "skipped (windowed – GUI verified separately)"
+        # Executable path
+        _result["executable"] = sys.executable
         _sc_write()
         # Torch
         try:
@@ -82,20 +85,19 @@ if "--packaging-self-check" in sys.argv:
         except Exception as e:
             _result["opencv"] = str(e)
         _sc_write()
-        # Worker resource
+        # Worker resource: training_worker.py is bundled as a data file (raw .py)
         try:
-            from anylabeling.services.training_center.resource_utils import resource_path
-            wp = resource_path("anylabeling/services/auto_training/ultralytics/training_worker.py")
-            _result["worker_resource"] = wp.exists()
+            _base = Path(getattr(sys, "_MEIPASS", str(Path(__file__).resolve().parent.parent)))
+            _wp = _base / "anylabeling" / "services" / "auto_training" / "ultralytics" / "training_worker.py"
+            _result["worker_resource"] = _wp.exists()
         except Exception as e:
             _result["worker_resource"] = str(e)
         _sc_write()
-        # User data
+        # User data: %LOCALAPPDATA%\TrainLens must be writable
         try:
-            from anylabeling.services.training_center.build_info import get_user_data_dir
-            ud = get_user_data_dir()
-            ud.mkdir(parents=True, exist_ok=True)
-            (_ud_test := ud / ".write_test").write_text("ok")
+            _ud = Path(os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))) / "TrainLens"
+            _ud.mkdir(parents=True, exist_ok=True)
+            (_ud_test := _ud / ".write_test").write_text("ok")
             _ud_test.unlink()
             _result["userdata_writable"] = True
         except Exception as e:
