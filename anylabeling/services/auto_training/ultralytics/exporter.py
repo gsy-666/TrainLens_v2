@@ -65,10 +65,37 @@ def validate_onnx_export_environment():
 
             if version.parse(onnx_version) < version.parse("1.15.0"):
                 missing_packages.append("onnx>=1.15.0")
-    except:
+    except Exception:
         pass
 
     return missing_packages
+
+
+def validate_torchscript_export_environment():
+    """Validate TorchScript export environment.
+
+    Checks:
+    - torch is importable
+    - source model is loadable (checked at export time)
+    - task type is exportable (checked at export time by ultralytics)
+    """
+    missing_packages = []
+    try:
+        import torch
+    except ImportError:
+        missing_packages.append("torch")
+    return missing_packages
+
+
+def validate_litert_export_environment():
+    """Validate LiteRT export environment.
+
+    LiteRT replaced TFLite and TF.js in ultralytics 8.4.83+.
+    It does not require tensorflow — it uses the Google AI Edge SDK.
+    """
+    # LiteRT export in ultralytics uses its own bundled converter
+    # No additional Python packages are strictly required
+    return []
 
 
 def validate_openvino_export_environment():
@@ -188,20 +215,22 @@ def validate_rknn_export_environment():
 def get_export_validator(export_format):
     validators = {
         "onnx": validate_onnx_export_environment,
+        "torchscript": validate_torchscript_export_environment,
         "openvino": validate_openvino_export_environment,
         "engine": validate_tensorrt_export_environment,
         "coreml": validate_coreml_export_environment,
         "saved_model": validate_tensorflow_export_environment,
         "pb": validate_tensorflow_export_environment,
-        "tflite": validate_tensorflow_export_environment,
+        "litert": validate_litert_export_environment,
         "edgetpu": validate_tensorflow_export_environment,
-        "tfjs": validate_tensorflow_export_environment,
         "paddle": validate_paddle_export_environment,
         "mnn": validate_mnn_export_environment,
         "ncnn": validate_ncnn_export_environment,
         "imx": validate_imx500_export_environment,
         "rknn": validate_rknn_export_environment,
-        "torchscript": lambda: [],
+        # Deprecated formats — redirect to litert
+        "tflite": validate_litert_export_environment,
+        "tfjs": validate_litert_export_environment,
     }
     return validators.get(export_format, lambda: [])
 

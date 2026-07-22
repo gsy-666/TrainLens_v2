@@ -7,10 +7,17 @@ from anylabeling.views.labeling.utils.theme import get_theme
 
 
 class ExportFormatDialog(QDialog):
+    """Single-format export dialog (backward-compatible).
+
+    Updated to use current format names:
+    - "TensorFlow Lite" → "LiteRT" (tflite deprecated)
+    - "TensorFlow.js" removed (redirected to LiteRT)
+    """
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle(self.tr("Export Settings"))
-        self.setFixedSize(400, 220)
+        self.setFixedSize(420, 230)
         self.setModal(True)
         self.selected_format = "onnx"
         self.setStyleSheet(get_ultralytics_dialog_style())
@@ -20,7 +27,10 @@ class ExportFormatDialog(QDialog):
         layout.setContentsMargins(24, 24, 24, 24)
 
         desc_label = QLabel(
-            self.tr("Select the format for exporting your trained model:")
+            self.tr(
+                "Select the format for exporting your trained model.\n"
+                "Tip: Use 'Batch Export' from the Training tab for multi-format export."
+            )
         )
         t = get_theme()
         desc_label.setStyleSheet(
@@ -36,9 +46,8 @@ class ExportFormatDialog(QDialog):
             ("TensorRT", "engine"),
             ("CoreML", "coreml"),
             ("TensorFlow SavedModel", "saved_model"),
-            ("TensorFlow Lite", "tflite"),
+            ("LiteRT", "litert"),
             ("TensorFlow Edge TPU", "edgetpu"),
-            ("TensorFlow.js", "tfjs"),
             ("PaddlePaddle", "paddle"),
             ("MNN", "mnn"),
             ("NCNN", "ncnn"),
@@ -54,16 +63,19 @@ class ExportFormatDialog(QDialog):
 
         info_label = QLabel(
             self.tr(
-                "Note: Some formats may require additional dependencies to be installed."
+                "Note: Some formats may require additional dependencies to be installed.\n"
+                "Deprecated formats (TFLite, TF.js) are now handled as LiteRT."
             )
         )
-        info_label.setStyleSheet(f"""
+        info_label.setStyleSheet(
+            f"""
             color: {t['warning']};
             font-size: 12px;
             margin-top: 8px;
             padding: 4px;
             min-height: 20px;
-        """)
+        """
+        )
         info_label.setWordWrap(True)
         layout.addWidget(info_label)
 

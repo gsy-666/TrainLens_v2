@@ -2682,6 +2682,7 @@ print(json.dumps(result, ensure_ascii=False))
                     self.update_training_status_display()
                     self.start_training_button.setVisible(False)
                     self.export_button.setVisible(True)
+                    self.batch_export_button.setVisible(True)
                     self.previous_button.setVisible(True)
                     self.update_training_images()
                     self.append_training_log(
@@ -3068,6 +3069,7 @@ print(json.dumps(result, ensure_ascii=False))
             self.start_training_button.setVisible(False)
             self.stop_training_button.setVisible(True)
             self.export_button.setVisible(False)
+            self.batch_export_button.setVisible(False)
             self.previous_button.setVisible(False)
             self.progress_timer.start(1000)
             self.image_timer.start(5000)
@@ -3095,6 +3097,7 @@ print(json.dumps(result, ensure_ascii=False))
             self.start_training_button.setVisible(False)
             self.previous_button.setVisible(True)
             self.export_button.setVisible(True)
+            self.batch_export_button.setVisible(True)
             self.progress_timer.stop()
             self.image_timer.stop()
             self.update_training_progress()
@@ -3118,6 +3121,7 @@ print(json.dumps(result, ensure_ascii=False))
             self.previous_button.setVisible(True)
             self.stop_training_button.setVisible(False)
             self.export_button.setVisible(False)
+            self.batch_export_button.setVisible(False)
             self.progress_timer.stop()
             self.image_timer.stop()
             error_msg = data.get("error", "Unknown error occurred")
@@ -3139,6 +3143,7 @@ print(json.dumps(result, ensure_ascii=False))
             self.previous_button.setVisible(True)
             self.stop_training_button.setVisible(False)
             self.export_button.setVisible(False)
+            self.batch_export_button.setVisible(False)
             self.progress_timer.stop()
             self.image_timer.stop()
             self.append_training_log(self.tr("Training stopped by user"))
@@ -3188,6 +3193,7 @@ print(json.dumps(result, ensure_ascii=False))
             self.stop_training_button.setVisible(True)
             self.stop_training_button.setEnabled(True)
             self.export_button.setVisible(False)
+            self.batch_export_button.setVisible(False)
             self.previous_button.setVisible(False)
             self.update_training_status_display()
         elif job.status == TrainingStatus.COMPLETED:
@@ -3198,6 +3204,7 @@ print(json.dumps(result, ensure_ascii=False))
             self.start_training_button.setEnabled(True)
             self.previous_button.setVisible(True)
             self.export_button.setVisible(True)
+            self.batch_export_button.setVisible(True)
             self.progress_timer.stop()
             self.image_timer.stop()
         elif job.status == TrainingStatus.FAILED:
@@ -3207,6 +3214,7 @@ print(json.dumps(result, ensure_ascii=False))
             self.start_training_button.setEnabled(True)
             self.stop_training_button.setVisible(False)
             self.export_button.setVisible(False)
+            self.batch_export_button.setVisible(False)
             self.previous_button.setVisible(True)
             self.progress_timer.stop()
             self.image_timer.stop()
@@ -3217,6 +3225,7 @@ print(json.dumps(result, ensure_ascii=False))
             self.start_training_button.setEnabled(True)
             self.stop_training_button.setVisible(False)
             self.export_button.setVisible(False)
+            self.batch_export_button.setVisible(False)
             self.previous_button.setVisible(True)
             self.progress_timer.stop()
             self.image_timer.stop()
@@ -4383,6 +4392,7 @@ print(json.dumps(result, ensure_ascii=False))
         self.start_training_button.setEnabled(False)
         self.stop_training_button.setVisible(True)
         self.export_button.setVisible(False)
+        self.batch_export_button.setVisible(False)
         self.previous_button.setVisible(False)
 
         # ── Phase 2: Run dataset creation in background thread ──
@@ -4475,6 +4485,7 @@ print(json.dumps(result, ensure_ascii=False))
         self.start_training_button.setVisible(True)
         self.stop_training_button.setVisible(False)
         self.export_button.setVisible(False)
+        self.batch_export_button.setVisible(False)
         self.previous_button.setVisible(True)
 
     def init_training_actions(self, parent_layout):
@@ -4520,6 +4531,11 @@ print(json.dumps(result, ensure_ascii=False))
         self.export_button.clicked.connect(self.start_export)
         self.export_button.setVisible(False)
         actions_layout.addWidget(self.export_button)
+
+        self.batch_export_button = PrimaryButton(self.tr("Batch Export"))
+        self.batch_export_button.clicked.connect(self.start_batch_export)
+        self.batch_export_button.setVisible(False)
+        actions_layout.addWidget(self.batch_export_button)
 
         parent_layout.addLayout(actions_layout)
 
@@ -4608,6 +4624,40 @@ print(json.dumps(result, ensure_ascii=False))
                 QMessageBox.critical(self, self.tr("Export Error"), message)
                 self.append_training_log(f"Failed to start export: {message}")
 
+    def start_batch_export(self):
+        """Open the Batch Export dialog for multi-format model export."""
+        if not self.current_project_path:
+            QMessageBox.warning(
+                self,
+                self.tr("Error"),
+                self.tr("No training project available for export"),
+            )
+            return
+
+        weights_path = os.path.join(
+            self.current_project_path, "weights", "best.pt"
+        )
+        if not os.path.exists(weights_path):
+            QMessageBox.warning(
+                self,
+                self.tr("Model Not Found"),
+                self.tr(f"Model weights not found at: {weights_path}"),
+            )
+            return
+
+        # Determine current imgsz from config if possible
+        imgsz = 640
+        if hasattr(self, "_config"):
+            imgsz = self._config.get("model", {}).get("imgsz", 640)
+
+        dialog = BatchExportDialog(
+            source_model=weights_path,
+            project_path=self.current_project_path,
+            imgsz=imgsz,
+            parent=self,
+        )
+        dialog.exec()
+
     def reset_train_tab(self):
         self.training_status = "idle"
         self.current_project_path = None
@@ -4628,4 +4678,5 @@ print(json.dumps(result, ensure_ascii=False))
         self.previous_button.setVisible(True)
         self.start_training_button.setVisible(True)
         self.export_button.setVisible(False)
+        self.batch_export_button.setVisible(False)
         self.stop_training_button.setVisible(False)
