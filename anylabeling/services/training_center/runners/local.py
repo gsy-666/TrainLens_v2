@@ -290,6 +290,7 @@ class LocalRunner(TrainingRunner):
             from ..resource_utils import is_frozen
             if is_frozen() and python_exe == sys.executable:
                 # Frozen + bundled CPU: invoke same EXE in training-worker mode
+                # Works for both PyInstaller and Nuitka standalone
                 command = [sys.executable, "--training-worker", "--payload", payload_path]
             else:
                 # Source mode OR external GPU runtime

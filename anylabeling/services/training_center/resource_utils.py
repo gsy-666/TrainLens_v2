@@ -17,10 +17,12 @@ def _get_project_root() -> Path:
 
 
 def resource_path(relative_path: str) -> Path:
-    """Resolve a resource path in either source or frozen mode.
+    """Resolve a resource path in source, PyInstaller, or Nuitka mode.
 
     Source mode: resolved relative to the project root.
-    Frozen mode: resolved relative to sys._MEIPASS (PyInstaller bundle).
+    PyInstaller: resolved relative to sys._MEIPASS.
+    Nuitka standalone: resolved relative to the directory containing the EXE
+      (data files are placed alongside the EXE by --include-data-file).
 
     Args:
         relative_path: Path relative to project root, e.g.
@@ -30,12 +32,25 @@ def resource_path(relative_path: str) -> Path:
         Absolute Path to the resource.
     """
     if getattr(sys, "frozen", False):
+        # PyInstaller
         base = Path(getattr(sys, "_MEIPASS", "."))
+    elif "__compiled__" in globals():
+        # Nuitka standalone: data files are copied alongside the EXE
+        base = Path(sys.executable).resolve().parent
     else:
         base = _get_project_root()
     return base / relative_path
 
 
 def is_frozen() -> bool:
-    """Return True if running inside a PyInstaller bundle."""
-    return bool(getattr(sys, "frozen", False))
+    """Return True if running inside a PyInstaller or Nuitka bundle."""
+    # Nuitka: __compiled__ is set in globals
+    # PyInstaller: sys.frozen is True
+    return bool(getattr(sys, "frozen", False)) or ("__compiled__" in globals())
+
+
+def _get_bundle_dir() -> Path:
+    """Return the directory containing the executable (frozen mode)."""
+    if is_frozen():
+        return Path(sys.executable).resolve().parent
+    return _get_project_root()
