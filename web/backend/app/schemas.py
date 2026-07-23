@@ -12,6 +12,7 @@ class OpenDirRequest(BaseModel):
 class ImageInfo(BaseModel):
     filename: str
     has_label: bool
+    shape_count: Optional[int] = None  # None = no label file
 
 
 class OpenDirResponse(BaseModel):

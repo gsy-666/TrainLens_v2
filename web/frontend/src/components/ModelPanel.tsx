@@ -3,9 +3,12 @@ import {
   Button,
   Divider,
   Input,
+  InputNumber,
   message,
+  Modal,
   Popconfirm,
   Progress,
+  Radio,
   Select,
   Slider,
   Space,
@@ -40,7 +43,6 @@ export default function ModelPanel() {
     currentIndex,
     shapes,
     setShapesExternal,
-    markAllLabeled,
     reloadCurrent,
     refreshImages,
     samMode,
@@ -62,6 +64,9 @@ export default function ModelPanel() {
   const [undoCount, setUndoCount] = useState(0);
   const [undoing, setUndoing] = useState(false);
   const [track, setTrack] = useState<api.TrackStatus | null>(null);
+  const [batchOpen, setBatchOpen] = useState(false);
+  const [batchScope, setBatchScope] = useState<"all" | "unlabeled" | "prev" | "next">("all");
+  const [batchN, setBatchN] = useState(100);
   const pollRef = useRef<number | null>(null);
 
   const refreshModels = useCallback(async () => {
@@ -176,23 +181,42 @@ export default function ModelPanel() {
     }
   }, [currentIndex, loaded, images, textPrompt, conf, iou, shapes, setShapesExternal]);
 
+  // compute the image slice for the chosen batch scope
+  const batchTargets = useCallback((): string[] => {
+    if (batchScope === "unlabeled") {
+      return images
+        .filter((im) => !im.has_label || (im.shape_count ?? 0) === 0)
+        .map((im) => im.filename);
+    }
+    if (batchScope === "prev") {
+      const start = Math.max(0, currentIndex - batchN);
+      return images.slice(start, currentIndex).map((im) => im.filename);
+    }
+    if (batchScope === "next") {
+      return images
+        .slice(currentIndex + 1, currentIndex + 1 + batchN)
+        .map((im) => im.filename);
+    }
+    return images.map((im) => im.filename);
+  }, [images, batchScope, batchN, currentIndex]);
+
   const onRunBatch = useCallback(async () => {
-    setBatch({ running: true, current: 0, total: images.length });
+    const targets = batchTargets();
+    if (targets.length === 0) {
+      message.info("范围内没有需要处理的图片");
+      return;
+    }
+    setBatchOpen(false);
+    setBatch({ running: true, current: 0, total: targets.length });
     try {
-      await api.predictBatch(
-        images.map((i) => i.filename),
-        preserve,
-        conf,
-        iou,
-        textPrompt || undefined
-      );
+      await api.predictBatch(targets, preserve, conf, iou, textPrompt || undefined);
       const timer = window.setInterval(async () => {
         const s = await api.getBatchStatus();
         setBatch(s);
         if (!s.running) {
           window.clearInterval(timer);
           setUndoCount(s.undo_available ? s.backup_count ?? 0 : 0);
-          markAllLabeled();
+          await refreshImages();
           await reloadCurrent();
           const errs = s.errors?.length ?? 0;
           if (errs > 0) {
@@ -207,7 +231,7 @@ export default function ModelPanel() {
       const err = e as { response?: { data?: { detail?: string } }; message: string };
       message.error(`批量任务失败: ${err.response?.data?.detail ?? err.message}`);
     }
-  }, [images, preserve, conf, iou, textPrompt, markAllLabeled, reloadCurrent]);
+  }, [batchTargets, preserve, conf, iou, textPrompt, refreshImages, reloadCurrent]);
 
   const onUndoBatch = useCallback(async () => {
     setUndoing(true);
@@ -324,14 +348,13 @@ export default function ModelPanel() {
           </Tooltip>
         )}
         {!video && (
-          <Popconfirm
-            title={`对全部 ${images.length} 张图片运行预标注？`}
-            onConfirm={onRunBatch}
+          <Button
+            size="small"
+            disabled={!loaded || images.length === 0 || !!batch?.running}
+            onClick={() => setBatchOpen(true)}
           >
-            <Button size="small" disabled={!loaded || images.length === 0 || !!batch?.running}>
-              批量
-            </Button>
-          </Popconfirm>
+            批量
+          </Button>
         )}
         {video && (
           <Popconfirm
@@ -430,6 +453,79 @@ export default function ModelPanel() {
       )}
 
       <Divider style={{ margin: "8px 0 0" }} />
+
+      <Modal
+        open={batchOpen}
+        title="批量预标注"
+        okText="开始"
+        cancelText="取消"
+        onCancel={() => setBatchOpen(false)}
+        onOk={onRunBatch}
+        width={420}
+      >
+        <div style={{ display: "flex", flexDirection: "column", gap: 14, marginTop: 8 }}>
+          <div>
+            <div style={{ marginBottom: 6 }}>范围</div>
+            <Radio.Group
+              value={batchScope}
+              onChange={(e) => setBatchScope(e.target.value)}
+              style={{ display: "flex", flexDirection: "column", gap: 8 }}
+              options={[
+                { value: "all", label: `全部（${images.length} 张）` },
+                {
+                  value: "unlabeled",
+                  label: `仅未标注（无标签或空标注，${
+                    images.filter((im) => !im.has_label || (im.shape_count ?? 0) === 0).length
+                  } 张）`,
+                },
+                {
+                  value: "prev",
+                  label: (
+                    <span>
+                      当前向前（不含当前）{" "}
+                      <InputNumber
+                        size="small"
+                        min={1}
+                        max={images.length}
+                        value={batchN}
+                        onChange={(v) => setBatchN(v ?? 1)}
+                        style={{ width: 80 }}
+                        onClick={(e) => e.stopPropagation()}
+                      />{" "}
+                      张
+                    </span>
+                  ),
+                },
+                {
+                  value: "next",
+                  label: (
+                    <span>
+                      当前向后（不含当前）{" "}
+                      <InputNumber
+                        size="small"
+                        min={1}
+                        max={images.length}
+                        value={batchN}
+                        onChange={(v) => setBatchN(v ?? 1)}
+                        style={{ width: 80 }}
+                        onClick={(e) => e.stopPropagation()}
+                      />{" "}
+                      张
+                    </span>
+                  ),
+                },
+              ]}
+            />
+          </div>
+          <div style={{ fontSize: 12, color: "#888" }}>
+            将处理 {batchTargets().length} 张图片
+            {currentIndex >= 0 && batchScope !== "all" && batchScope !== "unlabeled" && (
+              <>，以当前第 {currentIndex + 1} 张为基准</>
+            )}
+            。大数量任务可随时用「撤回」整批恢复。
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }

@@ -1,11 +1,20 @@
 import { useMemo, useState } from "react";
-import { Input, InputNumber, List, Slider } from "antd";
+import { Input, List, Segmented, Slider, Tag, InputNumber } from "antd";
 import {
   CheckCircleFilled,
   FileImageOutlined,
   VideoCameraOutlined,
 } from "@ant-design/icons";
 import { useStudio } from "../store/useStudio";
+
+type FilterMode = "all" | "labeled" | "unlabeled" | "empty";
+
+const FILTER_OPTIONS = [
+  { value: "all", label: "全部" },
+  { value: "labeled", label: "已标注" },
+  { value: "unlabeled", label: "未标注" },
+  { value: "empty", label: "空标注" },
+];
 
 function VideoPanel() {
   const { video, currentIndex, selectImage } = useStudio();
@@ -78,25 +87,69 @@ function VideoPanel() {
 export default function FileList() {
   const { images, video, currentIndex, selectImage } = useStudio();
   const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<FilterMode>("all");
+
+  const matchFilter = (im: { has_label: boolean; shape_count: number | null }) => {
+    switch (filter) {
+      case "labeled":
+        return im.has_label && (im.shape_count ?? 0) > 0;
+      case "unlabeled":
+        return !im.has_label;
+      case "empty":
+        return im.has_label && (im.shape_count ?? 0) === 0;
+      default:
+        return true;
+    }
+  };
+
+  const counts = useMemo(() => {
+    let labeled = 0, unlabeled = 0, empty = 0;
+    for (const im of images) {
+      if (!im.has_label) unlabeled++;
+      else if ((im.shape_count ?? 0) === 0) empty++;
+      else labeled++;
+    }
+    return { labeled, unlabeled, empty };
+  }, [images]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     return images
       .map((im, i) => ({ ...im, index: i }))
+      .filter(matchFilter)
       .filter((im) => !q || im.filename.toLowerCase().includes(q));
-  }, [images, query]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [images, query, filter]);
 
   if (video) return <VideoPanel />;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      <div style={{ padding: 8 }}>
+      <div style={{ padding: 8, borderBottom: "1px solid #f0f0f0" }}>
         <Input.Search
           size="small"
           placeholder="搜索图片"
           allowClear
           value={query}
           onChange={(e) => setQuery(e.target.value)}
+          style={{ marginBottom: 6 }}
+        />
+        <Segmented
+          size="small"
+          block
+          value={filter}
+          onChange={(v) => setFilter(v as FilterMode)}
+          options={FILTER_OPTIONS.map((o) => ({
+            ...o,
+            label:
+              o.value === "all"
+                ? `全部 ${images.length}`
+                : o.value === "labeled"
+                  ? `已标注 ${counts.labeled}`
+                  : o.value === "unlabeled"
+                    ? `未标注 ${counts.unlabeled}`
+                    : `空标注 ${counts.empty}`,
+          }))}
         />
       </div>
       <div style={{ flex: 1, overflow: "auto" }}>
@@ -128,15 +181,23 @@ export default function FileList() {
               >
                 {item.filename}
               </span>
-              {item.has_label && (
-                <CheckCircleFilled style={{ color: "#52c41a", marginLeft: 4 }} />
+              {item.has_label && (item.shape_count ?? 0) > 0 && (
+                <span style={{ color: "#52c41a", fontSize: 11, marginLeft: 4 }}>
+                  {item.shape_count}
+                </span>
               )}
+              {item.has_label && (item.shape_count ?? 0) === 0 && (
+                <Tag color="orange" style={{ marginLeft: 4, fontSize: 10, lineHeight: "14px", padding: "0 4px" }}>
+                  空
+                </Tag>
+              )}
+              {item.has_label && <CheckCircleFilled style={{ color: "#52c41a", marginLeft: 4 }} />}
             </List.Item>
           )}
         />
       </div>
       <div style={{ padding: 8, borderTop: "1px solid #f0f0f0", color: "#999", fontSize: 12 }}>
-        共 {images.length} 张
+        共 {filtered.length} 张
       </div>
     </div>
   );

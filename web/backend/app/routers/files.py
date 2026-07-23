@@ -1,6 +1,7 @@
 """Directory browsing and image serving."""
 
 import io
+import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -18,6 +19,26 @@ router = APIRouter()
 _pool = ThreadPoolExecutor(max_workers=16)
 
 
+def _shape_count(directory: Path, name: str):
+    """Shapes in the image's label file, or None when it has none."""
+    label_path = label_path_for(directory / name)
+    if not label_path.exists():
+        return None
+    try:
+        with open(label_path, "r", encoding="utf-8") as f:
+            return len(json.load(f).get("shapes", []))
+    except Exception:
+        return 0
+
+
+def _build_image_infos(directory: Path, images):
+    counts = list(_pool.map(lambda n: _shape_count(directory, n), images))
+    return [
+        ImageInfo(filename=name, has_label=count is not None, shape_count=count)
+        for name, count in zip(images, counts)
+    ]
+
+
 @router.post("/dir/open", response_model=OpenDirResponse)
 def open_dir(req: OpenDirRequest):
     directory = Path(req.path).expanduser()
@@ -31,16 +52,9 @@ def open_dir(req: OpenDirRequest):
     )
     session.set_dir(directory.resolve(), images)
 
-    # Check label-file existence concurrently (serial stat calls add up
-    # quickly on large datasets).
-    flags = list(_pool.map(lambda n: label_path_for(directory / n).exists(), images))
-
     return OpenDirResponse(
         dir=str(directory.resolve()),
-        images=[
-            ImageInfo(filename=name, has_label=has_label)
-            for name, has_label in zip(images, flags)
-        ],
+        images=_build_image_infos(directory, images),
     )
 
 
@@ -51,13 +65,7 @@ def list_images():
         raise HTTPException(status_code=400, detail="No directory opened")
     return OpenDirResponse(
         dir=str(directory),
-        images=[
-            ImageInfo(
-                filename=name,
-                has_label=label_path_for(directory / name).exists(),
-            )
-            for name in session.get_images()
-        ],
+        images=_build_image_infos(directory, session.get_images()),
     )
 
 
