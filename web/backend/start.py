@@ -29,7 +29,17 @@ def main():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--token", default=None, help="access token for remote use")
+    parser.add_argument(
+        "--proxy",
+        default=None,
+        help="HTTP(S) proxy for model downloads, e.g. http://127.0.0.1:7890",
+    )
     args = parser.parse_args()
+
+    if args.proxy:
+        os.environ["HTTP_PROXY"] = args.proxy
+        os.environ["HTTPS_PROXY"] = args.proxy
+        os.environ.setdefault("NO_PROXY", "localhost,127.0.0.1")
 
     token = args.token or os.environ.get("XANYLABELING_WEB_TOKEN")
     public = args.host not in LOOPBACK
@@ -59,6 +69,8 @@ def main():
         _p(f"  访问地址:  http://127.0.0.1:{args.port}")
         if token:
             _p(f"  访问令牌:  {token}")
+    if args.proxy:
+        _p(f"  下载代理:  {args.proxy}（模型下载将走此代理）")
     _p("=" * 56)
 
     uvicorn.run("app.main:app", host=args.host, port=args.port)
