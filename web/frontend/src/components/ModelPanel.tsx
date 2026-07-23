@@ -58,6 +58,7 @@ export default function ModelPanel() {
   const [running, setRunning] = useState(false);
   const [batch, setBatch] = useState<api.BatchStatus | null>(null);
   const [textPrompt, setTextPrompt] = useState("");
+  const [outputMode, setOutputMode] = useState<string>("rectangle");
   const [conf, setConf] = useState(0.25);
   const [iou, setIou] = useState(0.45);
   const [preserve, setPreserve] = useState(false);
@@ -75,7 +76,10 @@ export default function ModelPanel() {
       setModels(d.models);
       setLoaded(d.loaded);
       // keep the dropdown in sync with the actually loaded model
-      if (d.loaded) setSelectedCfg(d.loaded.config_file);
+      if (d.loaded) {
+        setSelectedCfg(d.loaded.config_file);
+        setOutputMode(d.loaded.default_output_mode ?? "rectangle");
+      }
     } catch (e) {
       console.error(e);
     }
@@ -125,6 +129,7 @@ export default function ModelPanel() {
       .then(async () => {
         const s = await api.getModelStatus();
         setLoaded(s.loaded);
+        setOutputMode(s.loaded?.default_output_mode ?? "rectangle");
         message.success("模型加载完成");
       })
       .catch((e) => {
@@ -421,17 +426,64 @@ export default function ModelPanel() {
 
       {loaded && (
         <div style={{ marginTop: 8 }}>
-          <Input
-            size="small"
-            placeholder="文本提示：多类用英文句号分隔，如 person. car."
-            value={textPrompt}
-            onChange={(e) => setTextPrompt(e.target.value)}
-            style={{ marginBottom: 6 }}
-          />
-          <div style={{ fontSize: 11, color: "#888" }}>置信度 {conf.toFixed(2)}</div>
-          <Slider min={0.05} max={0.95} step={0.05} value={conf} onChange={setConf} />
-          <div style={{ fontSize: 11, color: "#888" }}>IoU {iou.toFixed(2)}</div>
-          <Slider min={0.1} max={0.95} step={0.05} value={iou} onChange={setIou} />
+          {/* 输出形状：模型支持多种输出模式时才显示 */}
+          {(loaded.output_modes?.length ?? 0) > 1 && (
+            <div style={{ marginBottom: 6 }}>
+              <div style={{ fontSize: 11, color: "#888" }}>输出形状</div>
+              <Select
+                size="small"
+                style={{ width: "100%" }}
+                value={outputMode}
+                onChange={async (v) => {
+                  setOutputMode(v);
+                  try {
+                    await api.setOutputMode(v);
+                  } catch (e) {
+                    message.error(`切换输出模式失败: ${(e as Error).message}`);
+                  }
+                }}
+                options={(loaded.output_modes ?? []).map((m) => ({
+                  value: m,
+                  label:
+                    m === "rectangle"
+                      ? "矩形"
+                      : m === "polygon"
+                        ? "多边形"
+                        : m === "rotation"
+                          ? "旋转框"
+                          : m === "point"
+                            ? "点"
+                            : m,
+                }))}
+              />
+            </div>
+          )}
+          {/* 文本提示：edit_text 类模型（grounding/SAM3 等） */}
+          {(loaded.widgets ?? []).includes("edit_text") && (
+            <Input
+              size="small"
+              placeholder="文本提示：多类用英文句号分隔，如 person. car."
+              value={textPrompt}
+              onChange={(e) => setTextPrompt(e.target.value)}
+              style={{ marginBottom: 6 }}
+            />
+          )}
+          {/* 置信度：edit_conf / input_conf / conf_threshold 类模型 */}
+          {["edit_conf", "input_conf", "conf_threshold"].some((w) =>
+            (loaded.widgets ?? []).includes(w)
+          ) && (
+            <>
+              <div style={{ fontSize: 11, color: "#888" }}>置信度 {conf.toFixed(2)}</div>
+              <Slider min={0.05} max={0.95} step={0.05} value={conf} onChange={setConf} />
+            </>
+          )}
+          {/* IoU：edit_iou / input_iou 类模型 */}
+          {["edit_iou", "input_iou"].some((w) => (loaded.widgets ?? []).includes(w)) && (
+            <>
+              <div style={{ fontSize: 11, color: "#888" }}>IoU {iou.toFixed(2)}</div>
+              <Slider min={0.1} max={0.95} step={0.05} value={iou} onChange={setIou} />
+            </>
+          )}
           <div style={{ fontSize: 11, color: "#888" }}>
             保留已有标注{" "}
             <Switch size="small" checked={preserve} onChange={setPreserve} />

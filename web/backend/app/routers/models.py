@@ -40,6 +40,19 @@ def unload_model():
     return {"loaded": None}
 
 
+class OutputModeRequest(BaseModel):
+    mode: str
+
+
+@router.post("/models/output_mode")
+def set_output_mode(req: OutputModeRequest):
+    svc = get_model_service()
+    try:
+        return svc.set_output_mode(req.mode)
+    except Exception as e:  # noqa
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.get("/models/status")
 def model_status():
     svc = get_model_service()

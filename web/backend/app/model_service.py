@@ -80,13 +80,27 @@ class WebModelService:
         cfg = self.manager.loaded_model_config
         if not cfg or not cfg.get("model"):
             return None
+        meta = getattr(cfg["model"], "Meta", None)
+        output_modes = getattr(meta, "output_modes", {}) if meta else {}
         return {
             "name": cfg.get("name"),
             "display_name": cfg.get("display_name"),
             "type": cfg.get("type"),
             "config_file": cfg.get("config_file"),
             "supports_marks": cfg.get("type") in _AUTO_LABELING_MARKS_MODELS,
+            "output_modes": list(output_modes.keys()),
+            "default_output_mode": getattr(meta, "default_output_mode", "rectangle")
+            if meta
+            else "rectangle",
+            "widgets": list(getattr(meta, "widgets", [])) if meta else [],
         }
+
+    def set_output_mode(self, mode: str) -> Dict[str, Any]:
+        cfg = self.manager.loaded_model_config
+        if not cfg or not cfg.get("model"):
+            raise RuntimeError("No model loaded")
+        self.manager.set_output_mode(mode)
+        return {"output_mode": mode}
 
     # ---- load / unload --------------------------------------------------------
     def load(self, config_file: str):
