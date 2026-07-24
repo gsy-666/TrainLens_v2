@@ -1,0 +1,1 @@
+{"loaded":{"name":"groundingdino_swint_ogc_quant-r20231024","display_name":"GroundingDINO (SwinT-QInt8)","type":"grounding_dino","config_file":":/groundingdino_swint_ogc_quant.yaml","supports_marks":false,"output_modes":["rectangle"],"default_output_mode":"rectangle","widgets":["edit_text","button_send","input_box_thres","edit_conf","toggle_preserve_existing_annotations"]}}

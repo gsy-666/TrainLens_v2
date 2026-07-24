@@ -3,10 +3,15 @@
 import subprocess
 
 from fastapi import APIRouter
+from pydantic import BaseModel
 
 router = APIRouter()
 
 _cache: dict = {}
+
+
+class SetDeviceRequest(BaseModel):
+    device: str  # "cpu" | "gpu" | "auto"
 
 
 def _detect_device() -> dict:
@@ -52,3 +57,33 @@ def get_device():
     if "device" not in _cache:
         _cache["device"] = _detect_device()
     return _cache["device"]
+
+
+@router.get("/system/device/inference")
+def get_inference_device():
+    """Get current inference device preference (CPU / GPU / auto)."""
+    from anylabeling.views.common.device_manager import device_manager
+
+    dm = device_manager
+    current = dm._preferred_device or "auto"
+    available = dm.get_available_devices()
+    return {
+        "current": current,
+        "available": available,
+    }
+
+
+@router.post("/system/device/inference")
+def set_inference_device(req: SetDeviceRequest):
+    """Set inference device preference."""
+    from anylabeling.views.common.device_manager import device_manager
+
+    dm = device_manager
+    device = req.device.lower()
+    if device == "auto":
+        dm.reset_device_preference()
+    elif device in ("cpu", "gpu"):
+        dm.set_device(device.upper())
+    else:
+        return {"ok": False, "error": f"Invalid device: {req.device}"}
+    return {"ok": True, "current": dm._preferred_device or "auto"}

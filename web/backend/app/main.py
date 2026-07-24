@@ -9,6 +9,8 @@ When web/frontend/dist exists (npm run build), it is served at / so the
 whole app runs from this single process/port.
 """
 
+import os
+import site
 import sys
 from pathlib import Path
 
@@ -20,6 +22,41 @@ from fastapi.staticfiles import StaticFiles
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+
+
+def _fix_dll_search_paths():
+    """Register DLL directories for PyQt6 and pip-installed NVIDIA libs.
+
+    - PyQt6's own Qt6\\bin must win the Windows DLL search (Anaconda's
+      Library\\bin shadows it on some setups).
+    - onnxruntime's CUDA provider needs cublasLt64_12.dll / cudnn64_9.dll
+      from the nvidia-* pip packages, which are not on the default path.
+    """
+    if os.name != "nt":
+        return
+    candidates = []
+    try:
+        candidates += [Path(p) for p in site.getsitepackages()]
+    except Exception:
+        pass
+    candidates.append(Path(sys.prefix) / "Lib" / "site-packages")
+    for sp in candidates:
+        dirs = [sp / "PyQt6" / "Qt6" / "bin"]
+        dirs += [
+            sp / "nvidia" / pkg / "bin"
+            for pkg in ("cublas", "cudnn", "cuda_runtime", "cuda_nvrtc")
+        ]
+        for d in dirs:
+            if d.is_dir():
+                try:
+                    os.add_dll_directory(str(d))
+                except (OSError, AttributeError):
+                    pass
+                os.environ["PATH"] = str(d) + os.pathsep + os.environ.get("PATH", "")
+        return
+
+
+_fix_dll_search_paths()
 
 from .routers import (  # noqa: E402
     dataset,

@@ -69,7 +69,10 @@ class DeviceManager:
                 logger.debug(f"Failed to get ONNX providers: {e}")
                 self._available_providers = []
 
-        return "CUDAExecutionProvider" in self._available_providers
+        return (
+            "CUDAExecutionProvider" in self._available_providers
+            or "DmlExecutionProvider" in self._available_providers
+        )
 
     def _load_from_config(self) -> Optional[str]:
         try:

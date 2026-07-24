@@ -59,10 +59,7 @@ class PPOCRv4(Model):
             self.sess_opts.inter_op_num_threads = int(
                 os.environ["OMP_NUM_THREADS"]
             )
-        self.providers = ["CPUExecutionProvider"]
-
-        if __preferred_device__ == "GPU":
-            self.providers = ["CUDAExecutionProvider"]
+        self.providers = ort.get_available_providers()
         net = ort.InferenceSession(
             model_abs_path,
             providers=self.providers,

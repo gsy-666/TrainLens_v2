@@ -70,6 +70,10 @@ export default function ModelPanel() {
   const [batchN, setBatchN] = useState(100);
   const pollRef = useRef<number | null>(null);
 
+  // device preference
+  const [inferenceDevice, setInferenceDevice] = useState<string>("auto");
+  const [availableDevices, setAvailableDevices] = useState<string[]>(["CPU"]);
+
   const refreshModels = useCallback(async () => {
     try {
       const d = await api.getModels();
@@ -87,6 +91,11 @@ export default function ModelPanel() {
 
   useEffect(() => {
     refreshModels();
+    // fetch device preference
+    api.getInferenceDevice().then((d) => {
+      setInferenceDevice(d.current === "auto" ? "auto" : d.current);
+      setAvailableDevices(d.available);
+    }).catch(() => undefined);
     // pick up a pending batch-undo state from an earlier run
     api
       .getBatchStatus()
@@ -116,6 +125,18 @@ export default function ModelPanel() {
     },
     []
   );
+
+  const onDeviceChange = useCallback(async (device: string) => {
+    setInferenceDevice(device);
+    try {
+      await api.setInferenceDevice(device);
+      if (loaded) {
+        message.info("设备已切换，重新加载模型后生效");
+      }
+    } catch (e) {
+      message.error(`切换设备失败: ${(e as Error).message}`);
+    }
+  }, [loaded]);
 
   const onLoad = useCallback(async () => {
     if (!selectedCfg) return;
@@ -245,7 +266,7 @@ export default function ModelPanel() {
       const skipped = r.skipped_modified.length;
       message.success(
         `已撤回：恢复 ${r.restored} 个、删除 ${r.deleted} 个新生成的标注` +
-          (skipped ? `，${skipped} 个因之后被手动修改而跳过` : "")
+        (skipped ? `，${skipped} 个因之后被手动修改而跳过` : "")
       );
       setUndoCount(0);
       await refreshImages();
@@ -320,6 +341,27 @@ export default function ModelPanel() {
         size="small"
         dropdownMatchSelectWidth={360}
       />
+
+      {availableDevices.length > 1 && (
+        <div style={{ marginTop: 8 }}>
+          <div style={{ fontSize: 11, color: "#888", marginBottom: 4 }}>推理设备</div>
+          <Radio.Group
+            size="small"
+            value={inferenceDevice}
+            onChange={(e) => onDeviceChange(e.target.value)}
+            optionType="button"
+            buttonStyle="solid"
+          >
+            <Radio.Button value="auto">自动</Radio.Button>
+            <Radio.Button value="gpu">
+              <span style={{ fontSize: 11 }}>GPU</span>
+            </Radio.Button>
+            <Radio.Button value="cpu">
+              <span style={{ fontSize: 11 }}>CPU</span>
+            </Radio.Button>
+          </Radio.Group>
+        </div>
+      )}
 
       <Space style={{ marginTop: 8, width: "100%" }} size={4}>
         {!loaded ? (
@@ -472,11 +514,11 @@ export default function ModelPanel() {
           {["edit_conf", "input_conf", "conf_threshold"].some((w) =>
             (loaded.widgets ?? []).includes(w)
           ) && (
-            <>
-              <div style={{ fontSize: 11, color: "#888" }}>置信度 {conf.toFixed(2)}</div>
-              <Slider min={0.05} max={0.95} step={0.05} value={conf} onChange={setConf} />
-            </>
-          )}
+              <>
+                <div style={{ fontSize: 11, color: "#888" }}>置信度 {conf.toFixed(2)}</div>
+                <Slider min={0.05} max={0.95} step={0.05} value={conf} onChange={setConf} />
+              </>
+            )}
           {/* IoU：edit_iou / input_iou 类模型 */}
           {["edit_iou", "input_iou"].some((w) => (loaded.widgets ?? []).includes(w)) && (
             <>
@@ -526,9 +568,8 @@ export default function ModelPanel() {
                 { value: "all", label: `全部（${images.length} 张）` },
                 {
                   value: "unlabeled",
-                  label: `仅未标注（无标签或空标注，${
-                    images.filter((im) => !im.has_label || (im.shape_count ?? 0) === 0).length
-                  } 张）`,
+                  label: `仅未标注（无标签或空标注，${images.filter((im) => !im.has_label || (im.shape_count ?? 0) === 0).length
+                    } 张）`,
                 },
                 {
                   value: "prev",

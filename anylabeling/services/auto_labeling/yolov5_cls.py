@@ -64,12 +64,11 @@ class YOLOv5_CLS(Model):
         self.sess_opts = ort.SessionOptions()
         if "OMP_NUM_THREADS" in os.environ:
             self.sess_opts.inter_op_num_threads = int(os.environ["OMP_NUM_THREADS"])
-        self.providers = ['CPUExecutionProvider']
+        self.providers = ort.get_available_providers()
 
         if __preferred_device__ == "GPU":
             self.det_net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
             self.det_net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
-            self.providers = ['CUDAExecutionProvider']
 
         self.cls_net = ort.InferenceSession(
                         cls_model_abs_path, 

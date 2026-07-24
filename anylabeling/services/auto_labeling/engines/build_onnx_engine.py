@@ -14,9 +14,18 @@ class OnnxBaseModel:
                 os.environ["OMP_NUM_THREADS"]
             )
 
-        self.providers = ["CPUExecutionProvider"]
-        if device_type.lower() == "gpu":
-            self.providers = ["CUDAExecutionProvider"]
+        if device_type.lower() == "cpu":
+            self.providers = ["CPUExecutionProvider"]
+        elif device_type.lower() == "gpu":
+            # Try CUDA first, fall back to DirectML (Windows) then CPU
+            self.providers = [
+                "CUDAExecutionProvider",
+                "DmlExecutionProvider",
+                "CPUExecutionProvider",
+            ]
+        else:
+            # Auto-detect best available provider (DirectML / CUDA / CPU)
+            self.providers = ort.get_available_providers()
 
         self.ort_session = ort.InferenceSession(
             model_path,
