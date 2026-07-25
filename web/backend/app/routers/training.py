@@ -1,9 +1,14 @@
 """Guided training (ultralytics) endpoints."""
 
 import asyncio
-from typing import Any, Dict, Optional
+import io
+import zipfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from ..training_service import get_training_service
@@ -35,16 +40,19 @@ class GuidedStartRequest(BaseModel):
     plots: Optional[bool] = None
 
 
-class PreflightRequest(BaseModel):
-    task: str = "detect"
-    model: str
-    data: str
-    project: str
-    name: str = "train"
-    device: str = "cpu"
-    epochs: int = 100
-    batch: int = 16
-    imgsz: int = 640
+class ArtifactInfo(BaseModel):
+    name: str
+    relative_path: str
+    size: int
+    modified_at: str
+    is_downloadable: bool = True
+    file_type: str
+
+
+class ArtifactListResponse(BaseModel):
+    job_id: str
+    output_dir: str
+    artifacts: List[ArtifactInfo]
 
 
 @router.post("/training/guided/start")
@@ -86,10 +94,81 @@ def training_history(limit: int = 50):
     return {"jobs": svc.history(limit)}
 
 
-@router.post("/training/preflight")
-async def training_preflight(req: PreflightRequest):
+
+
+def _job_output_dir(job_id: str) -> Path:
     svc = get_training_service()
-    try:
-        return await asyncio.to_thread(svc.run_preflight, req.model_dump())
-    except Exception as e:  # noqa
-        raise HTTPException(status_code=400, detail=str(e))
+    for record in svc.history(500):
+        if str(record.get("job_id")) == job_id:
+            out = record.get("output_directory") or record.get("output_dir") or record.get("workspace")
+            if not out:
+                raise HTTPException(status_code=404, detail=f"Output directory not found for job: {job_id}")
+            path = Path(str(out)).expanduser().resolve()
+            if not path.is_dir():
+                raise HTTPException(status_code=404, detail=f"Output directory not found for job: {job_id}")
+            return path
+    raise HTTPException(status_code=404, detail=f"Training job not found: {job_id}")
+
+
+def _safe_child(base: Path, rel: str) -> Path:
+    candidate = (base / rel).resolve()
+    if candidate == base or base not in candidate.parents:
+        raise HTTPException(status_code=400, detail=f"Path escapes job output directory: {rel}")
+    return candidate
+
+
+def _file_info(path: Path, base: Path) -> ArtifactInfo:
+    rel = path.relative_to(base).as_posix()
+    st = path.stat()
+    return ArtifactInfo(
+        name=path.name,
+        relative_path=rel,
+        size=st.st_size,
+        modified_at=datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
+        is_downloadable=path.is_file(),
+        file_type=path.suffix.lstrip(".").lower() or "file",
+    )
+
+
+def _list_job_artifacts(base: Path) -> List[ArtifactInfo]:
+    artifacts: List[ArtifactInfo] = []
+    for path in sorted(base.rglob("*")):
+        try:
+            resolved = path.resolve()
+        except Exception:
+            continue
+        if base not in resolved.parents and resolved != base:
+            continue
+        if resolved.is_file():
+            artifacts.append(_file_info(resolved, base))
+    return artifacts
+
+
+@router.get("/training/history/{job_id}/artifacts", response_model=ArtifactListResponse)
+def training_artifacts(job_id: str):
+    base = _job_output_dir(job_id)
+    return ArtifactListResponse(job_id=job_id, output_dir=str(base), artifacts=_list_job_artifacts(base))
+
+
+@router.get("/training/history/{job_id}/artifacts/download")
+def training_artifact_download(job_id: str, path: str):
+    base = _job_output_dir(job_id)
+    target = _safe_child(base, path)
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail=f"Artifact not found: {path}")
+    return FileResponse(target, filename=target.name)
+
+
+@router.get("/training/history/{job_id}/artifacts/download-all")
+def training_artifact_download_all(job_id: str):
+    base = _job_output_dir(job_id)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for artifact in _list_job_artifacts(base):
+            fp = _safe_child(base, artifact.relative_path)
+            if fp.is_file():
+                zf.write(fp, artifact.relative_path)
+    buf.seek(0)
+    return StreamingResponse(iter([buf.getvalue()]), media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="{job_id}_artifacts.zip"'})
+
+

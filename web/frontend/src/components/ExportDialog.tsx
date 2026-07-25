@@ -36,7 +36,7 @@ interface Props {
 }
 
 export default function ExportDialog({ open, onCancel }: Props) {
-  const [formats, setFormats] = useState<Record<string, api.ExportFormatInfo>>({});
+  const [exportMode, setExportMode] = useState("annotation");
   const [format, setFormat] = useState("yolo");
   const [mode, setMode] = useState<string>("hbb");
   const [outputDir, setOutputDir] = useState("");
@@ -46,6 +46,7 @@ export default function ExportDialog({ open, onCancel }: Props) {
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState<{ current: number; total: number } | null>(null);
   const [result, setResult] = useState<api.ExportResult | null>(null);
+  const [formats, setFormats] = useState<Record<string, api.ExportFormatInfo>>({});
   const pollRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -166,7 +167,7 @@ export default function ExportDialog({ open, onCancel }: Props) {
               value={mode}
               onChange={setMode}
               disabled={running}
-              options={modes.map((m) => ({ value: m, label: MODE_LABELS[m] ?? m }))}
+              options={modes.map((m: string) => ({ value: m, label: MODE_LABELS[m] ?? m }))}
             />
           </div>
         )}

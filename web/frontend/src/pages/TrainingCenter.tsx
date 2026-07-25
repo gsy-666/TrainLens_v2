@@ -64,10 +64,16 @@ export default function TrainingCenter({ onBack }: Props) {
 
   // runtime
   const [issues, setIssues] = useState<api.PreflightIssue[] | null>(null);
+  const [datasetSummary, setDatasetSummary] = useState<api.DatasetPrepSummary | null>(null);
   const [status, setStatus] = useState<api.TrainingStatusResponse | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [metrics, setMetrics] = useState<api.MetricSeries[]>([]);
   const [history, setHistory] = useState<Record<string, unknown>[]>([]);
+  const [artifactJob, setArtifactJob] = useState<string | null>(null);
+  const [artifactList, setArtifactList] = useState<api.ArtifactListResponse | null>(null);
+  const [artifactLoading, setArtifactLoading] = useState(false);
+  const [artifactError, setArtifactError] = useState<string | null>(null);
+  const [artifactDetails, setArtifactDetails] = useState<api.ArtifactInfo[] | null>(null);
 
   const seqRef = useRef(0);
   const logBoxRef = useRef<HTMLDivElement>(null);
@@ -151,6 +157,23 @@ export default function TrainingCenter({ onBack }: Props) {
     }
   }, []);
 
+  const loadArtifacts = useCallback(async (jobId: string) => {
+    setArtifactLoading(true);
+    setArtifactError(null);
+    try {
+      const d = await api.getTrainingArtifacts(jobId);
+      setArtifactList(d);
+      setArtifactDetails(d.artifacts);
+    } catch (e) {
+      const err = e as { response?: { data?: { detail?: string } }; message: string };
+      setArtifactError(err.response?.data?.detail ?? err.message);
+      setArtifactList(null);
+      setArtifactDetails(null);
+    } finally {
+      setArtifactLoading(false);
+    }
+  }, []);
+
   // device auto-detection on mount
   useEffect(() => {
     api
@@ -212,7 +235,6 @@ export default function TrainingCenter({ onBack }: Props) {
     setStarting(true);
     setIssues(null);
     try {
-      // preflight runs automatically; only failures interrupt the flow
       const pre = await api.trainingPreflight(formPayload());
       if (!pre.can_start) {
         setIssues(pre.issues);
@@ -246,6 +268,13 @@ export default function TrainingCenter({ onBack }: Props) {
         dataset_ratio: prepRatio,
       });
       setData(r.data_yaml);
+      setDatasetSummary({
+        total_images: 0,
+        labeled_images: 0,
+        empty_labels: 0,
+        class_counts: {},
+        checks: [{ severity: "info", title: "数据集已生成", message: r.info }],
+      });
       setPrepOpen(false);
       const trainMatch = r.info.match(/Train images: (\d+)/);
       const valMatch = r.info.match(/Val images: (\d+)/);
@@ -313,7 +342,24 @@ export default function TrainingCenter({ onBack }: Props) {
             </div>
           </Card>
 
-          <Card size="small" title="自定义训练（Ultralytics）" style={{ marginBottom: 12 }}>
+          {datasetSummary && (
+            <Card size="small" title="数据集检查" style={{ marginBottom: 12 }}>
+              <List
+                size="small"
+                dataSource={datasetSummary.checks}
+                renderItem={(item) => (
+                  <List.Item>
+                    <Tag color={item.severity === "error" ? "red" : item.severity === "warning" ? "orange" : "blue"}>
+                      {item.severity}
+                    </Tag>
+                    <span>{item.title}</span>
+                  </List.Item>
+                )}
+              />
+            </Card>
+          )}
+
+          <Card size="small" title="训练参数">
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               <div>
                 <div style={{ marginBottom: 4 }}>任务类型</div>
@@ -553,12 +599,92 @@ export default function TrainingCenter({ onBack }: Props) {
                 },
                 { title: "开始", dataIndex: "started_at", width: 170, ellipsis: true },
                 { title: "best mAP50", dataIndex: "best_map50", width: 110 },
-                { title: "final loss", dataIndex: "final_train_loss", width: 100 },
+                {
+                  title: "产物",
+                  render: (_: unknown, r: Record<string, unknown>) => (
+                    <Button
+                      size="small"
+                      onClick={() => {
+                        const id = String(r.job_id ?? "");
+                        setArtifactJob(id);
+                        void loadArtifacts(id);
+                      }}
+                    >
+                      产物
+                    </Button>
+                  ),
+                },
               ]}
             />
           </Card>
         </div>
       </div>
+
+      <Modal
+        open={!!artifactJob}
+        title="训练产物"
+        onCancel={() => {
+          setArtifactJob(null);
+          setArtifactList(null);
+          setArtifactError(null);
+          setArtifactDetails(null);
+        }}
+        footer={null}
+        width={820}
+      >
+        {artifactLoading ? (
+          <div>加载中…</div>
+        ) : artifactError ? (
+          <div style={{ color: "#f5222d" }}>{artifactError}</div>
+        ) : artifactList ? (
+          <>
+            <div style={{ marginBottom: 8, color: "#666" }}>
+              {artifactList.job_id} · {artifactList.output_dir}
+            </div>
+            {artifactDetails && artifactDetails.length > 0 ? (
+              <List
+                size="small"
+                dataSource={artifactDetails}
+                locale={{ emptyText: "暂无产物" }}
+                renderItem={(a) => (
+                  <List.Item
+                    actions={[
+                      <Button
+                        key="download"
+                        size="small"
+                        href={api.trainingArtifactDownloadUrl(artifactList.job_id, a.relative_path)}
+                        target="_blank"
+                      >
+                        下载
+                      </Button>,
+                    ]}
+                  >
+                    <div style={{ width: "100%" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                        <strong>{a.name}</strong>
+                        <span style={{ color: "#999" }}>{a.file_type}</span>
+                      </div>
+                      <div style={{ fontSize: 12, color: "#999", wordBreak: "break-all" }}>{a.relative_path}</div>
+                      <div style={{ fontSize: 12, color: "#999" }}>
+                        {a.size} bytes · {a.modified_at}
+                      </div>
+                    </div>
+                  </List.Item>
+                )}
+              />
+            ) : (
+              <div>暂无产物</div>
+            )}
+            <div style={{ marginTop: 12 }}>
+              <Button href={api.trainingArtifactDownloadAllUrl(artifactList.job_id)} target="_blank">
+                下载全部 ZIP
+              </Button>
+            </div>
+          </>
+        ) : (
+          <div>暂无产物</div>
+        )}
+      </Modal>
 
       <DirBrowserModal
         open={browse === "data"}
@@ -602,7 +728,7 @@ export default function TrainingCenter({ onBack }: Props) {
               style={{ width: "100%" }}
               value={prepTask}
               onChange={setPrepTask}
-              options={["Detect", "OBB", "Segment", "Pose", "Classify"].map((t) => ({
+              options={["Detect", "OBB", "Segment", "Pose"].map((t) => ({
                 value: t,
                 label: t,
               }))}

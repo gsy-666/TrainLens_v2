@@ -13,6 +13,8 @@ class ImageInfo(BaseModel):
     filename: str
     has_label: bool
     shape_count: Optional[int] = None  # None = no label file
+    labels: List[str] = []
+    label_counts: Dict[str, int] = {}
 
 
 class OpenDirResponse(BaseModel):

@@ -169,7 +169,7 @@ export default function Toolbar({ onOpenDir, onOpenVideo, onExport }: Props) {
       <Divider type="vertical" />
 
       <Space size={4}>
-        <Tooltip title="导出为 YOLO/VOC/COCO 等格式">
+        <Tooltip title="导出标注和模型">
           <Button
             icon={<ExportOutlined />}
             onClick={onExport}

@@ -1,7 +1,7 @@
 """Directory browsing and image serving."""
 
 import io
-import json
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, Response
 from natsort import natsorted
 from PIL import Image
 
-from ..adapters import label_path_for
+from ..adapters import label_path_for, load_label_data
 from ..deps import IMAGE_EXTENSIONS, session
 from ..schemas import ImageInfo, OpenDirRequest, OpenDirResponse
 
@@ -25,8 +25,10 @@ def _shape_count(directory: Path, name: str):
     if not label_path.exists():
         return None
     try:
-        with open(label_path, "r", encoding="utf-8") as f:
-            return len(json.load(f).get("shapes", []))
+        data = load_label_data(label_path)
+        shapes = data.get("shapes", [])
+        labels = [s.get("label", "") for s in shapes if s.get("label")]
+        return {"count": len(shapes), "labels": labels, "label_counts": dict(Counter(labels))}
     except Exception:
         return 0
 
@@ -34,7 +36,13 @@ def _shape_count(directory: Path, name: str):
 def _build_image_infos(directory: Path, images):
     counts = list(_pool.map(lambda n: _shape_count(directory, n), images))
     return [
-        ImageInfo(filename=name, has_label=count is not None, shape_count=count)
+        ImageInfo(
+            filename=name,
+            has_label=count is not None,
+            shape_count=(count["count"] if isinstance(count, dict) else count),
+            labels=(count["labels"] if isinstance(count, dict) else []),
+            label_counts=(count["label_counts"] if isinstance(count, dict) else {}),
+        )
         for name, count in zip(images, counts)
     ]
 

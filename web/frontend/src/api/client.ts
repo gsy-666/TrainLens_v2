@@ -1,0 +1,688 @@
+import axios from "axios";
+import type {
+  GetLabelsResponse,
+  LabelFileData,
+  OpenDirResponse,
+  Shape,
+} from "../types";
+
+const api = axios.create({ baseURL: "/api" });
+
+// ---- access token + remote server (remote mode) ------------------------------
+
+const TOKEN_KEY = "xaw_token";
+const SERVER_KEY = "xaw_server";
+
+export function getToken(): string {
+  return sessionStorage.getItem(TOKEN_KEY) ?? "";
+}
+
+export function setToken(token: string): void {
+  sessionStorage.setItem(TOKEN_KEY, token);
+}
+
+/** Remote backend base (e.g. http://gpu-server:8000). "" = same origin. */
+export function getServerUrl(): string {
+  return localStorage.getItem(SERVER_KEY) ?? "";
+}
+
+export function setServerUrl(url: string): void {
+  const u = url.trim().replace(/\/+$/, "");
+  if (u) localStorage.setItem(SERVER_KEY, u);
+  else localStorage.removeItem(SERVER_KEY);
+}
+
+api.interceptors.request.use((cfg) => {
+  cfg.baseURL = `${getServerUrl()}/api`;
+  const t = getToken();
+  if (t) cfg.headers.Authorization = `Bearer ${t}`;
+  return cfg;
+});
+
+api.interceptors.response.use(
+  (res) => res,
+  (err) => {
+    if (err?.response?.status === 401) {
+      window.dispatchEvent(new Event("xaw:unauthorized"));
+    }
+    return Promise.reject(err);
+  }
+);
+
+/** Resolve a server-relative API path for non-axios consumers (<img>, downloads). */
+function withToken(url: string): string {
+  const full = `${getServerUrl()}${url}`;
+  const t = getToken();
+  if (!t) return full;
+  return full + (full.includes("?") ? "&" : "?") + `token=${encodeURIComponent(t)}`;
+}
+
+export async function openDir(path: string): Promise<OpenDirResponse> {
+  const r = await api.post<OpenDirResponse>("/dir/open", { path });
+  return r.data;
+}
+
+export async function getDirImages(): Promise<OpenDirResponse> {
+  const r = await api.get<OpenDirResponse>("/dir/images");
+  return r.data;
+}
+
+export async function getLabels(image: string): Promise<GetLabelsResponse> {
+  const r = await api.get<GetLabelsResponse>("/labels", {
+    params: { image },
+  });
+  return r.data;
+}
+
+export interface SaveLabelsPayload {
+  image: string;
+  shapes: Shape[];
+  flags: Record<string, unknown>;
+  other_data: Record<string, unknown>;
+  image_height: number;
+  image_width: number;
+}
+
+export async function putLabels(payload: SaveLabelsPayload): Promise<void> {
+  await api.put("/labels", payload);
+}
+
+export async function deleteLabels(image: string): Promise<void> {
+  await api.delete("/labels", { params: { image } });
+}
+
+export function imageUrl(filename: string): string {
+  return withToken(`/api/image?path=${encodeURIComponent(filename)}`);
+}
+
+export function thumbUrl(filename: string): string {
+  return withToken(`/api/image/thumb?path=${encodeURIComponent(filename)}`);
+}
+
+// ---- filesystem browsing ---------------------------------------------------
+
+export interface FsDirEntry {
+  name: string;
+  path: string;
+  has_images: boolean;
+}
+
+export interface FsListResponse {
+  path: string;
+  parent: string | null;
+  dirs: FsDirEntry[];
+  files?: { name: string; path: string }[];
+  has_images: boolean;
+  roots?: string[];
+}
+
+export async function fsList(path?: string, withFiles?: string): Promise<FsListResponse> {
+  const r = await api.get("/fs/list", {
+    params: { path: path ?? "", with_files: withFiles ?? "" },
+  });
+  return r.data;
+}
+
+export async function health(): Promise<{ status: string }> {
+  const r = await api.get("/health");
+  return r.data;
+}
+
+// ---- auto labeling ---------------------------------------------------------
+
+export interface ModelInfo {
+  name: string;
+  display_name: string;
+  type: string;
+  provider?: string;
+  config_file: string;
+  is_custom_model: boolean;
+}
+
+export interface LoadedModelInfo {
+  name: string;
+  display_name: string;
+  type: string;
+  config_file: string;
+  supports_marks?: boolean;
+  output_modes?: string[];
+  default_output_mode?: string;
+  widgets?: string[];
+}
+
+export interface ModelStatus {
+  loading: boolean;
+  error: string | null;
+  progress: { downloaded: number; total: number } | null;
+  message: string;
+  loaded: LoadedModelInfo | null;
+}
+
+export async function getModels(): Promise<{
+  models: ModelInfo[];
+  loaded: LoadedModelInfo | null;
+}> {
+  const r = await api.get("/models");
+  return r.data;
+}
+
+export async function loadModel(configFile: string): Promise<void> {
+  await api.post("/models/load", { config_file: configFile });
+}
+
+export async function unloadModel(): Promise<void> {
+  await api.post("/models/unload");
+}
+
+export async function setOutputMode(mode: string): Promise<void> {
+  await api.post("/models/output_mode", { mode });
+}
+
+export async function getModelStatus(): Promise<ModelStatus> {
+  const r = await api.get("/models/status");
+  return r.data;
+}
+
+export interface PredictResult {
+  shapes: Shape[];
+  replace: boolean;
+  description: string;
+}
+
+export async function predict(
+  image: string,
+  textPrompt?: string,
+  conf?: number,
+  iou?: number
+): Promise<PredictResult> {
+  const r = await api.post("/predict", {
+    image,
+    text_prompt: textPrompt || null,
+    conf: conf ?? null,
+    iou: iou ?? null,
+  });
+  return r.data;
+}
+
+export interface SamMark {
+  type: "point" | "rectangle";
+  data: number[];
+  label?: number;
+}
+
+export async function predictSam(
+  image: string,
+  marks: SamMark[]
+): Promise<PredictResult> {
+  const r = await api.post("/predict/sam", { image, marks });
+  return r.data;
+}
+
+export async function predictBatch(
+  images: string[],
+  preserveExisting: boolean,
+  conf?: number,
+  iou?: number,
+  textPrompt?: string
+): Promise<void> {
+  await api.post("/predict/batch", {
+    images,
+    preserve_existing: preserveExisting,
+    conf: conf ?? null,
+    iou: iou ?? null,
+    text_prompt: textPrompt || null,
+  });
+}
+
+export interface BatchStatus {
+  running: boolean;
+  current?: number;
+  total?: number;
+  current_image?: string | null;
+  errors?: { image: string; error: string }[];
+  undo_available?: boolean;
+  backup_count?: number;
+  batch_id?: string | null;
+}
+
+export async function getBatchStatus(): Promise<BatchStatus> {
+  const r = await api.get("/predict/batch/status");
+  return r.data;
+}
+
+export interface UndoBatchResult {
+  restored: number;
+  deleted: number;
+  already_missing: number;
+  skipped_modified: string[];
+}
+
+export async function undoBatch(): Promise<UndoBatchResult> {
+  const r = await api.post("/predict/batch/undo");
+  return r.data;
+}
+
+// ---- export -----------------------------------------------------------------
+
+export interface ExportFormatInfo {
+  modes: string[];
+  default_mode: string | null;
+}
+
+export interface ExportRequestPayload {
+  format: string;
+  mode?: string;
+  output_dir: string;
+  save_images?: boolean;
+  skip_empty_files?: boolean;
+}
+
+export interface ExportResult {
+  output_dir: string;
+  files_written: number;
+  format: string;
+  mode: string | null;
+  classes: string[];
+}
+
+export interface ExportStatus {
+  running: boolean;
+  current: number;
+  total: number;
+  message: string;
+  result: ExportResult | null;
+  error: string | null;
+}
+
+export async function getExportFormats(): Promise<{
+  formats: Record<string, ExportFormatInfo>;
+}> {
+  const r = await api.get("/export/formats");
+  return r.data;
+}
+
+export async function startExport(payload: ExportRequestPayload): Promise<void> {
+  await api.post("/export", payload);
+}
+
+export async function getExportStatus(): Promise<ExportStatus> {
+  const r = await api.get("/export/status");
+  return r.data;
+}
+
+export function exportDownloadUrl(outputDir: string): string {
+  return withToken(`/api/export/download?path=${encodeURIComponent(outputDir)}`);
+}
+
+// ---- upload -----------------------------------------------------------------
+
+export async function uploadFiles(files: File[]): Promise<{
+  saved: number;
+  skipped: string[];
+  total_images: number;
+}> {
+  const form = new FormData();
+  for (const f of files) form.append("files", f);
+  const r = await api.post("/upload/files", form, {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+  return r.data;
+}
+
+// ---- video ------------------------------------------------------------------
+
+export interface VideoInfo {
+  video: string;
+  frame_count: number;
+  fps: number;
+  width: number;
+  height: number;
+  labeled_frames: number[];
+}
+
+export async function openVideo(path: string): Promise<VideoInfo> {
+  const r = await api.post("/video/open", { path });
+  return r.data;
+}
+
+export async function closeVideo(): Promise<void> {
+  await api.post("/video/close");
+}
+
+export async function getVideoInfo(): Promise<VideoInfo> {
+  const r = await api.get("/video/info");
+  return r.data;
+}
+
+export function videoFrameUrl(index: number): string {
+  return withToken(`/api/video/frame?index=${index}&t=${Date.now()}`);
+}
+
+export async function getVideoLabels(index: number): Promise<GetLabelsResponse> {
+  const r = await api.get("/video/labels", { params: { index } });
+  return r.data;
+}
+
+export async function putVideoLabels(
+  index: number,
+  payload: Omit<SaveLabelsPayload, "image">
+): Promise<void> {
+  await api.put("/video/labels", { ...payload, image: String(index) });
+}
+
+export interface TrackRequestPayload {
+  start_frame?: number;
+  end_frame?: number;
+  conf?: number;
+  iou?: number;
+  preserve_existing?: boolean;
+}
+
+export async function startTrack(payload: TrackRequestPayload): Promise<void> {
+  await api.post("/video/track", payload);
+}
+
+export interface TrackStatus {
+  running: boolean;
+  current: number;
+  total: number;
+  current_frame: number | null;
+  errors: { frame: number; error: string }[];
+  result: { frames: number; errors: number } | null;
+  undo_available?: boolean;
+}
+
+export async function getTrackStatus(): Promise<TrackStatus> {
+  const r = await api.get("/video/track/status");
+  return r.data;
+}
+
+// ---- training center ----------------------------------------------------------
+
+export interface GuidedStartPayload {
+  task: string;
+  model: string;
+  data: string;
+  project: string;
+  name: string;
+  device: string;
+  epochs?: number;
+  batch?: number;
+  imgsz?: number;
+  patience?: number;
+  lr0?: number;
+  [key: string]: unknown;
+}
+
+export interface TrainingJobInfo {
+  job_id: string;
+  mode: string;
+  status: string;
+  created_at: string;
+  started_at: string | null;
+  ended_at: string | null;
+  display_name: string;
+  error_message: string | null;
+  [key: string]: unknown;
+}
+
+export interface TrainingStatusResponse {
+  job: TrainingJobInfo | null;
+  running: boolean;
+  output_dir: string | null;
+}
+
+export interface TrainingEventItem {
+  seq: number;
+  event_type: string;
+  job_id?: string;
+  payload?: Record<string, unknown>;
+}
+
+export interface MetricSeries {
+  name: string;
+  group: string;
+  points: [number, number][];
+}
+
+export interface PreflightIssue {
+  severity: string;
+  title: string;
+  message: string;
+  suggestion: string | null;
+}
+
+export async function guidedStart(payload: GuidedStartPayload): Promise<TrainingStatusResponse> {
+  const r = await api.post("/training/guided/start", payload);
+  return r.data;
+}
+
+export async function trainingStop(): Promise<void> {
+  await api.post("/training/stop");
+}
+
+export async function getTrainingStatus(): Promise<TrainingStatusResponse> {
+  const r = await api.get("/training/status");
+  return r.data;
+}
+
+export async function getTrainingEvents(
+  since: number
+): Promise<{ latest: number; events: TrainingEventItem[] }> {
+  const r = await api.get("/training/events", { params: { since } });
+  return r.data;
+}
+
+export async function getTrainingMetrics(): Promise<{ series: MetricSeries[] }> {
+  const r = await api.get("/training/metrics");
+  return r.data;
+}
+
+export async function getTrainingHistory(limit = 50): Promise<{ jobs: Record<string, unknown>[] }> {
+  const r = await api.get("/training/history", { params: { limit } });
+  return r.data;
+}
+
+export async function trainingPreflight(payload: Record<string, unknown>): Promise<{
+  can_start: boolean;
+  issues: PreflightIssue[];
+}> {
+  const r = await api.post("/training/preflight", payload);
+  return r.data;
+}
+
+// ---- run monitor --------------------------------------------------------------
+
+export interface DetectedScriptInfo {
+  path: string;
+  framework: string | null;
+  confidence: number;
+  reasons: string[];
+}
+
+export interface PythonEnvInfo {
+  python_path: string;
+  version: string;
+  env_type: string;
+  is_valid: boolean;
+}
+
+export interface WorkspaceInfo {
+  path: string;
+  detected_scripts: DetectedScriptInfo[];
+  detected_environments: PythonEnvInfo[];
+}
+
+export interface RunInfo {
+  run_id: string;
+  script_path: string;
+  python_path: string;
+  arguments: string;
+  pid: number;
+  status: string;
+  started_at: number;
+  ended_at: number | null;
+  exit_code: number | null;
+}
+
+export interface ResourceSample {
+  ts: number;
+  system_cpu: number;
+  system_mem_percent: number;
+  proc_cpu?: number;
+  proc_rss_mb?: number;
+  gpu_util?: number;
+  gpu_mem_used_mb?: number;
+}
+
+export async function monitorScan(workspace: string): Promise<WorkspaceInfo> {
+  const r = await api.post("/monitor/scan", { workspace });
+  return r.data;
+}
+
+export async function monitorStart(payload: {
+  workspace: string;
+  script_path: string;
+  python_path: string;
+  arguments: string;
+}): Promise<RunInfo> {
+  const r = await api.post("/monitor/start", payload);
+  return r.data;
+}
+
+export async function monitorStop(): Promise<{ stopped: boolean; reason?: string }> {
+  const r = await api.post("/monitor/stop");
+  return r.data;
+}
+
+export async function monitorStatus(): Promise<{ running: boolean; run: RunInfo | null }> {
+  const r = await api.get("/monitor/status");
+  return r.data;
+}
+
+export async function monitorLogs(
+  since: number
+): Promise<{ latest: number; lines: { seq: number; stream: string; line: string }[] }> {
+  const r = await api.get("/monitor/logs", { params: { since } });
+  return r.data;
+}
+
+export async function monitorResources(limit = 300): Promise<{ samples: ResourceSample[] }> {
+  const r = await api.get("/monitor/resources", { params: { limit } });
+  return r.data;
+}
+
+// ---- dataset preparation ------------------------------------------------------
+
+export interface PrepareDatasetPayload {
+  task_type: string;
+  dataset_ratio: number;
+  skip_empty_files?: boolean;
+  only_checked_files?: boolean;
+}
+
+export interface PrepareDatasetResult {
+  dataset_dir: string;
+  data_yaml: string;
+  info: string;
+}
+
+export interface DatasetCheck {
+  severity: string;
+  title: string;
+  message: string;
+  count?: number;
+}
+
+export interface DatasetPrepSummary {
+  total_images: number;
+  labeled_images: number;
+  empty_labels: number;
+  class_counts: Record<string, number>;
+  checks: DatasetCheck[];
+}
+
+export async function prepareDataset(
+  payload: PrepareDatasetPayload
+): Promise<PrepareDatasetResult> {
+  const r = await api.post("/dataset/prepare", payload);
+  return r.data;
+}
+
+// ---- device + quickstart --------------------------------------------------------
+
+export interface DeviceInfo {
+  cuda_available: boolean;
+  gpus: { index: number; name: string; memory_mb: number }[];
+  recommended: string;
+}
+
+export async function getDevice(): Promise<DeviceInfo> {
+  const r = await api.get("/system/device");
+  return r.data;
+}
+
+export interface InferenceDeviceInfo {
+  current: string;  // "CPU" | "GPU" | "auto"
+  available: string[];  // ["CPU"] or ["CPU", "GPU"]
+}
+
+export async function getInferenceDevice(): Promise<InferenceDeviceInfo> {
+  const r = await api.get("/system/device/inference");
+  return r.data;
+}
+
+export async function setInferenceDevice(device: string): Promise<{ ok: boolean; current: string }> {
+  const r = await api.post("/system/device/inference", { device });
+  return r.data;
+}
+
+export interface ArtifactInfo {
+  name: string;
+  relative_path: string;
+  size: number;
+  modified_at: string;
+  is_downloadable: boolean;
+  file_type: string;
+}
+
+export interface ArtifactListResponse {
+  job_id: string;
+  output_dir: string;
+  artifacts: ArtifactInfo[];
+}
+
+export async function getTrainingArtifacts(jobId: string): Promise<ArtifactListResponse> {
+  const r = await api.get(`/training/history/${encodeURIComponent(jobId)}/artifacts`);
+  return r.data;
+}
+
+export function trainingArtifactDownloadUrl(jobId: string, path: string): string {
+  return withToken(
+    `/api/training/history/${encodeURIComponent(jobId)}/artifacts/download?path=${encodeURIComponent(path)}`
+  );
+}
+
+export function trainingArtifactDownloadAllUrl(jobId: string): string {
+  return withToken(`/api/training/history/${encodeURIComponent(jobId)}/artifacts/download-all`);
+}
+
+export interface QuickstartResult {
+  task_type: string;
+  device: string;
+  model: string;
+  dataset_dir: string;
+  dataset_info: string;
+  job: TrainingJobInfo;
+}
+
+export interface QuickstartPayload {
+  epochs?: number;
+}
+
+export async function quickstart(payload: QuickstartPayload): Promise<QuickstartResult> {
+  const r = await api.post("/training/quickstart", payload);
+  return r.data;
+}
+
+export type { LabelFileData };

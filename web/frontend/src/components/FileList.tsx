@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Input, List, Segmented, Slider, Tag, InputNumber } from "antd";
+import { Input, List, Segmented, Slider, Tag, InputNumber, Select } from "antd";
 import {
   CheckCircleFilled,
   FileImageOutlined,
@@ -88,8 +88,9 @@ export default function FileList() {
   const { images, video, currentIndex, selectImage } = useStudio();
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<FilterMode>("all");
+  const [selectedLabel, setSelectedLabel] = useState<string>("all");
 
-  const matchFilter = (im: { has_label: boolean; shape_count: number | null }) => {
+  const matchFilter = (im: { has_label: boolean; shape_count: number | null; labels?: string[] }) => {
     switch (filter) {
       case "labeled":
         return im.has_label && (im.shape_count ?? 0) > 0;
@@ -112,14 +113,23 @@ export default function FileList() {
     return { labeled, unlabeled, empty };
   }, [images]);
 
+  const labelOptions = useMemo(() => {
+    const labels = new Set<string>();
+    for (const im of images) {
+      for (const label of im.labels ?? []) labels.add(label);
+    }
+    return ["all", ...Array.from(labels).sort()];
+  }, [images]);
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     return images
       .map((im, i) => ({ ...im, index: i }))
       .filter(matchFilter)
+      .filter((im) => (selectedLabel === "all" ? true : (im.labels ?? []).includes(selectedLabel)))
       .filter((im) => !q || im.filename.toLowerCase().includes(q));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [images, query, filter]);
+  }, [images, query, filter, selectedLabel]);
 
   if (video) return <VideoPanel />;
 
@@ -133,6 +143,13 @@ export default function FileList() {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           style={{ marginBottom: 6 }}
+        />
+        <Select
+          size="small"
+          style={{ width: "100%", marginBottom: 6 }}
+          value={selectedLabel}
+          onChange={setSelectedLabel}
+          options={labelOptions.map((label) => ({ value: label, label: label === "all" ? "全部类别" : label }))}
         />
         <Segmented
           size="small"
