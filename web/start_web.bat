@@ -1,52 +1,55 @@
 @echo off
+chcp 65001 >nul 2>nul
 rem ============================================================
-rem  TrainLens - Ò»¼üÆô¶¯
-rem  Ë«»÷¼´¿É£º¼ì²éÒÀÀµ -> ¹¹½¨Ç°¶Ë -> Æô¶¯·þÎñ -> ´ò¿ªä¯ÀÀÆ÷
+rem  TrainLens - Ò»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+rem  Ë«ï¿½ï¿½ï¿½ï¿½ï¿½É£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ -> ï¿½ï¿½ï¿½ï¿½Ç°ï¿½ï¿½ -> ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ -> ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 rem
-rem  Ô¶³Ì·ÃÎÊÓÃ·¨£¨ÔÚÔÆ·þÎñÆ÷ÉÏ£©£º
+rem  Ô¶ï¿½Ì·ï¿½ï¿½ï¿½ï¿½Ã·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Æ·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ï£ï¿½ï¿½ï¿½
 rem    start_web.bat --host 0.0.0.0 [--port 8000] [--token XXX]
-rem  Ô¶³ÌÄ£Ê½»á×Ô¶¯Éú³É·ÃÎÊÁîÅÆ²¢´òÓ¡ÔÚ¿ØÖÆÌ¨¡£
+rem  Ô¶ï¿½ï¿½Ä£Ê½ï¿½ï¿½ï¿½Ô¶ï¿½ï¿½ï¿½ï¿½É·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Æ²ï¿½ï¿½ï¿½Ó¡ï¿½Ú¿ï¿½ï¿½ï¿½Ì¨ï¿½ï¿½
 rem ============================================================
 setlocal
 cd /d %~dp0
-set "ROOT=%~dp0.."
+cd ..
+set "ROOT=%CD%"
+cd /d %~dp0
 set "PY=%ROOT%\.venv\Scripts\python.exe"
 
 echo ==========================================
-echo   TrainLens Ò»¼üÆô¶¯
+echo   TrainLens Ò»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 echo ==========================================
 
-rem ---- 1. Python »·¾³ ----
+rem ---- 1. Python ï¿½ï¿½ï¿½ï¿½ ----
 if not exist "%PY%" (
-  echo [ÌáÊ¾] Î´ÕÒµ½ÏîÄ¿ÐéÄâ»·¾³£¬³¢ÊÔÊ¹ÓÃÏµÍ³ python
+  echo [ï¿½ï¿½Ê¾] Î´ï¿½Òµï¿½ï¿½ï¿½Ä¿ï¿½ï¿½ï¿½â»·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê¹ï¿½ï¿½ÏµÍ³ python
   set "PY=python"
 )
 echo [1/4] Python: %PY%
 
-rem ---- 2. ºó¶ËÒÀÀµ ----
-"%PY%" -c "import fastapi, uvicorn" >/dev/null 2>&1
+rem ---- 2. ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ----
+"%PY%" -c "import fastapi, uvicorn" >nul 2>nul
 if errorlevel 1 (
-  echo [2/4] °²×°ºó¶ËÒÀÀµ...
+  echo [2/4] ï¿½ï¿½×°ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½...
   "%PY%" -m pip install -r "%~dp0backend\requirements.txt"
   if errorlevel 1 goto :error
 ) else (
-  echo [2/4] ºó¶ËÒÀÀµÒÑ¾ÍÐ÷
+  echo [2/4] ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ñ¾ï¿½ï¿½ï¿½
 )
 
-rem ---- 3. Ç°¶Ë¹¹½¨ ----
+rem ---- 3. Ç°ï¿½Ë¹ï¿½ï¿½ï¿½ ----
 if exist "%~dp0frontend\dist\index.html" (
-  echo [3/4] Ç°¶ËÒÑ¹¹½¨£¨frontend\dist£©
+  echo [3/4] Ç°ï¿½ï¿½ï¿½Ñ¹ï¿½ï¿½ï¿½ï¿½ï¿½frontend\distï¿½ï¿½
 ) else (
-  echo [3/4] Ê×´ÎÔËÐÐ£¬¹¹½¨Ç°¶Ë...
-  where npm >/dev/null 2>&1
+  echo [3/4] ï¿½×´ï¿½ï¿½ï¿½ï¿½Ð£ï¿½ï¿½ï¿½ï¿½ï¿½Ç°ï¿½ï¿½...
+  where npm >nul 2>nul
   if errorlevel 1 (
-    echo [´íÎó] Î´ÕÒµ½ npm¡£ÇëÏÈ°²×° Node.js£¬»òÊÖ¶¯Ö´ÐÐ£º
+    echo [ï¿½ï¿½ï¿½ï¿½] Î´ï¿½Òµï¿½ npmï¿½ï¿½ï¿½ï¿½ï¿½È°ï¿½×° Node.jsï¿½ï¿½ï¿½ï¿½ï¿½Ö¶ï¿½Ö´ï¿½Ð£ï¿½
     echo        cd web\frontend ^&^& npm install ^&^& npm run build
     goto :error
   )
   pushd "%~dp0frontend"
   if not exist node_modules (
-    echo       °²×°Ç°¶ËÒÀÀµ£¨npm install£¬Ê×´Î½ÏÂý£¬ÇëÄÍÐÄµÈ´ý£©...
+    echo       ï¿½ï¿½×°Ç°ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½npm installï¿½ï¿½ï¿½×´Î½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ÄµÈ´ï¿½ï¿½ï¿½...
     call npm install
     if errorlevel 1 ( popd & goto :error )
   )
@@ -55,15 +58,26 @@ if exist "%~dp0frontend\dist\index.html" (
   popd
 )
 
-rem ---- 4. Æô¶¯£¨µ¥½ø³Ì£ºAPI + Ç°¶ËÒ³Ãæ£©----
-echo [4/4] Æô¶¯·þÎñ£¨°´ Ctrl+C Í£Ö¹£©
-echo %* | findstr /i "0.0.0.0" >/dev/null || start "" cmd /c "timeout /t 3 /nobreak >/dev/null & start http://127.0.0.1:8000"
+rem ---- 4. ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ì£ï¿½API + Ç°ï¿½ï¿½Ò³ï¿½æ£©----
+echo [4/4] ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ñ£¨°ï¿½ Ctrl+C Í£Ö¹ï¿½ï¿½
+echo %* | findstr /i "0.0.0.0" >nul 2>nul || start "" cmd /c "timeout /t 3 /nobreak >nul & start http://127.0.0.1:8000"
 cd /d "%~dp0backend"
+
+rem Kill any previous process on port 8000
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8000.*LISTENING" 2^>nul') do taskkill /f /pid %%a >nul 2>nul
+
 "%PY%" start.py %*
+if errorlevel 1 (
+  echo.
+  echo Server exited unexpectedly. Check errors above.
+  pause
+  exit /b 1
+)
+pause
 goto :eof
 
 :error
 echo.
-echo Æô¶¯Ê§°Ü£¬Çë¼ì²éÉÏ·½´íÎóÐÅÏ¢¡£
+echo ï¿½ï¿½ï¿½ï¿½Ê§ï¿½Ü£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ï·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ï¢ï¿½ï¿½
 pause
 exit /b 1

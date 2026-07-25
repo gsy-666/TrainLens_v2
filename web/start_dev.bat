@@ -1,18 +1,21 @@
 @echo off
+chcp 65001 >nul 2>nul
 rem ============================================================
-rem  TrainLens - ¿ª·¢Ä£Ê½£¨Ç°¶ËÈÈ¸üÐÂ£©
-rem  ºó¶Ë :8000 + Vite ¿ª·¢·þÎñÆ÷ :5173£¨×Ô¶¯´ò¿ª :5173£©
+rem  TrainLens - ï¿½ï¿½ï¿½ï¿½Ä£Ê½ï¿½ï¿½Ç°ï¿½ï¿½ï¿½È¸ï¿½ï¿½Â£ï¿½
+rem  ï¿½ï¿½ï¿½ :8000 + Vite ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ :5173ï¿½ï¿½ï¿½Ô¶ï¿½ï¿½ï¿½ :5173ï¿½ï¿½
 rem ============================================================
 setlocal
 cd /d %~dp0
-set "ROOT=%~dp0.."
+cd ..
+set "ROOT=%CD%"
+cd /d %~dp0
 set "PY=%ROOT%\.venv\Scripts\python.exe"
 if not exist "%PY%" set "PY=python"
 
-echo [1/2] Æô¶¯ºó¶Ë http://127.0.0.1:8000
+echo [1/2] ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ http://127.0.0.1:8000
 start "xanylabeling-backend" cmd /k "cd /d %~dp0backend && "%PY%" -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload"
 
-echo [2/2] Æô¶¯Ç°¶Ë¿ª·¢·þÎñÆ÷ http://localhost:5173
+echo [2/2] ï¿½ï¿½ï¿½ï¿½Ç°ï¿½Ë¿ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ http://localhost:5173
 pushd "%~dp0frontend"
 if not exist node_modules call npm install
 start "" cmd /c "timeout /t 4 /nobreak >nul & start http://localhost:5173"
