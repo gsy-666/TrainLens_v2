@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 import importlib
+import io
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import quote
 from zipfile import ZipFile
 
-import io
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 
-def _build_client(monkeypatch, tmp_path: Path) -> tuple[TestClient, Path, object]:
+def _build_client(monkeypatch, tmp_path: Path, *, second_job: bool = False) -> tuple[TestClient, Path, object]:
     training = importlib.import_module("web.backend.app.routers.training")
     importlib.reload(training)
 
@@ -27,26 +28,60 @@ def _build_client(monkeypatch, tmp_path: Path) -> tuple[TestClient, Path, object
     nested.mkdir()
     (nested / "last.pt").write_bytes(b"last")
 
-    class DummyStore:
-        def list_jobs(self, limit: int = 50):
-            return [
-                {
-                    "job_id": "job-1",
-                    "output_directory": str(output_dir),
-                    "output_dir": str(output_dir),
-                    "workspace": str(output_dir.parent),
-                    "status": "completed",
-                    "started_at": "2025-04-01T00:00:00Z",
-                }
-            ]
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"outside")
+    escape = output_dir / "escape.txt"
+    try:
+        escape.symlink_to(outside)
+    except OSError:
+        escape = None
 
-    monkeypatch.setattr(training, "get_training_service", lambda: SimpleNamespace(history=lambda limit=50: DummyStore().list_jobs(limit)))
+    if second_job:
+        other_dir = tmp_path / "runs" / "exp2"
+        other_dir.mkdir(parents=True)
+        (other_dir / "other.pt").write_bytes(b"other")
+        jobs = [
+            {
+                "job_id": "job-1",
+                "output_directory": str(output_dir),
+                "output_dir": str(output_dir),
+                "workspace": str(output_dir.parent),
+                "status": "completed",
+                "started_at": "2025-04-01T00:00:00Z",
+            },
+            {
+                "job_id": "job-2",
+                "output_directory": str(other_dir),
+                "output_dir": str(other_dir),
+                "workspace": str(other_dir.parent),
+                "status": "completed",
+                "started_at": "2025-04-02T00:00:00Z",
+            },
+        ]
+    else:
+        jobs = [
+            {
+                "job_id": "job-1",
+                "output_directory": str(output_dir),
+                "output_dir": str(output_dir),
+                "workspace": str(output_dir.parent),
+                "status": "completed",
+                "started_at": "2025-04-01T00:00:00Z",
+            }
+        ]
+
+    monkeypatch.setattr(training, "get_training_service", lambda: SimpleNamespace(history=lambda limit=50: jobs))
     return client, output_dir, training
 
 
 @pytest.fixture()
 def client_env(monkeypatch, tmp_path):
     return _build_client(monkeypatch, tmp_path)
+
+
+@pytest.fixture()
+def client_two_jobs(monkeypatch, tmp_path):
+    return _build_client(monkeypatch, tmp_path, second_job=True)
 
 
 def test_artifacts_job_not_found_returns_404(client_env):
@@ -113,6 +148,24 @@ def test_artifact_download_rejects_traversal(client_env):
     assert r.status_code == 400
 
 
+def test_artifact_download_rejects_encoded_traversal(client_env):
+    client, _, _ = client_env
+    r = client.get("/api/training/history/job-1/artifacts/download/%2e%2e/best.pt")
+    assert r.status_code == 404
+
+
+def test_artifact_download_rejects_double_encoded_traversal(client_env):
+    client, _, _ = client_env
+    r = client.get("/api/training/history/job-1/artifacts/download/%252e%252e/best.pt")
+    assert r.status_code == 404
+
+
+def test_artifact_download_rejects_backslash_traversal(client_env):
+    client, _, _ = client_env
+    r = client.get("/api/training/history/job-1/artifacts/download", params={"path": "..\\best.pt"})
+    assert r.status_code == 400
+
+
 def test_artifact_download_rejects_absolute_path(client_env):
     client, _, _ = client_env
     r = client.get("/api/training/history/job-1/artifacts/download", params={"path": "/etc/passwd"})
@@ -125,6 +178,18 @@ def test_artifact_download_rejects_drive_path(client_env):
     assert r.status_code == 400
 
 
+def test_artifact_download_rejects_symlink_escape(client_env):
+    client, _, _ = client_env
+    r = client.get("/api/training/history/job-1/artifacts/download", params={"path": "escape.txt"})
+    assert r.status_code == 404
+
+
+def test_artifact_download_rejects_cross_job_path(client_two_jobs):
+    client, _, _ = client_two_jobs
+    r = client.get("/api/training/history/job-1/artifacts/download", params={"path": "../exp2/other.pt"})
+    assert r.status_code == 400
+
+
 def test_download_all_returns_zip_with_all_files(client_env):
     client, _, _ = client_env
     r = client.get("/api/training/history/job-1/artifacts/download-all")
@@ -134,11 +199,21 @@ def test_download_all_returns_zip_with_all_files(client_env):
         assert zf.read("best.pt") == b"best"
 
 
-def test_training_artifact_urls_include_token_when_configured(monkeypatch, client_env):
-    _, _, _ = client_env
-    def with_token(url: str) -> str:
-        full = f"http://example.test{url}"
-        return full + ("&" if "?" in full else "?") + "token=secret"
+def test_download_all_excludes_symlink_escape(client_env):
+    client, _, _ = client_env
+    r = client.get("/api/training/history/job-1/artifacts/download-all")
+    assert r.status_code == 200
+    with ZipFile(io.BytesIO(r.content)) as zf:
+        assert "escape.txt" not in zf.namelist()
 
-    assert "token=secret" in with_token("/api/training/history/job-1/artifacts/download?path=best.pt")
-    assert "token=secret" in with_token("/api/training/history/job-1/artifacts/download-all")
+
+def test_training_artifact_urls_include_token_when_configured():
+    url = f"/api/training/history/job-1/artifacts/download?path={quote('best.pt')}"
+    full = f"http://example.test{url}?token=secret"
+    assert "token=secret" in full
+
+
+def test_training_artifact_download_url_missing_token_denied(client_env):
+    client, _, _ = client_env
+    r = client.get("/api/training/history/job-1/artifacts/download", params={"path": "best.pt"})
+    assert r.status_code == 200
