@@ -572,7 +572,25 @@ export async function monitorResources(limit = 300): Promise<{ samples: Resource
   return r.data;
 }
 
-// ---- dataset preparation ------------------------------------------------------
+// ---- export trained model -----------------------------------------------------
+
+export interface ExportModelResult {
+  exported: boolean;
+  relative_path: string;
+  format: string;
+}
+
+export async function exportModelArtifact(
+  jobId: string,
+  path: string,
+  format: string
+): Promise<ExportModelResult> {
+  const r = await api.post(
+    `/training/history/${encodeURIComponent(jobId)}/artifacts/export`,
+    { path, format }
+  );
+  return r.data;
+}
 
 export interface PrepareDatasetPayload {
   task_type: string;

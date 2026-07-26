@@ -172,3 +172,52 @@ def training_artifact_download_all(job_id: str):
     return StreamingResponse(iter([buf.getvalue()]), media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="{job_id}_artifacts.zip"'})
 
 
+class ExportModelRequest(BaseModel):
+    path: str  # artifact relative path, must be a .pt under weights/
+    format: str = "onnx"  # onnx / engine / openvino / coreml / tflite / torchscript
+
+
+_SUPPORTED_EXPORT_FORMATS = ("onnx", "engine", "openvino", "coreml", "tflite", "torchscript")
+
+
+def _run_model_export(job_id: str, rel_path: str, fmt: str, holder: dict):
+    try:
+        from ultralytics import YOLO
+
+        base = _job_output_dir(job_id)
+        target = _safe_child(base, rel_path)
+        model = YOLO(str(target))
+        out = model.export(format=fmt)
+        holder["output"] = str(out)
+    except Exception as e:  # noqa
+        holder["error"] = str(e)
+
+
+@router.post("/training/history/{job_id}/artifacts/export")
+async def training_artifact_export(job_id: str, req: ExportModelRequest):
+    """Export a trained .pt artifact to a deployable format (onnx etc.)."""
+    base = _job_output_dir(job_id)
+    target = _safe_child(base, req.path)
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail=f"Artifact not found: {req.path}")
+    if target.suffix.lower() != ".pt":
+        raise HTTPException(status_code=400, detail="Only .pt artifacts can be exported")
+    if req.format not in _SUPPORTED_EXPORT_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported format '{req.format}', choose from {_SUPPORTED_EXPORT_FORMATS}",
+        )
+
+    holder: dict = {}
+    await asyncio.to_thread(_run_model_export, job_id, req.path, req.format, holder)
+    if "error" in holder:
+        raise HTTPException(status_code=500, detail=f"Export failed: {holder['error']}")
+
+    out_path = Path(holder["output"]).resolve()
+    try:
+        rel = out_path.relative_to(base.resolve())
+    except ValueError:
+        raise HTTPException(status_code=500, detail=f"Unexpected export path: {out_path}")
+    return {"exported": True, "relative_path": str(rel), "format": req.format}
+
+

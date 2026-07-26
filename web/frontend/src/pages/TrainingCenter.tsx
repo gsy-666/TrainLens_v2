@@ -74,6 +74,8 @@ export default function TrainingCenter({ onBack }: Props) {
   const [artifactLoading, setArtifactLoading] = useState(false);
   const [artifactError, setArtifactError] = useState<string | null>(null);
   const [artifactDetails, setArtifactDetails] = useState<api.ArtifactInfo[] | null>(null);
+  const [exportingPath, setExportingPath] = useState<string | null>(null);
+  const [exportFormat, setExportFormat] = useState("onnx");
 
   const seqRef = useRef(0);
   const logBoxRef = useRef<HTMLDivElement>(null);
@@ -173,6 +175,26 @@ export default function TrainingCenter({ onBack }: Props) {
       setArtifactLoading(false);
     }
   }, []);
+
+  const onExportArtifact = useCallback(
+    async (relPath: string) => {
+      if (!artifactList) return;
+      setExportingPath(relPath);
+      const hide = message.loading(`正在导出为 ${exportFormat}…`, 0);
+      try {
+        const r = await api.exportModelArtifact(artifactList.job_id, relPath, exportFormat);
+        message.success(`导出完成：${r.relative_path}`);
+        await loadArtifacts(artifactList.job_id);
+      } catch (e) {
+        const err = e as { response?: { data?: { detail?: string } }; message: string };
+        message.error(`导出失败: ${err.response?.data?.detail ?? err.message}`, 6);
+      } finally {
+        hide();
+        setExportingPath(null);
+      }
+    },
+    [artifactList, exportFormat, loadArtifacts]
+  );
 
   // device auto-detection on mount
   useEffect(() => {
@@ -649,6 +671,32 @@ export default function TrainingCenter({ onBack }: Props) {
                 renderItem={(a) => (
                   <List.Item
                     actions={[
+                      ...(a.name.endsWith(".pt")
+                        ? [
+                            <Space key="export" size={4}>
+                              <Select
+                                size="small"
+                                value={exportFormat}
+                                onChange={setExportFormat}
+                                style={{ width: 110 }}
+                                options={[
+                                  { value: "onnx", label: "ONNX" },
+                                  { value: "engine", label: "TensorRT" },
+                                  { value: "openvino", label: "OpenVINO" },
+                                  { value: "tflite", label: "TFLite" },
+                                  { value: "torchscript", label: "TorchScript" },
+                                ]}
+                              />
+                              <Button
+                                size="small"
+                                loading={exportingPath === a.relative_path}
+                                onClick={() => onExportArtifact(a.relative_path)}
+                              >
+                                导出
+                              </Button>
+                            </Space>,
+                          ]
+                        : []),
                       <Button
                         key="download"
                         size="small"
