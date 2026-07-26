@@ -42,8 +42,8 @@ if %ERRORLEVEL% NEQ 0 (
 echo [OK] uv installed successfully
 echo.
 
-REM Refresh PATH to include uv
-call refreshenv >nul 2>&1
+REM Refresh PATH to include uv (refreshenv only exists with Chocolatey)
+where refreshenv >nul 2>&1 && call refreshenv >nul 2>&1
 
 REM ============================================
 REM Step 2: Check for .venv directory
