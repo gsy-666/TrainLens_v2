@@ -14,6 +14,7 @@ import {
   LineOutlined,
   NodeIndexOutlined,
   PlusOutlined,
+  QuestionCircleOutlined,
   RightOutlined,
   SaveOutlined,
   SelectOutlined,
@@ -40,9 +41,10 @@ interface Props {
   onOpenDir: () => void;
   onOpenVideo: () => void;
   onExport: () => void;
+  onOpenTour?: () => void;
 }
 
-export default function Toolbar({ onOpenDir, onOpenVideo, onExport }: Props) {
+export default function Toolbar({ onOpenDir, onOpenVideo, onExport, onOpenTour }: Props) {
   const {
     mode,
     createType,
@@ -92,6 +94,7 @@ export default function Toolbar({ onOpenDir, onOpenVideo, onExport }: Props) {
         </Tooltip>
         <Tooltip title="保存 (Ctrl+S)">
           <Button
+            id="tour-save-btn"
             icon={<SaveOutlined />}
             type={dirty ? "primary" : "default"}
             onClick={() => saveCurrent()}
@@ -131,7 +134,7 @@ export default function Toolbar({ onOpenDir, onOpenVideo, onExport }: Props) {
 
       <Divider type="vertical" />
 
-      <Space size={4}>
+      <Space size={4} id="tour-canvas-toolbar">
         <Tooltip title="选择/编辑 (V)">
           <Button
             icon={<SelectOutlined />}
@@ -205,6 +208,15 @@ export default function Toolbar({ onOpenDir, onOpenVideo, onExport }: Props) {
           </Tooltip>
         </Upload>
       </Space>
+
+      {onOpenTour && (
+        <>
+          <Divider type="vertical" />
+          <Tooltip title="新手引导">
+            <Button icon={<QuestionCircleOutlined />} onClick={onOpenTour} />
+          </Tooltip>
+        </>
+      )}
     </div>
   );
 }

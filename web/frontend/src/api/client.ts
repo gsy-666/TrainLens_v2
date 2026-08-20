@@ -262,6 +262,80 @@ export async function undoBatch(): Promise<UndoBatchResult> {
   return r.data;
 }
 
+// ---- playground (one-off inference on an uploaded image) ----------------------
+
+export interface PlaygroundPredictResult {
+  shapes: Shape[];
+  model: { display_name: string; type: string };
+}
+
+export async function playgroundPredict(
+  file: File,
+  conf?: number,
+  iou?: number
+): Promise<PlaygroundPredictResult> {
+  const form = new FormData();
+  form.append("file", file);
+  if (conf != null) form.append("conf", String(conf));
+  if (iou != null) form.append("iou", String(iou));
+  const r = await api.post("/playground/predict", form, {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+  return r.data;
+}
+
+// ---- active learning (hard-example scanning) ------------------------------------
+
+export interface ALScanStartResult {
+  started: boolean;
+  total: number;
+}
+
+export interface ALScanStatus {
+  running: boolean;
+  processed: number;
+  total: number;
+  done: boolean;
+  error: string | null;
+  error_count: number;
+}
+
+export interface ALScoreEntry {
+  score: number | null;
+  count: number;
+}
+
+export async function startALScan(
+  conf?: number,
+  scope: "unlabeled" | "all" = "unlabeled"
+): Promise<ALScanStartResult> {
+  const r = await api.post("/active_learning/scan", { conf: conf ?? null, scope });
+  return r.data;
+}
+
+export async function getALScanStatus(): Promise<ALScanStatus> {
+  const r = await api.get("/active_learning/scan/status");
+  return r.data;
+}
+
+export async function stopALScan(): Promise<{ stopping: boolean }> {
+  const r = await api.post("/active_learning/scan/stop");
+  return r.data;
+}
+
+export async function getALScores(): Promise<{
+  scores: Record<string, ALScoreEntry>;
+  updated_at: string | null;
+}> {
+  const r = await api.get("/active_learning/scores");
+  return r.data;
+}
+
+export async function clearALScores(): Promise<{ cleared: boolean }> {
+  const r = await api.post("/active_learning/clear");
+  return r.data;
+}
+
 // ---- export -----------------------------------------------------------------
 
 export interface ExportFormatInfo {
@@ -411,6 +485,9 @@ export interface GuidedStartPayload {
   imgsz?: number;
   patience?: number;
   lr0?: number;
+  execution_mode?: string;
+  remote_profile_id?: string | null;
+  remote_password?: string | null;
   [key: string]: unknown;
 }
 
@@ -430,6 +507,7 @@ export interface TrainingStatusResponse {
   job: TrainingJobInfo | null;
   running: boolean;
   output_dir: string | null;
+  eta_seconds?: number | null;
 }
 
 export interface TrainingEventItem {
@@ -488,6 +566,118 @@ export async function trainingPreflight(payload: Record<string, unknown>): Promi
   issues: PreflightIssue[];
 }> {
   const r = await api.post("/training/preflight", payload);
+  return r.data;
+}
+
+// ---- remote SSH training servers ---------------------------------------------
+
+export interface RemoteProfile {
+  profile_id: string;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  auth_method: "ssh_key" | "password";
+  private_key_path: string;
+  remote_workspace: string;
+  remote_python: string;
+  known_host_fingerprint: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface RemoteProfilePayload {
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  auth_method: "ssh_key" | "password";
+  private_key_path?: string;
+  remote_workspace: string;
+  remote_python: string;
+}
+
+export interface RemoteTestResult {
+  ok: boolean;
+  need_host_key_confirm?: boolean;
+  fingerprint?: string;
+  error?: string;
+}
+
+export interface RemoteDiagnosticItem {
+  stage: string;
+  label: string;
+  status: string; // PASS / WARNING / ERROR
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+export interface RemoteGpuInfo {
+  index: number;
+  name: string;
+  total_memory_gb: number;
+  compute_capability?: string;
+}
+
+export interface RemoteDiagnosticsResult {
+  items: RemoteDiagnosticItem[];
+  recommended_device: string; // "0" | "cpu"
+  gpus: RemoteGpuInfo[];
+}
+
+export async function listRemoteProfiles(): Promise<{ profiles: RemoteProfile[] }> {
+  const r = await api.get("/remote/profiles");
+  return r.data;
+}
+
+export async function createRemoteProfile(
+  payload: RemoteProfilePayload
+): Promise<{ profile: RemoteProfile }> {
+  const r = await api.post("/remote/profiles", payload);
+  return r.data;
+}
+
+export async function updateRemoteProfile(
+  profileId: string,
+  payload: RemoteProfilePayload
+): Promise<{ profile: RemoteProfile }> {
+  const r = await api.put(`/remote/profiles/${encodeURIComponent(profileId)}`, payload);
+  return r.data;
+}
+
+export async function deleteRemoteProfile(profileId: string): Promise<void> {
+  await api.delete(`/remote/profiles/${encodeURIComponent(profileId)}`);
+}
+
+export async function testRemoteProfile(
+  profileId: string,
+  password?: string
+): Promise<RemoteTestResult> {
+  const r = await api.post(`/remote/profiles/${encodeURIComponent(profileId)}/test`, {
+    password: password ?? null,
+  });
+  return r.data;
+}
+
+export async function confirmRemoteHostKey(
+  profileId: string,
+  fingerprint: string
+): Promise<{ saved: boolean }> {
+  const r = await api.post(
+    `/remote/profiles/${encodeURIComponent(profileId)}/confirm-host-key`,
+    { fingerprint }
+  );
+  return r.data;
+}
+
+export async function remoteDiagnostics(
+  profileId: string,
+  password?: string
+): Promise<RemoteDiagnosticsResult> {
+  const r = await api.post(
+    `/remote/profiles/${encodeURIComponent(profileId)}/diagnostics`,
+    { password: password ?? null }
+  );
   return r.data;
 }
 
@@ -592,6 +782,39 @@ export async function exportModelArtifact(
   return r.data;
 }
 
+export interface RegisterModelResult {
+  registered: boolean;
+  config_file: string;
+  display_name: string;
+  model_type: string;
+}
+
+export async function registerModelArtifact(
+  jobId: string,
+  path: string,
+  displayName?: string
+): Promise<RegisterModelResult> {
+  const r = await api.post(
+    `/training/history/${encodeURIComponent(jobId)}/artifacts/register-model`,
+    { path, display_name: displayName ?? null }
+  );
+  return r.data;
+}
+
+export interface TrainingExportFormat {
+  id: string;
+  name: string;
+  available: boolean;
+  reason: string | null;
+}
+
+export async function getTrainingExportFormats(): Promise<{
+  formats: TrainingExportFormat[];
+}> {
+  const r = await api.get("/training/export-formats");
+  return r.data;
+}
+
 export interface PrepareDatasetPayload {
   task_type: string;
   dataset_ratio: number;
@@ -605,19 +828,23 @@ export interface PrepareDatasetResult {
   info: string;
 }
 
-export interface DatasetCheck {
-  severity: string;
-  title: string;
+export interface DatasetStatsWarning {
+  code: string;
   message: string;
-  count?: number;
 }
 
-export interface DatasetPrepSummary {
+export interface DatasetStats {
   total_images: number;
-  labeled_images: number;
-  empty_labels: number;
+  per_task_valid: Record<string, number>;
+  label_infos: Record<string, Record<string, number>>;
   class_counts: Record<string, number>;
-  checks: DatasetCheck[];
+  warnings: DatasetStatsWarning[];
+  recommended_task: string;
+}
+
+export async function getDatasetStats(): Promise<DatasetStats> {
+  const r = await api.get("/dataset/stats");
+  return r.data;
 }
 
 export async function prepareDataset(
@@ -637,6 +864,11 @@ export interface DeviceInfo {
 
 export async function getDevice(): Promise<DeviceInfo> {
   const r = await api.get("/system/device");
+  return r.data;
+}
+
+export async function getDemoDir(): Promise<{ exists: boolean; path: string | null }> {
+  const r = await api.get("/system/demo-dir");
   return r.data;
 }
 

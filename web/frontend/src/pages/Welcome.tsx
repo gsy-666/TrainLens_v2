@@ -1,5 +1,5 @@
-import { useRef, useState } from "react";
-import { message, Modal } from "antd";
+import { useEffect, useRef, useState } from "react";
+import { message, Modal, Spin } from "antd";
 import gsap from "gsap";
 import { useGSAP } from "@gsap/react";
 import {
@@ -13,7 +13,7 @@ import {
 } from "@ant-design/icons";
 import DirBrowserModal from "../components/DirBrowserModal";
 import { useStudio } from "../store/useStudio";
-import { getServerUrl, getToken, setServerUrl, setToken } from "../api/client";
+import { getDemoDir, getServerUrl, getToken, setServerUrl, setToken } from "../api/client";
 import "@fontsource-variable/outfit";
 import "./welcome.css";
 
@@ -34,28 +34,55 @@ export default function Welcome() {
   const [remoteOpen, setRemoteOpen] = useState(false);
   const [serverInput, setServerInput] = useState(getServerUrl());
   const [tokenInput, setTokenInput] = useState(getToken());
+  const [demoDir, setDemoDir] = useState<string | null>(null);
   const scope = useRef<HTMLDivElement>(null);
   const serverUrl = getServerUrl();
 
-  // Auto-resume disabled — always show Welcome page on startup.
-  // To re-enable, uncomment the useEffect below.
-  // const resumedRef = useRef(false);
-  // useEffect(() => {
-  //   if (resumedRef.current) return;
-  //   resumedRef.current = true;
-  //   try {
-  //     const raw = localStorage.getItem("xaw_last_session");
-  //     if (!raw) return;
-  //     const s = JSON.parse(raw) as { type?: string; path?: string };
-  //     if (!s.path) return;
-  //     const hide = message.loading(`恢复上次会话：${s.path}`, 0);
-  //     const p = s.type === "video" ? openVideo(s.path) : openDir(s.path);
-  //     p.catch(() => undefined).finally(hide);
-  //   } catch {
-  //     /* no session to resume */
-  //   }
-  //   // eslint-disable-next-line react-hooks/exhaustive-deps
-  // }, []);
+  // The demo directory ships with the repository; ask the backend where it
+  // lives instead of assuming a hardcoded path.
+  useEffect(() => {
+    getDemoDir()
+      .then((d) => setDemoDir(d.exists ? d.path : null))
+      .catch(() => setDemoDir(null));
+  }, []);
+
+  // Resume the last session (dir or video) once on mount. On failure the
+  // stored session is dropped and we stay on Welcome silently.
+  const resumedRef = useRef(false);
+  const [resuming, setResuming] = useState(false);
+  useEffect(() => {
+    if (resumedRef.current) return;
+    resumedRef.current = true;
+    let raw: string | null = null;
+    try {
+      raw = localStorage.getItem("xaw_last_session");
+    } catch {
+      return; // storage unavailable
+    }
+    if (!raw) return;
+    let s: { type?: string; path?: string };
+    try {
+      s = JSON.parse(raw) as { type?: string; path?: string };
+    } catch {
+      localStorage.removeItem("xaw_last_session");
+      return;
+    }
+    if (!s.path) return;
+    setResuming(true);
+    const p = s.type === "video" ? openVideo(s.path) : openDir(s.path);
+    p.catch((e) => {
+      // 401（令牌过期/未配置）保留会话：用户补登 token 后 reload 仍可恢复；
+      // 其它失败（目录已不存在等）才丢弃存储的会话
+      const status = (e as { response?: { status?: number } })?.response?.status;
+      if (status === 401) return;
+      try {
+        localStorage.removeItem("xaw_last_session");
+      } catch {
+        /* ignore */
+      }
+    }).finally(() => setResuming(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useGSAP(
     () => {
@@ -88,6 +115,7 @@ export default function Welcome() {
 
   return (
     <div className="wl-root" ref={scope}>
+      {resuming && <Spin tip="正在恢复上次会话…" fullscreen />}
       <div className="wl-layout">
         {/* left: lead column */}
         <div className="wl-left">
@@ -133,9 +161,11 @@ export default function Welcome() {
                 {!opening && <ArrowRightOutlined />}
               </button>
             </div>
-            <button type="button" className="wl-demo" onClick={() => doOpen("D:/x-anylabeling/assets")}>
-              使用示例目录快速体验
-            </button>
+            {demoDir && (
+              <button type="button" className="wl-demo" onClick={() => doOpen(demoDir)}>
+                使用示例目录快速体验
+              </button>
+            )}
           </div>
 
           <button

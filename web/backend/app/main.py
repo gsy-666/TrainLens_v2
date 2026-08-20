@@ -59,6 +59,7 @@ def _fix_dll_search_paths():
 _fix_dll_search_paths()
 
 from .routers import (  # noqa: E402
+    active_learning,
     dataset,
     export,
     files,
@@ -66,8 +67,10 @@ from .routers import (  # noqa: E402
     labels,
     models,
     monitor,
+    playground,
     predict,
     quickstart,
+    remote,
     system,
     training,
     upload,
@@ -99,10 +102,15 @@ app.include_router(export.router, prefix="/api", tags=["export"])
 app.include_router(upload.router, prefix="/api", tags=["upload"])
 app.include_router(video.router, prefix="/api", tags=["video"])
 app.include_router(training.router, prefix="/api", tags=["training"])
+app.include_router(remote.router, prefix="/api", tags=["remote"])
 app.include_router(monitor.router, prefix="/api", tags=["monitor"])
 app.include_router(dataset.router, prefix="/api", tags=["dataset"])
 app.include_router(system.router, prefix="/api", tags=["system"])
 app.include_router(quickstart.router, prefix="/api", tags=["quickstart"])
+app.include_router(playground.router, prefix="/api", tags=["playground"])
+app.include_router(
+    active_learning.router, prefix="/api", tags=["active_learning"]
+)
 
 
 @app.get("/api/health")

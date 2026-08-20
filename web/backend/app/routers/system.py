@@ -1,6 +1,7 @@
 """System info endpoints (device detection for training defaults)."""
 
 import subprocess
+from pathlib import Path
 
 from fastapi import APIRouter
 from pydantic import BaseModel
@@ -57,6 +58,18 @@ def get_device():
     if "device" not in _cache:
         _cache["device"] = _detect_device()
     return _cache["device"]
+
+
+@router.get("/system/demo-dir")
+def get_demo_dir():
+    """Sample asset directory shipped with the repository, if present."""
+    repo_root = Path(__file__).resolve().parents[4]
+    assets = repo_root / "assets"
+    exists = assets.is_dir() and any(
+        p.suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp", ".webp")
+        for p in assets.iterdir()
+    )
+    return {"exists": exists, "path": str(assets) if exists else None}
 
 
 @router.get("/system/device/inference")

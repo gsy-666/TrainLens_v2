@@ -16,6 +16,8 @@ import time
 from typing import Any, Dict, Optional, Tuple
 
 from anylabeling.services.training_center.event_protocol import (
+    TrainingEvent,
+    TrainingEventType,
     create_completed_event,
     create_console_output_event,
     create_failed_event,
@@ -248,6 +250,15 @@ class WebLocalRunner(LocalRunner):
                     job_id=job_id, timestamp=ts,
                     message=data.get("message", ""),
                     stream="stdout", source="web_local_runner",
+                )
+            )
+        elif event_type == "epoch_metrics":
+            # Forward as structured EPOCH_METRICS event (progress + ETA feed)
+            self._emit_event(
+                TrainingEvent(
+                    schema_version=1, job_id=job_id,
+                    event_type=TrainingEventType.EPOCH_METRICS,
+                    timestamp=ts, payload=data, source="web_local_runner",
                 )
             )
         elif event_type == "training_completed":

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  Alert,
   Button,
   Card,
   Collapse,
@@ -8,32 +9,104 @@ import {
   List,
   message,
   Modal,
+  Radio,
   Select,
   Slider,
   Space,
+  Steps,
   Table,
   Tag,
   Tooltip,
 } from "antd";
 import {
   ArrowLeftOutlined,
+  ApiOutlined,
   CaretRightOutlined,
   CheckCircleFilled,
   CloseCircleFilled,
   ExperimentOutlined,
   FolderOpenOutlined,
+  QuestionCircleOutlined,
   StopOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import * as api from "../api/client";
 import DirBrowserModal from "../components/DirBrowserModal";
+import GuidedTour, { useGuidedTour, type GuidedTourStep } from "../components/GuidedTour";
 import LineChart from "../components/LineChart";
+import ModelPlayground from "../components/ModelPlayground";
+import RemoteProfilesModal from "../components/RemoteProfilesModal";
 
 const SEV_STYLE: Record<string, { color: string; icon: React.ReactNode }> = {
   pass: { color: "#52c41a", icon: <CheckCircleFilled /> },
   warning: { color: "#faad14", icon: <CloseCircleFilled /> },
   error: { color: "#f5222d", icon: <CloseCircleFilled /> },
 };
+
+const MODELS_BY_TASK: Record<string, string[]> = {
+  detect: ["yolov8n.pt", "yolov8s.pt", "yolov8m.pt", "yolo11n.pt", "yolo11s.pt"],
+  segment: ["yolov8n-seg.pt", "yolov8s-seg.pt", "yolo11n-seg.pt"],
+  obb: ["yolov8n-obb.pt", "yolov8s-obb.pt", "yolo11n-obb.pt"],
+  classify: ["yolov8n-cls.pt", "yolov8s-cls.pt", "yolo11n-cls.pt"],
+  pose: ["yolov8n-pose.pt", "yolo11n-pose.pt"],
+};
+
+const PREP_TASKS = ["Detect", "OBB", "Segment", "Classify", "Pose"];
+
+const PARAM_TIPS: Record<string, string> = {
+  epochs: "完整遍历数据集的次数；数据少用 30 即可快速验证",
+  batch: "每批送入模型的图片数；-1 为自动，显存/内存不足可调小",
+  imgsz: "训练输入图片边长；越大越精确，但更慢、更占资源",
+  patience: "早停耐心：连续 N 轮指标无提升就提前停止；留空用默认",
+  lr0: "初始学习率；一般留空用默认，太大容易不收敛",
+};
+
+const TERMINAL_STATUS = new Set(["completed", "failed", "stopped"]);
+
+const TOUR_STEPS: GuidedTourStep[] = [
+  {
+    targetId: "tour-train-steps",
+    title: "整体流程",
+    description: "顶部步骤条展示当前进度：准备数据集 → 配置训练 → 训练中 → 产物与导出。",
+  },
+  {
+    targetId: "tour-train-dataset",
+    title: "数据集检查",
+    description: "这里自动统计当前标注数据并推荐任务类型，开训前先确认数据没有问题。",
+  },
+  {
+    targetId: "tour-train-exec",
+    title: "执行位置",
+    description: "默认在本机训练；有 GPU 服务器的话，也可以切换为远程训练。",
+  },
+  {
+    targetId: "tour-train-params",
+    title: "训练参数",
+    description: "新手不用逐项调参，直接点「快速体验」等预设按钮即可一键填好。",
+  },
+  {
+    targetId: "tour-train-start",
+    title: "检查并启动",
+    description: "点击后会先做一轮预检查，没有问题就自动开始训练。",
+  },
+  {
+    targetId: "tour-train-logs",
+    title: "日志与曲线",
+    description: "训练过程中日志在这里实时滚动，下方还会展示 Loss、mAP 等曲线。",
+  },
+  {
+    targetId: "tour-train-history",
+    title: "历史记录与产物",
+    description: "每次训练都会留档，点「产物」可以预览、下载或导出训练好的模型。",
+  },
+];
+
+function formatEta(seconds: number): string {
+  if (seconds < 60) return "不到 1 分钟";
+  const m = Math.round(seconds / 60);
+  if (m < 60) return `约 ${m} 分钟`;
+  return `约 ${Math.floor(m / 60)} 小时 ${m % 60} 分钟`;
+}
 
 interface Props {
   onBack: () => void;
@@ -61,10 +134,23 @@ export default function TrainingCenter({ onBack }: Props) {
   const [preparing, setPreparing] = useState(false);
   const [quickstarting, setQuickstarting] = useState(false);
   const [starting, setStarting] = useState(false);
+  const tour = useGuidedTour("xaw_tour_training_seen");
+
+  // remote execution
+  const [execMode, setExecMode] = useState<"local" | "remote_ssh">("local");
+  const [remoteProfiles, setRemoteProfiles] = useState<api.RemoteProfile[]>([]);
+  const [remoteProfileId, setRemoteProfileId] = useState<string | null>(null);
+  const [remotePassword, setRemotePassword] = useState("");
+  const [profilesOpen, setProfilesOpen] = useState(false);
+  const [diagLoading, setDiagLoading] = useState(false);
+  const [remoteDiag, setRemoteDiag] = useState<api.RemoteDiagnosticsResult | null>(null);
+  const [remoteGpus, setRemoteGpus] = useState<api.RemoteGpuInfo[]>([]);
+  const [deviceAutoHint, setDeviceAutoHint] = useState<string | null>(null);
 
   // runtime
   const [issues, setIssues] = useState<api.PreflightIssue[] | null>(null);
-  const [datasetSummary, setDatasetSummary] = useState<api.DatasetPrepSummary | null>(null);
+  const [datasetStats, setDatasetStats] = useState<api.DatasetStats | null>(null);
+  const [datasetStatsError, setDatasetStatsError] = useState<string | null>(null);
   const [status, setStatus] = useState<api.TrainingStatusResponse | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [metrics, setMetrics] = useState<api.MetricSeries[]>([]);
@@ -74,12 +160,67 @@ export default function TrainingCenter({ onBack }: Props) {
   const [artifactLoading, setArtifactLoading] = useState(false);
   const [artifactError, setArtifactError] = useState<string | null>(null);
   const [artifactDetails, setArtifactDetails] = useState<api.ArtifactInfo[] | null>(null);
+  const [artifactPreview, setArtifactPreview] = useState<{ path: string; failed: boolean } | null>(null);
   const [exportingPath, setExportingPath] = useState<string | null>(null);
   const [exportFormat, setExportFormat] = useState("onnx");
+  const [registeringPath, setRegisteringPath] = useState<string | null>(null);
+  const [exportFormats, setExportFormats] = useState<api.TrainingExportFormat[] | null>(null);
 
   const seqRef = useRef(0);
   const logBoxRef = useRef<HTMLDivElement>(null);
+  // 轮询的 setTimeout 句柄，卸载时清理，避免组件销毁后仍发出一次请求
+  const eventsTimerRef = useRef<number | undefined>(undefined);
+  const statusTimerRef = useRef<number | undefined>(undefined);
   const running = !!status?.running;
+  const selectedProfile =
+    remoteProfiles.find((p) => p.profile_id === remoteProfileId) ?? null;
+  // 密码认证的远程档案必须先填密码才能启动
+  const remotePasswordMissing =
+    execMode === "remote_ssh" &&
+    selectedProfile?.auth_method === "password" &&
+    remotePassword.trim().length === 0;
+
+  // ---- wizard step derivation ------------------------------------------------
+  // 步骤位置只由当前会话状态推导，不看历史记录（否则历史里一旦有跑完/失败的
+  // 任务，步骤条会永远停在「产物与导出」）：
+  // 训练中 → 2；当前任务到终态 → 3；表单(数据 YAML + 模型)就绪 → 2；
+  // 仅有数据 → 1；否则 → 0
+  const hasData = data.trim().length > 0;
+  const formReady = hasData && model.trim().length > 0;
+  const currentTerminal =
+    !!status?.job && !running && TERMINAL_STATUS.has(String(status.job.status));
+  const stepCurrent = running ? 2 : currentTerminal ? 3 : formReady ? 2 : hasData ? 1 : 0;
+  const noDataset = datasetStatsError?.includes("No image directory") ?? false;
+
+  const onTaskChange = useCallback(
+    (t: string) => {
+      setTask(t);
+      const models = MODELS_BY_TASK[t] ?? [];
+      if (!models.includes(model)) {
+        setModel(models[0] ?? model);
+      }
+    },
+    [model]
+  );
+
+  const applyPreset = useCallback((key: string) => {
+    if (key === "quick") {
+      setEpochs(30);
+      setBatch(16);
+      setImgsz(640);
+      setPatience(null);
+      setLr0(null);
+    } else if (key === "standard") {
+      setEpochs(100);
+      setBatch(16);
+      setImgsz(640);
+      setPatience(null);
+      setLr0(null);
+    } else if (key === "high") {
+      setEpochs(300);
+      setPatience(50);
+    }
+  }, []);
 
   const formPayload = useCallback(
     () => ({
@@ -94,9 +235,68 @@ export default function TrainingCenter({ onBack }: Props) {
       imgsz,
       ...(patience != null ? { patience } : {}),
       ...(lr0 != null ? { lr0 } : {}),
+      ...(execMode === "remote_ssh"
+        ? {
+            execution_mode: "remote_ssh",
+            remote_profile_id: remoteProfileId,
+            remote_password: remotePassword || null,
+          }
+        : { execution_mode: "local" }),
     }),
-    [task, model, data, project, name, device, epochs, batch, imgsz, patience, lr0]
+    [
+      task, model, data, project, name, device, epochs, batch, imgsz,
+      patience, lr0, execMode, remoteProfileId, remotePassword,
+    ]
   );
+
+  // ---- remote server profiles --------------------------------------------
+  const loadRemoteProfiles = useCallback(async () => {
+    try {
+      const d = await api.listRemoteProfiles();
+      setRemoteProfiles(d.profiles);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  useEffect(() => {
+    loadRemoteProfiles();
+  }, [loadRemoteProfiles]);
+
+  // keep the selection valid as profiles are added/removed
+  useEffect(() => {
+    setRemoteProfileId((cur) =>
+      cur && remoteProfiles.some((p) => p.profile_id === cur)
+        ? cur
+        : remoteProfiles[0]?.profile_id ?? null
+    );
+  }, [remoteProfiles]);
+
+  const onDetectServer = useCallback(async () => {
+    if (!remoteProfileId) {
+      message.warning("请先选择或新建一个服务器档案");
+      return;
+    }
+    setDiagLoading(true);
+    setRemoteDiag(null);
+    try {
+      const d = await api.remoteDiagnostics(remoteProfileId, remotePassword || undefined);
+      setRemoteDiag(d);
+      setRemoteGpus(d.gpus);
+      setDevice(d.recommended_device);
+      setDeviceAutoHint(
+        d.recommended_device === "cpu"
+          ? "已按服务器自动选择 CPU"
+          : `已按服务器自动选择 GPU ${d.recommended_device}`
+      );
+      message.success("服务器检测完成");
+    } catch (e) {
+      const err = e as { response?: { data?: { detail?: string } }; message: string };
+      message.error(`服务器检测失败: ${err.response?.data?.detail ?? err.message}`, 6);
+    } finally {
+      setDiagLoading(false);
+    }
+  }, [remoteProfileId, remotePassword]);
 
   // ---- polling -------------------------------------------------------------
   useEffect(() => {
@@ -120,7 +320,7 @@ export default function TrainingCenter({ onBack }: Props) {
       } catch {
         /* server unreachable */
       }
-      if (!stopped) setTimeout(pollEvents, 1000);
+      if (!stopped) eventsTimerRef.current = window.setTimeout(pollEvents, 1000);
     };
 
     const pollStatus = async () => {
@@ -134,13 +334,15 @@ export default function TrainingCenter({ onBack }: Props) {
       } catch {
         /* ignore */
       }
-      if (!stopped) setTimeout(pollStatus, 3000);
+      if (!stopped) statusTimerRef.current = window.setTimeout(pollStatus, 3000);
     };
 
     pollEvents();
     pollStatus();
     return () => {
       stopped = true;
+      window.clearTimeout(eventsTimerRef.current);
+      window.clearTimeout(statusTimerRef.current);
     };
   }, []);
 
@@ -159,9 +361,27 @@ export default function TrainingCenter({ onBack }: Props) {
     }
   }, []);
 
+  const loadDatasetStats = useCallback(async () => {
+    try {
+      const s = await api.getDatasetStats();
+      setDatasetStats(s);
+      setDatasetStatsError(null);
+    } catch (e) {
+      const err = e as { response?: { data?: { detail?: string } }; message: string };
+      setDatasetStats(null);
+      setDatasetStatsError(err.response?.data?.detail ?? err.message);
+    }
+  }, []);
+
+  // dataset stats on mount (the annotation page may already have a dir open)
+  useEffect(() => {
+    loadDatasetStats();
+  }, [loadDatasetStats]);
+
   const loadArtifacts = useCallback(async (jobId: string) => {
     setArtifactLoading(true);
     setArtifactError(null);
+    setArtifactPreview(null);
     try {
       const d = await api.getTrainingArtifacts(jobId);
       setArtifactList(d);
@@ -195,6 +415,59 @@ export default function TrainingCenter({ onBack }: Props) {
     },
     [artifactList, exportFormat, loadArtifacts]
   );
+
+  const onTryModel = useCallback(
+    async (relPath: string) => {
+      if (!artifactList) return;
+      setRegisteringPath(relPath);
+      const hide = message.loading("正在注册并加载模型…", 0);
+      try {
+        const r = await api.registerModelArtifact(artifactList.job_id, relPath);
+        await api.loadModel(r.config_file);
+        message.success("模型已加载，返回标注页即可试用");
+        onBack();
+      } catch (e) {
+        const err = e as { response?: { data?: { detail?: string } }; message: string };
+        message.error(`试用失败: ${err.response?.data?.detail ?? err.message}`, 6);
+      } finally {
+        hide();
+        setRegisteringPath(null);
+      }
+    },
+    [artifactList, onBack]
+  );
+
+  // export format availability (env-checked on the backend)
+  useEffect(() => {
+    api
+      .getTrainingExportFormats()
+      .then((d) => {
+        setExportFormats(d.formats);
+        // 当前选中的格式在本机不可用时，自动切到第一个可用格式
+        setExportFormat((cur) =>
+          d.formats.some((f) => f.id === cur && f.available)
+            ? cur
+            : (d.formats.find((f) => f.available)?.id ?? cur)
+        );
+      })
+      .catch(() => undefined);
+  }, []);
+
+  // static fallback keeps the dialog usable if the formats fetch fails
+  const exportOptions = (
+    exportFormats ?? [
+      { id: "onnx", name: "ONNX", available: true, reason: null },
+      { id: "engine", name: "TensorRT", available: true, reason: null },
+      { id: "openvino", name: "OpenVINO", available: true, reason: null },
+      { id: "tflite", name: "TFLite", available: true, reason: null },
+      { id: "torchscript", name: "TorchScript", available: true, reason: null },
+    ]
+  ).map((f) => ({
+    value: f.id,
+    label: f.available ? f.name : `${f.name}（不可用）`,
+    disabled: !f.available,
+    title: f.reason ?? f.name,
+  }));
 
   // device auto-detection on mount
   useEffect(() => {
@@ -239,6 +512,7 @@ export default function TrainingCenter({ onBack }: Props) {
         `已自动开训：${r.task_type} · ${r.model} · ${r.device} · train ${trainMatch?.[1] ?? "?"} 张 / val ${valMatch?.[1] ?? "?"} 张`,
         6
       );
+      void loadDatasetStats();
     } catch (e) {
       const err = e as { response?: { data?: { detail?: string } }; message: string };
       const detail = err.response?.data?.detail ?? err.message;
@@ -251,9 +525,13 @@ export default function TrainingCenter({ onBack }: Props) {
       hide();
       setQuickstarting(false);
     }
-  }, [epochs]);
+  }, [epochs, loadDatasetStats]);
 
   const onStart = useCallback(async () => {
+    if (execMode === "remote_ssh" && !remoteProfileId) {
+      message.warning("请先选择或新建一个远程服务器档案");
+      return;
+    }
     setStarting(true);
     setIssues(null);
     try {
@@ -275,7 +553,7 @@ export default function TrainingCenter({ onBack }: Props) {
     } finally {
       setStarting(false);
     }
-  }, [formPayload]);
+  }, [formPayload, execMode, remoteProfileId]);
 
   const onStop = useCallback(async () => {
     await api.trainingStop();
@@ -290,13 +568,6 @@ export default function TrainingCenter({ onBack }: Props) {
         dataset_ratio: prepRatio,
       });
       setData(r.data_yaml);
-      setDatasetSummary({
-        total_images: 0,
-        labeled_images: 0,
-        empty_labels: 0,
-        class_counts: {},
-        checks: [{ severity: "info", title: "数据集已生成", message: r.info }],
-      });
       setPrepOpen(false);
       const trainMatch = r.info.match(/Train images: (\d+)/);
       const valMatch = r.info.match(/Val images: (\d+)/);
@@ -304,13 +575,14 @@ export default function TrainingCenter({ onBack }: Props) {
         `训练集已生成：train ${trainMatch?.[1] ?? "?"} 张 / val ${valMatch?.[1] ?? "?"} 张，已填入 YAML 路径`,
         5
       );
+      void loadDatasetStats();
     } catch (e) {
       const err = e as { response?: { data?: { detail?: string } }; message: string };
       message.error(`生成失败: ${err.response?.data?.detail ?? err.message}`);
     } finally {
       setPreparing(false);
     }
-  }, [prepTask, prepRatio]);
+  }, [prepTask, prepRatio, loadDatasetStats]);
 
   const metricGroups = [
     { key: "loss", title: "Loss" },
@@ -336,6 +608,14 @@ export default function TrainingCenter({ onBack }: Props) {
         <span style={{ fontWeight: 600, fontSize: 16 }}>
           <ExperimentOutlined /> 训练中心
         </span>
+        <Tooltip title="新手引导">
+          <Button
+            type="text"
+            size="small"
+            icon={<QuestionCircleOutlined />}
+            onClick={tour.openTour}
+          />
+        </Tooltip>
         {status?.job && (
           <Tag color={running ? "processing" : "default"}>
             {status.job.display_name} · {status.job.status}
@@ -343,9 +623,33 @@ export default function TrainingCenter({ onBack }: Props) {
         )}
       </div>
 
+      <div
+        id="tour-train-steps"
+        style={{ padding: "6px 16px", background: "#fff", borderBottom: "1px solid #f0f0f0" }}
+      >
+        <Steps
+          size="small"
+          current={stepCurrent}
+          items={[
+            { title: "准备数据集" },
+            { title: "配置训练" },
+            { title: "训练中" },
+            { title: "产物与导出" },
+          ]}
+        />
+      </div>
+
       <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
         {/* 左：新建任务 */}
         <div style={{ width: 380, overflow: "auto", padding: 12 }}>
+          {noDataset && (
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 12 }}
+              message="请先在标注页打开图片目录，或直接使用一键训练"
+            />
+          )}
           <Card size="small" style={{ marginBottom: 12 }}>
             <Button
               type="primary"
@@ -353,42 +657,210 @@ export default function TrainingCenter({ onBack }: Props) {
               block
               icon={<ThunderboltOutlined />}
               loading={quickstarting}
-              disabled={running}
+              disabled={running || execMode === "remote_ssh"}
               onClick={onQuickstart}
             >
               一键训练（当前标注数据集）
             </Button>
             <div style={{ fontSize: 12, color: "#999", marginTop: 8 }}>
-              自动推断任务类型、生成数据集、选择设备和模型，零配置直接开训。
-              需要先在标注页打开数据集目录。
+              {execMode === "remote_ssh"
+                ? "远程服务器模式请使用下方表单配置训练。"
+                : "自动推断任务类型、生成数据集、选择设备和模型，零配置直接开训。需要先在标注页打开数据集目录。"}
             </div>
           </Card>
 
-          {datasetSummary && (
-            <Card size="small" title="数据集检查" style={{ marginBottom: 12 }}>
-              <List
-                size="small"
-                dataSource={datasetSummary.checks}
-                renderItem={(item) => (
-                  <List.Item>
-                    <Tag color={item.severity === "error" ? "red" : item.severity === "warning" ? "orange" : "blue"}>
-                      {item.severity}
+          <Card id="tour-train-dataset" size="small" title="数据集检查" style={{ marginBottom: 12 }}>
+            {datasetStats ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                <div style={{ fontSize: 13 }}>
+                  总图片数：<strong>{datasetStats.total_images}</strong>
+                  <span style={{ color: "#999", marginLeft: 8 }}>
+                    推荐任务：{datasetStats.recommended_task}
+                  </span>
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {Object.entries(datasetStats.per_task_valid).map(([t, n]) => (
+                    <Tag
+                      key={t}
+                      color={t === datasetStats.recommended_task ? "green" : "default"}
+                    >
+                      {t} {n}
+                      {t === datasetStats.recommended_task ? " · 推荐" : ""}
                     </Tag>
-                    <span>{item.title}</span>
-                  </List.Item>
+                  ))}
+                </div>
+                {Object.keys(datasetStats.class_counts).length > 0 && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <div style={{ fontSize: 12, color: "#999" }}>类别实例分布</div>
+                    {Object.entries(datasetStats.class_counts)
+                      .sort((a, b) => b[1] - a[1])
+                      .map(([label, count]) => {
+                        const max = Math.max(...Object.values(datasetStats.class_counts));
+                        const pct = max > 0 ? (count / max) * 100 : 0;
+                        return (
+                          <div
+                            key={label}
+                            style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}
+                          >
+                            <span
+                              style={{
+                                width: 80,
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                                flexShrink: 0,
+                              }}
+                              title={label}
+                            >
+                              {label}
+                            </span>
+                            <div style={{ flex: 1, background: "#f0f0f0", borderRadius: 2, height: 12 }}>
+                              <div
+                                style={{
+                                  width: `${pct}%`,
+                                  height: "100%",
+                                  background: "#1677ff",
+                                  borderRadius: 2,
+                                }}
+                              />
+                            </div>
+                            <span style={{ width: 40, textAlign: "right", flexShrink: 0 }}>{count}</span>
+                          </div>
+                        );
+                      })}
+                  </div>
                 )}
-              />
-            </Card>
-          )}
+                {datasetStats.warnings.length > 0 && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    {datasetStats.warnings.map((w) => (
+                      <div key={w.code} style={{ fontSize: 12, color: "#faad14" }}>
+                        ⚠ {w.message}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div style={{ fontSize: 12, color: "#999" }}>
+                {datasetStatsError
+                  ? `暂无统计数据：${datasetStatsError}`
+                  : "正在统计当前标注数据集…"}
+              </div>
+            )}
+          </Card>
 
-          <Card size="small" title="训练参数">
+          <Card id="tour-train-exec" size="small" title="执行位置" style={{ marginBottom: 12 }}>
+            <Radio.Group
+              size="small"
+              optionType="button"
+              buttonStyle="solid"
+              value={execMode}
+              onChange={(e) => {
+                const mode = e.target.value as "local" | "remote_ssh";
+                setExecMode(mode);
+                // 切换执行位置后，另一侧的 GPU 列表 / 诊断结果 / 密码全部作废：
+                // 本机回退到本地推荐设备，远程先回退 CPU，等重新检测
+                setRemoteGpus([]);
+                setRemoteDiag(null);
+                setDeviceAutoHint(null);
+                setRemotePassword("");
+                setDevice(mode === "local" ? (deviceInfo?.recommended ?? "cpu") : "cpu");
+              }}
+              disabled={running}
+              options={[
+                { value: "local", label: "本机" },
+                { value: "remote_ssh", label: "远程服务器" },
+              ]}
+            />
+            {execMode === "remote_ssh" && (
+              <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 10 }}>
+                <div>
+                  <div style={{ marginBottom: 4 }}>服务器档案</div>
+                  <Space.Compact style={{ width: "100%" }}>
+                    <Select
+                      style={{ width: "100%" }}
+                      value={remoteProfileId}
+                      onChange={(v) => {
+                        setRemoteProfileId(v);
+                        // 换服务器档案后，上一台的 GPU 列表 / 诊断结果 / 密码作废，
+                        // 设备回退 CPU，等重新检测
+                        setRemoteGpus([]);
+                        setRemoteDiag(null);
+                        setDeviceAutoHint(null);
+                        setRemotePassword("");
+                        setDevice("cpu");
+                      }}
+                      disabled={running}
+                      placeholder="选择服务器"
+                      notFoundContent="暂无档案，请点「管理服务器」新增"
+                      options={remoteProfiles.map((p) => ({
+                        value: p.profile_id,
+                        label: `${p.name}（${p.username}@${p.host}:${p.port}）`,
+                      }))}
+                    />
+                    <Button onClick={() => setProfilesOpen(true)} disabled={running}>
+                      管理服务器
+                    </Button>
+                  </Space.Compact>
+                </div>
+                {selectedProfile?.auth_method === "password" && (
+                  <div>
+                    <div style={{ marginBottom: 4 }}>登录密码（仅本次会话，不会保存）</div>
+                    <Input.Password
+                      value={remotePassword}
+                      onChange={(e) => setRemotePassword(e.target.value)}
+                      disabled={running}
+                    />
+                  </div>
+                )}
+                <div>
+                  <Button
+                    size="small"
+                    icon={<ApiOutlined />}
+                    loading={diagLoading}
+                    disabled={!remoteProfileId || running}
+                    onClick={onDetectServer}
+                  >
+                    检测服务器
+                  </Button>
+                  {deviceAutoHint && (
+                    <span style={{ marginLeft: 8, fontSize: 12, color: "#52c41a" }}>
+                      {deviceAutoHint}
+                    </span>
+                  )}
+                </div>
+                {remoteDiag && (
+                  <div style={{ fontSize: 12, display: "flex", flexDirection: "column", gap: 2 }}>
+                    {remoteDiag.items.map((it, idx) => (
+                      <div
+                        key={idx}
+                        style={{
+                          color:
+                            it.status === "ERROR"
+                              ? "#f5222d"
+                              : it.status === "WARNING"
+                                ? "#faad14"
+                                : "#52c41a",
+                        }}
+                      >
+                        {it.status === "PASS" ? "✓" : it.status === "WARNING" ? "⚠" : "✗"}{" "}
+                        {it.label}：{it.message.split("\n")[0]}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </Card>
+
+          <Card id="tour-train-params" size="small" title="训练参数">
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               <div>
                 <div style={{ marginBottom: 4 }}>任务类型</div>
                 <Select
                   style={{ width: "100%" }}
                   value={task}
-                  onChange={setTask}
+                  onChange={onTaskChange}
                   disabled={running}
                   options={["detect", "segment", "classify", "pose", "obb"].map((t) => ({
                     value: t,
@@ -397,20 +869,16 @@ export default function TrainingCenter({ onBack }: Props) {
                 />
               </div>
               <div>
-                <div style={{ marginBottom: 4 }}>模型（.pt 路径或模型名）</div>
+                <div style={{ marginBottom: 4 }}>模型权重</div>
                 <Select
                   style={{ width: "100%" }}
                   value={model}
                   onChange={setModel}
                   disabled={running}
-                  options={[
-                    "yolov8n.pt",
-                    "yolov8s.pt",
-                    "yolov8m.pt",
-                    "yolov8n-seg.pt",
-                    "yolo11n.pt",
-                    "yolo11s.pt",
-                  ].map((m) => ({ value: m, label: m }))}
+                  options={(MODELS_BY_TASK[task] ?? [model]).map((m) => ({
+                    value: m,
+                    label: m,
+                  }))}
                 />
               </div>
               <div>
@@ -423,7 +891,11 @@ export default function TrainingCenter({ onBack }: Props) {
                   type="link"
                   size="small"
                   style={{ padding: 0, marginTop: 4 }}
-                  onClick={() => setPrepOpen(true)}
+                  onClick={() => {
+                    const rec = datasetStats?.recommended_task;
+                    if (rec && rec !== "Pose") setPrepTask(rec);
+                    setPrepOpen(true);
+                  }}
                   disabled={running}
                 >
                   从当前标注数据集一键生成
@@ -452,13 +924,16 @@ export default function TrainingCenter({ onBack }: Props) {
                 <div style={{ flex: 1 }}>
                   <div style={{ marginBottom: 4 }}>
                     设备
-                    {deviceInfo && (
-                      <span style={{ fontSize: 11, color: "#999", marginLeft: 6 }}>
-                        {deviceInfo.gpus.length > 0 && deviceInfo.cuda_available
-                          ? `检测到 ${deviceInfo.gpus[0].name}`
-                          : "CPU 模式"}
-                      </span>
-                    )}
+                    <span style={{ fontSize: 11, color: "#999", marginLeft: 6 }}>
+                      {execMode === "remote_ssh"
+                        ? remoteGpus.length > 0
+                          ? `服务器 ${remoteGpus[0].name}`
+                          : "以服务器诊断为准"
+                        : deviceInfo &&
+                          (deviceInfo.gpus.length > 0 && deviceInfo.cuda_available
+                            ? `检测到 ${deviceInfo.gpus[0].name}`
+                            : "CPU 模式")}
+                    </span>
                   </div>
                   <Select
                     style={{ width: "100%" }}
@@ -467,29 +942,57 @@ export default function TrainingCenter({ onBack }: Props) {
                     disabled={running}
                     options={[
                       { value: "cpu", label: "CPU" },
-                      ...(deviceInfo?.cuda_available
-                        ? deviceInfo.gpus.map((g) => ({
+                      ...(execMode === "remote_ssh"
+                        ? remoteGpus.map((g) => ({
                             value: String(g.index),
-                            label: `GPU ${g.index} · ${g.name}`,
+                            label: `GPU ${g.index} · ${g.name}（远程）`,
                           }))
-                        : []),
+                        : deviceInfo?.cuda_available
+                          ? deviceInfo.gpus.map((g) => ({
+                              value: String(g.index),
+                              label: `GPU ${g.index} · ${g.name}`,
+                            }))
+                          : []),
                     ]}
                   />
                 </div>
               </div>
+              <div>
+                <div style={{ marginBottom: 4 }}>预设</div>
+                <Radio.Group
+                  size="small"
+                  optionType="button"
+                  buttonStyle="solid"
+                  disabled={running}
+                  // 受控且恒为空：预设是「动作」而非状态，value=null 保证同一
+                  // 预设可重复点击应用，手动改参后也不会有误导性的高亮
+                  value={null}
+                  onChange={(e) => applyPreset(e.target.value as string)}
+                  options={[
+                    { value: "quick", label: "快速体验" },
+                    { value: "standard", label: "标准训练" },
+                    { value: "high", label: "高精度" },
+                  ]}
+                />
+              </div>
               <div style={{ display: "flex", gap: 8 }}>
                 {([
-                  ["epochs", epochs, setEpochs],
-                  ["batch", batch, setBatch],
-                  ["imgsz", imgsz, setImgsz],
-                ] as const).map(([label, value, setter]) => (
+                  ["epochs", epochs, setEpochs, 1, undefined],
+                  ["batch", batch, setBatch, -1, undefined],
+                  ["imgsz", imgsz, setImgsz, 32, 4096],
+                ] as const).map(([label, value, setter, min, max]) => (
                   <div key={label} style={{ flex: 1 }}>
-                    <div style={{ marginBottom: 4 }}>{label}</div>
+                    <div style={{ marginBottom: 4 }}>
+                      <Tooltip title={PARAM_TIPS[label]}>{label}</Tooltip>
+                    </div>
                     <InputNumber
                       style={{ width: "100%" }}
-                      min={1}
+                      min={min}
+                      max={max}
                       value={value}
-                      onChange={(v) => setter(v ?? 1)}
+                      // 0 不是合法取值：归一为该参数的最小值（batch 即 -1 自动）；
+                      // 清空输入框静默回落最小值的行为保持不变
+                      onChange={(v) => setter(v == null || v === 0 ? min : v)}
                       disabled={running}
                     />
                   </div>
@@ -504,9 +1007,12 @@ export default function TrainingCenter({ onBack }: Props) {
                     children: (
                       <div style={{ display: "flex", gap: 8 }}>
                         <div style={{ flex: 1 }}>
-                          <div style={{ marginBottom: 4 }}>patience</div>
+                          <div style={{ marginBottom: 4 }}>
+                            <Tooltip title={PARAM_TIPS.patience}>patience</Tooltip>
+                          </div>
                           <InputNumber
                             style={{ width: "100%" }}
+                            min={0}
                             value={patience}
                             onChange={setPatience}
                             disabled={running}
@@ -514,9 +1020,12 @@ export default function TrainingCenter({ onBack }: Props) {
                           />
                         </div>
                         <div style={{ flex: 1 }}>
-                          <div style={{ marginBottom: 4 }}>lr0</div>
+                          <div style={{ marginBottom: 4 }}>
+                            <Tooltip title={PARAM_TIPS.lr0}>lr0</Tooltip>
+                          </div>
                           <InputNumber
                             style={{ width: "100%" }}
+                            min={0}
                             step={0.001}
                             value={lr0}
                             onChange={setLr0}
@@ -532,11 +1041,17 @@ export default function TrainingCenter({ onBack }: Props) {
               <Space>
                 {!running ? (
                   <Button
+                    id="tour-train-start"
                     type="primary"
                     icon={<CaretRightOutlined />}
                     onClick={onStart}
                     loading={starting}
-                    disabled={!data || !project}
+                    disabled={
+                      !data ||
+                      !project ||
+                      (execMode === "remote_ssh" && !remoteProfileId) ||
+                      remotePasswordMissing
+                    }
                   >
                     检查并启动
                   </Button>
@@ -544,6 +1059,11 @@ export default function TrainingCenter({ onBack }: Props) {
                   <Button danger icon={<StopOutlined />} onClick={onStop}>
                     停止训练
                   </Button>
+                )}
+                {remotePasswordMissing && !running && (
+                  <span style={{ fontSize: 12, color: "#fa8c16" }}>
+                    该服务器使用密码认证，请先填写密码
+                  </span>
                 )}
               </Space>
             </div>
@@ -569,9 +1089,36 @@ export default function TrainingCenter({ onBack }: Props) {
           )}
         </div>
 
-        {/* 右：日志 + 指标 + 历史 */}
+        {/* 右：模型试用 + 日志 + 指标 + 历史 */}
         <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, padding: 12, gap: 12, overflow: "auto" }}>
-          <Card size="small" title="实时日志" styles={{ body: { padding: 0 } }}>
+          <Collapse
+            size="small"
+            style={{ background: "#fff" }}
+            items={[
+              {
+                key: "playground",
+                label: (
+                  <span style={{ fontWeight: 600 }}>
+                    <ExperimentOutlined /> 模型试用（Playground）
+                  </span>
+                ),
+                children: <ModelPlayground />,
+              },
+            ]}
+          />
+          <Card
+            id="tour-train-logs"
+            size="small"
+            title="实时日志"
+            styles={{ body: { padding: 0 } }}
+            extra={
+              running && status?.eta_seconds != null && status.eta_seconds > 0 ? (
+                <span style={{ fontSize: 12, color: "#888", fontWeight: 400 }}>
+                  预计剩余 {formatEta(status.eta_seconds)}
+                </span>
+              ) : null
+            }
+          >
             <div
               ref={logBoxRef}
               style={{
@@ -601,14 +1148,20 @@ export default function TrainingCenter({ onBack }: Props) {
             ))}
           </div>
 
-          <Card size="small" title="历史记录">
+          <Card id="tour-train-history" size="small" title="历史记录">
             <Table
               size="small"
               rowKey={(r) => String(r.job_id)}
               dataSource={history}
               pagination={{ pageSize: 8, size: "small" }}
               columns={[
-                { title: "任务", dataIndex: "job_id", ellipsis: true },
+                { title: "ID", dataIndex: "job_id", ellipsis: true },
+                {
+                  title: "任务",
+                  dataIndex: "task",
+                  width: 80,
+                  render: (t: string | null) => t || "-",
+                },
                 {
                   title: "状态",
                   dataIndex: "status",
@@ -650,6 +1203,7 @@ export default function TrainingCenter({ onBack }: Props) {
           setArtifactList(null);
           setArtifactError(null);
           setArtifactDetails(null);
+          setArtifactPreview(null);
         }}
         footer={null}
         width={820}
@@ -671,6 +1225,23 @@ export default function TrainingCenter({ onBack }: Props) {
                 renderItem={(a) => (
                   <List.Item
                     actions={[
+                      ...(a.file_type === "png"
+                        ? [
+                            <Button
+                              key="preview"
+                              size="small"
+                              onClick={() =>
+                                setArtifactPreview((cur) =>
+                                  cur?.path === a.relative_path
+                                    ? null
+                                    : { path: a.relative_path, failed: false }
+                                )
+                              }
+                            >
+                              {artifactPreview?.path === a.relative_path ? "收起" : "预览"}
+                            </Button>,
+                          ]
+                        : []),
                       ...(a.name.endsWith(".pt")
                         ? [
                             <Space key="export" size={4}>
@@ -678,23 +1249,33 @@ export default function TrainingCenter({ onBack }: Props) {
                                 size="small"
                                 value={exportFormat}
                                 onChange={setExportFormat}
-                                style={{ width: 110 }}
-                                options={[
-                                  { value: "onnx", label: "ONNX" },
-                                  { value: "engine", label: "TensorRT" },
-                                  { value: "openvino", label: "OpenVINO" },
-                                  { value: "tflite", label: "TFLite" },
-                                  { value: "torchscript", label: "TorchScript" },
-                                ]}
+                                style={{ width: 130 }}
+                                options={exportOptions}
                               />
                               <Button
                                 size="small"
                                 loading={exportingPath === a.relative_path}
+                                disabled={exportingPath !== null}
                                 onClick={() => onExportArtifact(a.relative_path)}
                               >
                                 导出
                               </Button>
                             </Space>,
+                          ]
+                        : []),
+                      ...(a.name.endsWith(".pt") || a.name.endsWith(".onnx")
+                        ? [
+                            <Button
+                              key="try"
+                              size="small"
+                              type="primary"
+                              ghost
+                              loading={registeringPath === a.relative_path}
+                              disabled={registeringPath !== null}
+                              onClick={() => onTryModel(a.relative_path)}
+                            >
+                              试用
+                            </Button>,
                           ]
                         : []),
                       <Button
@@ -716,6 +1297,28 @@ export default function TrainingCenter({ onBack }: Props) {
                       <div style={{ fontSize: 12, color: "#999" }}>
                         {a.size} bytes · {a.modified_at}
                       </div>
+                      {artifactPreview?.path === a.relative_path &&
+                        (artifactPreview.failed ? (
+                          <div style={{ fontSize: 12, color: "#999", marginTop: 8 }}>
+                            图片加载失败
+                          </div>
+                        ) : (
+                          <img
+                            src={api.trainingArtifactDownloadUrl(artifactList.job_id, a.relative_path)}
+                            alt={a.name}
+                            style={{
+                              maxWidth: "100%",
+                              marginTop: 8,
+                              border: "1px solid #f0f0f0",
+                              borderRadius: 4,
+                            }}
+                            onError={() =>
+                              setArtifactPreview((cur) =>
+                                cur ? { ...cur, failed: true } : cur
+                              )
+                            }
+                          />
+                        ))}
                     </div>
                   </List.Item>
                 )}
@@ -755,6 +1358,14 @@ export default function TrainingCenter({ onBack }: Props) {
         }}
       />
 
+      <RemoteProfilesModal
+        open={profilesOpen}
+        onClose={() => setProfilesOpen(false)}
+        onProfilesChanged={setRemoteProfiles}
+      />
+
+      <GuidedTour steps={TOUR_STEPS} open={tour.open} onClose={tour.closeTour} />
+
       <Modal
         open={prepOpen}
         title="从当前标注数据集生成训练集"
@@ -776,9 +1387,10 @@ export default function TrainingCenter({ onBack }: Props) {
               style={{ width: "100%" }}
               value={prepTask}
               onChange={setPrepTask}
-              options={["Detect", "OBB", "Segment", "Pose"].map((t) => ({
+              options={PREP_TASKS.map((t) => ({
                 value: t,
-                label: t,
+                label: t === "Pose" ? "Pose（Web 端暂不支持）" : t,
+                disabled: t === "Pose",
               }))}
             />
           </div>

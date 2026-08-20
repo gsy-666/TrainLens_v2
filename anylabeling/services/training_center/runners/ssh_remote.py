@@ -367,15 +367,7 @@ class SSHRemoteRunner(TrainingRunner):
 
             # 11. Start streaming stdout
             _stage("streaming output")
-            self._stream_worker = _RemoteStreamWorker(channel)
-            self._stream_thread = QThread(self._parent)
-            self._stream_worker.moveToThread(self._stream_thread)
-
-            self._stream_worker.line_received.connect(self._on_remote_line)
-            self._stream_worker.stream_ended.connect(self._on_remote_ended)
-            self._stream_worker.stream_error.connect(self._on_remote_error)
-            self._stream_thread.started.connect(self._stream_worker.start_reading)
-            self._stream_thread.start()
+            self._start_output_stream(channel)
 
             self._emit_event(create_console_output_event(
                 job_id=job.job_id, timestamp=time.time(),
@@ -405,6 +397,21 @@ class SSHRemoteRunner(TrainingRunner):
             self._cleanup_resources()
             return False, error_msg
 
+    def _start_output_stream(self, channel):
+        """Stream remote stdout line-by-line (desktop Qt path).
+
+        Extracted as a hook so Qt-free environments (web backend) can
+        override the streaming mechanism without duplicating start().
+        """
+        self._stream_worker = _RemoteStreamWorker(channel)
+        self._stream_thread = QThread(self._parent)
+        self._stream_worker.moveToThread(self._stream_thread)
+
+        self._stream_worker.line_received.connect(self._on_remote_line)
+        self._stream_worker.stream_ended.connect(self._on_remote_ended)
+        self._stream_worker.stream_error.connect(self._on_remote_error)
+        self._stream_thread.started.connect(self._stream_worker.start_reading)
+        self._stream_thread.start()
 
     def _upload_dir(self, local_dir: str, remote_dir: str):
         """Recursively upload a directory via SFTP."""

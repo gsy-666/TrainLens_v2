@@ -406,3 +406,39 @@ The web app is not a mock shell. `web/frontend/src/api/client.ts` is wired to Fa
 6. **Confidence / label filtering correctness:** confidence propagation is correct; label filtering is object-label filtering, not class filtering.
 7. **Current web completion:** roughly 75–80% for the audited core, lower for Classify-specific coverage.
 8. **Report path:** `web/WEB_FUNCTIONAL_AUDIT.md`
+
+
+---
+
+## 修复记录（2026-08-14，一站式训练中心完善）
+
+本审计完成后，以下问题已在 web 端修复，原结论中对应条目不再适用：
+
+1. **Preflight 断链已接通**：新增 `POST /api/training/preflight`(`web/backend/app/routers/training.py`)，复用 `WebTrainingService.run_preflight`；裸模型名（如 `yolov8n.pt`）未下载时从 ERROR 降级为 WARNING（训练启动时自动下载）。
+2. **Classify 已打通**：数据集生成弹窗暴露 Classify（后端 image-folder 生成原本就支持）;quickstart 任务推断支持 flags→Classify（默认 `yolov8n-cls.pt`)；训练表单模型下拉按任务动态过滤（含 `*-cls.pt`);history best 指标解析补充 `metrics/accuracy_top1`(`history.py:427`，纯增量）。
+3. **Pose 500 已修**:`dataset.py` 将 `create_yolo_dataset` 的 tuple 返回转为 400；前端弹窗禁用 Pose（Web 端暂无 pose 配置）。
+4. **硬编码 demo 路径已移除**:`GET /api/system/demo-dir` 动态返回仓库 assets 目录，`Welcome.tsx` 不再写死路径。
+5. **伪造数据集检查数据已删除**：改为 `GET /api/dataset/stats` 真实统计（类别×形状、类别分布、5 任务有效图片数、少样本/不均衡/数据量告警、推荐任务）。
+6. **产物可见性已完成**:best.pt / last.pt / results.csv / 曲线 PNG 可列表、下载、ZIP、在线预览；`POST .../artifacts/export` 导出（格式按环境动态检测）;`POST .../artifacts/register-model` 一键注册为标注页可加载推理的模型。
+7. **新增远程训练**:`web_ssh_runner.py`（去 Qt 的 SSHRemoteRunner 子类）+ `/api/remote/profiles` 系列端点（档案 CRUD / host-key 确认 / 远端诊断含 GPU 检测与自动设备推荐）；远程任务日志/曲线/历史/产物与本地同界面。
+8. **其他**：训练参数 pydantic 校验 + task×model 匹配校验、新手三档预设、步骤条引导、ETA 预计剩余、会话自动恢复、`.gitignore` 修复（`web/frontend/src/**/*.ts` 不再被 TorchScript 规则误伤）。
+
+验证基线：`pytest tests/web` 82 passed；前端 `npm run build` 通过。`tests/trainlens/training_center`、`guided_training_job`、`custom_project_integration` 中的失败为桌面 Qt 集成测试的既有问题（已用 HEAD 版本对照确认与本次改动无关）。
+
+## 第二轮：评审修复 + 创新功能（2026-08-14 续）
+
+**评审修复**(1 blocker + 6 major + 20 minor,全部修复并补测试,共 117 项 web 测试):
+- quickstart 推断 Classify 后训练必败(ultralytics 分类任务只收目录)→ data 改传数据集目录,guided/start 同步兼容
+- 远程 PREPARING 阶段假停止 → 停止标志插桩 + cancel 杀进程验证 + runner 释放
+- register-model 模型名坍缩(同 job best/last 互覆)→ 名称含 uuid 段+产物名
+- preflight 误拦 batch=-1(auto-batch)→ 降级 pass
+- 远程 job 注册产物 400 → data.yaml 回退 history record
+- stats 单遍扫描重写(5 万图 35 万次读→5 万次)+ 畸形 JSON 免疫
+- 前端:步骤条历史污染、执行位置切换设备/密码残留、会话恢复 401 误删、预设不可重复应用、试用/导出并发、轮询卸载清理等 13 项
+
+**创新功能**:
+- **模型试用 Playground**:`POST /api/playground/predict`(上传图片即时推理)+ 训练中心右栏试玩面板(模型选择/加载、框选叠加预览、置信度列表)
+- **难例优先(主动学习)**:`/api/active_learning/*` 难例扫描(后台线程+进度+停止)+ 文件列表"难例优先"排序与分数徽章;`yolov8.py` 修复 shape 不挂 score 的问题(共享代码 1 处增量,Qt 安全)
+- **新手引导**:标注页(6 步)与训练中心(7 步)antd Tour,首次自动弹出 + "?"按钮重看,缺失目标自动裁剪
+
+最终基线:`pytest tests/web` **136 passed**;前端 `npm run build` 通过;uvicorn 冒烟(health/remote/preflight/页面)正常。

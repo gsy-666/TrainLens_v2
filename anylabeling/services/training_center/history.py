@@ -445,15 +445,19 @@ def _parse_results_csv(csv_path: str) -> list:
 def _find_best_epoch(epochs: list) -> dict | None:
     """Find the epoch with the best mAP50(B) value.
 
+    Classification runs have no mAP columns; fall back to top-1 accuracy
+    so their history records still surface a best metric.
+
     Returns dict with epoch, metric_name, metric_value or None.
     """
     if not epochs:
         return None
 
-    # Priority metrics for Detect tasks
+    # Priority metrics: Detect-style mAP first, then Classify accuracy
     candidates = [
         "metrics/mAP50(B)",
         "metrics/mAP50-95(B)",
+        "metrics/accuracy_top1",
     ]
 
     best = None

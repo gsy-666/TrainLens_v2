@@ -48,6 +48,7 @@ export default function App() {
           运行监控
         </Button>
         <Button
+          id="tour-training-entry"
           icon={<ExperimentOutlined />}
           style={{ boxShadow: "0 2px 8px rgba(0,0,0,0.15)" }}
           onClick={() => setView("training")}

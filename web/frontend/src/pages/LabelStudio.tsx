@@ -8,9 +8,43 @@ import DirBrowserModal from "../components/DirBrowserModal";
 import ExportDialog from "../components/ExportDialog";
 import CanvasEditor from "../components/CanvasEditor";
 import ModelPanel from "../components/ModelPanel";
+import GuidedTour, { useGuidedTour, type GuidedTourStep } from "../components/GuidedTour";
 import * as api from "../api/client";
 import { useStudio } from "../store/useStudio";
 import type { Point, Shape, ShapeType } from "../types";
+
+const TOUR_STEPS: GuidedTourStep[] = [
+  {
+    targetId: "tour-file-list",
+    title: "文件列表",
+    description: "在这里切换、搜索和筛选图片，带绿勾的表示已经标注过。",
+  },
+  {
+    targetId: "tour-canvas-toolbar",
+    title: "标注工具栏",
+    description: "选择矩形、多边形等工具后，在中间画布上拖拽鼠标就能框出目标。",
+  },
+  {
+    targetId: "tour-label-list",
+    title: "标签列表",
+    description: "当前图片的所有标注都列在这里，可以点击选中、修改标签或删除。",
+  },
+  {
+    targetId: "tour-model-panel",
+    title: "AI 自动标注",
+    description: "先选择并「加载模型」，再点「运行」即可自动预标注，之后人工修正就好。",
+  },
+  {
+    targetId: "tour-save-btn",
+    title: "保存标注",
+    description: "标注完记得保存，也可以随时按 Ctrl+S。",
+  },
+  {
+    targetId: "tour-training-entry",
+    title: "去训练中心",
+    description: "标注积累够了，点右下角「训练中心」就能把标注训练成自己的模型。",
+  },
+];
 
 export default function LabelStudio() {
   const {
@@ -38,6 +72,7 @@ export default function LabelStudio() {
   const [exportVisible, setExportVisible] = useState(false);
   const [draft, setDraft] = useState<{ points: Point[]; type: ShapeType } | null>(null);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const tour = useGuidedTour("xaw_tour_label_seen");
 
   const handleSelectDir = useCallback(
     async (path: string) => {
@@ -271,14 +306,17 @@ export default function LabelStudio() {
         onOpenDir={() => setOpenDirVisible(true)}
         onOpenVideo={() => setOpenVideoVisible(true)}
         onExport={() => setExportVisible(true)}
+        onOpenTour={tour.openTour}
       />
       <Layout>
         <Layout.Sider width={220} theme="light" style={{ borderRight: "1px solid #f0f0f0" }}>
           <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-            <div style={{ flex: 1, minHeight: 0 }}>
+            <div id="tour-file-list" style={{ flex: 1, minHeight: 0 }}>
               <FileList />
             </div>
-            <ModelPanel />
+            <div id="tour-model-panel">
+              <ModelPanel />
+            </div>
           </div>
         </Layout.Sider>
         <Layout.Content style={{ position: "relative" }}>
@@ -298,10 +336,17 @@ export default function LabelStudio() {
             </div>
           )}
         </Layout.Content>
-        <Layout.Sider width={280} theme="light" style={{ borderLeft: "1px solid #f0f0f0" }}>
+        <Layout.Sider
+          id="tour-label-list"
+          width={280}
+          theme="light"
+          style={{ borderLeft: "1px solid #f0f0f0" }}
+        >
           <LabelList onEditLabel={(i) => setEditingIndex(i)} />
         </Layout.Sider>
       </Layout>
+
+      <GuidedTour steps={TOUR_STEPS} open={tour.open} onClose={tour.closeTour} />
 
       <LabelDialog
         open={draft !== null}

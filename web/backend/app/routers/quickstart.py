@@ -32,26 +32,38 @@ _MODEL_BY_TASK = {
     "Detect": "yolov8n.pt",
     "Segment": "yolov8n-seg.pt",
     "OBB": "yolov8n-obb.pt",
+    "Classify": "yolov8n-cls.pt",
 }
 
 
 def _infer_task_type(image_dir: Path, images: list[str], sample: int = 50) -> str:
-    """Dominant shape type across a sample of label files."""
+    """Dominant shape type across a sample of label files.
+
+    Shape votes win; when no supported shape is found but image-level
+    classification flags are present, fall back to Classify.
+    """
     votes: Counter = Counter()
+    flags_votes = 0
     for name in images[:sample]:
         label_path = label_path_for(image_dir / name)
         if not label_path.exists():
             continue
         try:
-            for shape in load_label_data(label_path).get("shapes", []):
+            data = load_label_data(label_path)
+            for shape in data.get("shapes", []):
                 task = _SHAPE_TO_TASK.get(shape.get("shape_type", ""))
                 if task:
                     votes[task] += 1
+            flags = data.get("flags", {})
+            if any(flags.values()):
+                flags_votes += 1
         except Exception:
             continue
-    if not votes:
-        return "Detect"
-    return votes.most_common(1)[0][0]
+    if votes:
+        return votes.most_common(1)[0][0]
+    if flags_votes:
+        return "Classify"
+    return "Detect"
 
 
 class QuickstartRequest(BaseModel):
@@ -78,19 +90,35 @@ async def training_quickstart(req: QuickstartRequest):
     # 1. build dataset
     image_list = [str(image_dir / n) for n in images]
     try:
-        dataset_dir = await asyncio.to_thread(
+        result = await asyncio.to_thread(
             create_yolo_dataset, image_list, task, req.dataset_ratio, "", None, None, False, False
         )
-        val_note = _ensure_val_split(dataset_dir)
     except Exception as e:  # noqa
         raise HTTPException(status_code=500, detail=f"数据集生成失败: {e}")
+    # create_yolo_dataset signals some misconfigurations (e.g. pose task
+    # without a pose config file) by returning (None, message) instead of
+    # raising — surface that as a client error (mirrors /dataset/prepare).
+    if isinstance(result, tuple):
+        raise HTTPException(
+            status_code=400,
+            detail=result[1] or "数据集生成失败",
+        )
+    dataset_dir = result
+    val_note = _ensure_val_split(dataset_dir)
 
     # 2. start training — artifacts live next to the dataset by default
     ts = datetime.datetime.now().strftime("%m%d_%H%M")
     params = {
         "task": task.lower(),
         "model": model,
-        "data": str(Path(dataset_dir) / "data.yaml"),
+        # ultralytics classification training only accepts the dataset
+        # *directory* (check_cls_dataset rejects a file path); every
+        # other task takes the generated data.yaml.
+        "data": (
+            dataset_dir
+            if task.lower() == "classify"
+            else str(Path(dataset_dir) / "data.yaml")
+        ),
         "project": str(Path(dataset_dir) / "runs"),
         "name": f"{task.lower()}_{ts}",
         "device": device,

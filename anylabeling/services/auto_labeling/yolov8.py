@@ -173,6 +173,8 @@ class YOLOv8(Model):
             shape = Shape(label=box["label"], shape_type="rectangle", flags={})
             shape.add_point(QtCore.QPointF(box["x1"], box["y1"]))
             shape.add_point(QtCore.QPointF(box["x2"], box["y2"]))
+            if box.get("score") is not None:
+                shape.score = float(box["score"])
             shapes.append(shape)
 
         result = AutoLabelingResult(shapes, replace=True)

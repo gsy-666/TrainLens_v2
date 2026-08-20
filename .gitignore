@@ -162,6 +162,7 @@ weights/
 *.pt
 *.ts
 !anylabeling/resources/translations/*.ts
+!web/frontend/src/**/*.ts
 *.pb
 *.onnx
 *.engine

@@ -29,7 +29,13 @@
 
 ### 训练与监控
 - **标注 → 训练闭环**：训练中心可一键把当前标注目录（Labelme JSON）转换为 YOLO 训练集（自动提取类别、分层抽样划分 train/val、生成 data.yaml），并自动填入训练表单，直接开训
-- **训练中心**：Ultralytics 引导式训练，环境/数据集预检查、实时日志、loss / mAP / 学习率曲线、历史记录（与桌面版共享存储）
+- **数据集检查可视**：类别×形状统计、类别实例分布图、5 种任务有效图片数（自动推荐任务类型）、少样本/类别不均衡/数据量不足告警
+- **训练中心**：Ultralytics 引导式训练，环境/数据集预检查（`POST /api/training/preflight`）、新手三档预设、实时日志、loss / mAP / 学习率曲线、ETA 预计剩余时间、历史记录（与桌面版共享存储）
+- **远程服务器训练**：SSH 服务器档案管理（密钥/密码认证、host-key 确认）、远端环境诊断（GPU / torch / ultralytics / 磁盘）、自动选择 CPU/GPU、数据集自动上传、训练产物自动回传，日志曲线与本地任务同界面
+- **产物转化**：best.pt / last.pt 在线预览曲线图、下载 / ZIP 打包、导出 ONNX 等格式（按环境动态检测可用性）、**一键注册为标注模型**——训练完直接在标注页加载试用，验证效果后继续标注
+- **模型试用 Playground**：训练中心内置试玩面板，选模型→传图→即时查看检测框与置信度，无需打开数据集
+- **难例优先（主动学习）**：用已加载模型扫描未标注图片并按置信度打难度分，文件列表按"最没把握"排序，人优先复核难例，越标越准
+- **新手引导**：标注页与训练中心内置分步高亮 Tour，首次进入自动弹出，可随时点"?"重看
 - **运行监控**：自定义脚本工作区扫描（脚本/环境检测）、启动/停止、stdout/stderr 实时流、进程 CPU/内存 + 系统 + GPU 资源曲线
 
 ## 快速开始（一键启动）
@@ -42,6 +48,15 @@
 - 访问 **http://127.0.0.1:8000**（单进程，API 与页面同源）
 - 前提：项目 Python 环境（仓库 `.venv` 或已安装项目依赖的 Python）；首次构建前端需 Node.js
 - `Ctrl+C` 停止
+- 再次启动会自动恢复上次打开的图片/视频目录（会话恢复）
+
+## 远程训练（SSH 下发到 GPU 服务器）
+
+浏览器跑在本机、训练在远程服务器上执行的场景（与下面"远程访问"是两个独立功能，可叠加）：
+
+1. 训练中心 → 执行位置 → 远程服务器 → 管理服务器，新增档案：主机 / 端口 / 用户名 / 认证方式（SSH 密钥或密码）/ 远端工作目录 / 远端 Python 路径（需已安装 torch + ultralytics 的环境）
+2. 首次连接按提示确认 host-key 指纹；"检测服务器"自动体检远端 GPU、torch、ultralytics 版本并按结果自动选择 CPU/GPU
+3. 启动训练后，数据集自动打包上传、远端执行训练、实时日志与曲线回流、训练结束产物（best.pt / last.pt / results.csv / 曲线图）自动回传本地，历史记录与本地任务统一展示
 
 ## 远程访问（云服务器部署）
 
@@ -81,9 +96,11 @@ web/
 ├── start_dev.bat                  # 开发模式（:8000 + :5173）
 ├── backend/app/
 │   ├── main.py                    # FastAPI 入口，CORS，托管 frontend/dist
-│   ├── routers/                   # files / labels / models / predict / export / upload / video / training / monitor / fs
+│   ├── routers/                   # files / labels / models / predict / export / upload / video / training / dataset / quickstart / monitor / fs / system / remote
 │   ├── model_service.py           # 复用桌面版 ModelManager（ONNX 推理）
-│   ├── training_service.py        # 复用 training_center（JobManager / MetricStore / HistoryStore）
+│   ├── training_service.py        # 复用 training_center（JobManager / MetricStore / HistoryStore / Preflight）
+│   ├── web_runner.py              # 去 Qt 的本地训练 runner（subprocess + threading）
+│   ├── web_ssh_runner.py          # 去 Qt 的 SSH 远程训练 runner（paramiko 流式读取）
 │   ├── run_service.py             # 纯 threading 进程管理 + psutil 资源采样
 │   ├── backup.py                  # 自动标注覆盖写入的一级撤回
 │   └── adapters.py                # 标注 JSON ⇄ 桌面 LabelFile 格式
@@ -106,7 +123,13 @@ web/
 | `POST /api/predict/batch/undo` | 撤回批量标注 |
 | `POST /api/video/open` · `GET /api/video/frame` · `PUT /api/video/labels` · `POST /api/video/track` | 视频标注与 MOT 跟踪 |
 | `POST /api/export` · `GET /api/export/download` | 数据集导出 / ZIP 下载 |
-| `POST /api/training/guided/start` · `GET /api/training/{events,metrics,history}` | 训练任务 |
+| `POST /api/dataset/prepare` · `GET /api/dataset/stats` | 训练集生成 / 数据集检查统计 |
+| `POST /api/training/quickstart` | 零配置一键训练（自动推断任务/设备/模型） |
+| `POST /api/training/preflight` · `POST /api/training/guided/start` · `GET /api/training/{events,metrics,history,status}` | 预检查 / 训练任务 |
+| `GET /api/training/history/{id}/artifacts` · `POST .../artifacts/export` · `POST .../artifacts/register-model` | 训练产物查看 / 导出 / 注册为标注模型 |
+| `GET/POST/PUT/DELETE /api/remote/profiles` · `POST .../test` · `POST .../diagnostics` | SSH 远程服务器档案 / 连接测试 / 环境诊断 |
+| `POST /api/playground/predict` | 模型试用（上传图片即时推理） |
+| `POST /api/active_learning/scan` · `GET .../scores` | 难例扫描 / 难度分查询 |
 | `POST /api/monitor/{scan,start,stop}` · `GET /api/monitor/{logs,resources}` | 运行监控 |
 
 完整交互式文档：启动后访问 http://127.0.0.1:8000/docs
