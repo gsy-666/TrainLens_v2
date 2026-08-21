@@ -64,14 +64,16 @@ def env(monkeypatch, tmp_path):
         training, "get_model_service", lambda: SimpleNamespace(manager=manager)
     )
 
+    # register_custom_model_config now lives in model_service
+    model_service = importlib.import_module("web.backend.app.model_service")
     store: dict = {}
-    monkeypatch.setattr(training, "get_config", lambda: copy.deepcopy(store))
+    monkeypatch.setattr(model_service, "get_config", lambda: copy.deepcopy(store))
 
     def _save(cfg):
         store.clear()
         store.update(copy.deepcopy(cfg))
 
-    monkeypatch.setattr(training, "save_config", _save)
+    monkeypatch.setattr(model_service, "save_config", _save)
 
     return SimpleNamespace(
         client=client,

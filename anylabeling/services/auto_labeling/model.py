@@ -118,11 +118,13 @@ class Model(QObject):
 
         # Create model folder
         home_dir = os.path.expanduser("~")
+        # XANYLABELING_MODELS_DIR overrides the default model cache location
+        models_root = os.environ.get(
+            "XANYLABELING_MODELS_DIR"
+        ) or os.path.join(home_dir, "anylabeling_data", "models")
         model_abs_path = os.path.abspath(
             os.path.join(
-                home_dir,
-                "anylabeling_data",
-                "models",
+                models_root,
                 model_config["name"],
                 filename,
             )

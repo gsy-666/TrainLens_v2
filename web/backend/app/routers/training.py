@@ -2,9 +2,7 @@
 
 import asyncio
 import io
-import os
 import re
-import time
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,9 +13,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
-from anylabeling.config import get_config, save_config
-
-from ..model_service import get_model_service
+from ..model_service import get_model_service, register_custom_model_config
 from ..training_service import get_training_service
 
 router = APIRouter()
@@ -473,35 +469,6 @@ def _build_model_yaml_config(
     return config
 
 
-def _register_custom_model_config(manager: Any, model_config: Dict[str, Any], config_file: Path) -> None:
-    """Append the model to the user's custom_models list and reload.
-
-    Mirrors ModelManager.load_custom_model's persistence logic but skips its
-    ``_CUSTOM_MODELS`` whitelist check (which rejects e.g. ``yolov8_seg``).
-    Idempotent: entries are deduplicated by config_file.
-    """
-    entry = dict(model_config)
-    entry["config_file"] = str(config_file)
-    entry["last_used"] = time.time()
-
-    config = get_config()
-    custom_models = config.get("custom_models") or []
-    norm = os.path.normpath(str(config_file))
-    for i, existing in enumerate(custom_models):
-        if os.path.normpath(str(existing.get("config_file", ""))) == norm:
-            custom_models[i] = entry
-            break
-    else:
-        max_num = getattr(manager, "MAX_NUM_CUSTOM_MODELS", None)
-        if max_num and len(custom_models) >= max_num:
-            custom_models.sort(key=lambda x: x.get("last_used", 0), reverse=True)
-            custom_models.pop()
-        custom_models.insert(0, entry)
-    config["custom_models"] = custom_models
-    save_config(config)
-    manager.load_model_configs()
-
-
 @router.post("/training/history/{job_id}/artifacts/register-model")
 async def training_artifact_register_model(job_id: str, req: RegisterModelRequest):
     """Register a trained .pt/.onnx artifact as a loadable auto-labeling model."""
@@ -536,7 +503,7 @@ async def training_artifact_register_model(job_id: str, req: RegisterModelReques
     )
 
     manager = get_model_service().manager
-    _register_custom_model_config(manager, model_config, config_file)
+    register_custom_model_config(manager, model_config, config_file)
 
     return {
         "registered": True,

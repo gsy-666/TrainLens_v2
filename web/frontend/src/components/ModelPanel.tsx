@@ -21,9 +21,13 @@ import {
   ThunderboltOutlined,
   RobotOutlined,
   RollbackOutlined,
+  FolderOpenOutlined,
+  DatabaseOutlined,
+  DeleteOutlined,
 } from "@ant-design/icons";
 import * as api from "../api/client";
 import { useStudio } from "../store/useStudio";
+import DirBrowserModal from "./DirBrowserModal";
 import type { Shape } from "../types";
 
 function normalizePredictedShape(s: Shape): Shape {
@@ -70,6 +74,24 @@ export default function ModelPanel() {
   const [batchN, setBatchN] = useState(100);
   const pollRef = useRef<number | null>(null);
 
+  // local weight registration
+  const [localOpen, setLocalOpen] = useState(false);
+  const [localTemplate, setLocalTemplate] = useState<string | undefined>();
+  const [localPath, setLocalPath] = useState("");
+  const [localName, setLocalName] = useState("");
+  const [localBusy, setLocalBusy] = useState(false);
+  const [localBrowseOpen, setLocalBrowseOpen] = useState(false);
+
+  // local model library (downloaded cache scan)
+  const [localFiles, setLocalFiles] = useState<Record<string, api.LocalModelFileInfo>>({});
+  const [localFilesRoot, setLocalFilesRoot] = useState("");
+  const [localFilesTotal, setLocalFilesTotal] = useState(0);
+  const [libOpen, setLibOpen] = useState(false);
+  const [scanPath, setScanPath] = useState("");
+  const [scanFiles, setScanFiles] = useState<api.ScannedModelFile[] | null>(null);
+  const [scanBusy, setScanBusy] = useState(false);
+  const [libBrowseOpen, setLibBrowseOpen] = useState(false);
+
   // device preference
   const [inferenceDevice, setInferenceDevice] = useState<string>("auto");
   const [availableDevices, setAvailableDevices] = useState<string[]>(["CPU"]);
@@ -106,6 +128,54 @@ export default function ModelPanel() {
     };
   }, [refreshModels]);
 
+  const refreshLocalFiles = useCallback(async () => {
+    try {
+      const d = await api.getLocalModelFiles();
+      const map: Record<string, api.LocalModelFileInfo> = {};
+      for (const it of d.items) map[it.config_file] = it;
+      setLocalFiles(map);
+      setLocalFilesRoot(d.root);
+      setLocalFilesTotal(d.total_bytes);
+    } catch {
+      /* scan is best-effort */
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshLocalFiles();
+  }, [refreshLocalFiles]);
+
+  const onDeleteCache = useCallback(
+    async (cfg: string) => {
+      try {
+        const r = await api.deleteModelCache(cfg);
+        message.success(
+          r.deleted ? `已删除缓存，释放 ${(r.freed_bytes / 1024 / 1024).toFixed(1)} MB` : "缓存文件不存在"
+        );
+        await refreshLocalFiles();
+      } catch (e) {
+        const err = e as { response?: { data?: { detail?: string } }; message: string };
+        message.error(`删除失败: ${err.response?.data?.detail ?? err.message}`);
+      }
+    },
+    [refreshLocalFiles]
+  );
+
+  const onScanDir = useCallback(async () => {
+    if (!scanPath.trim()) return;
+    setScanBusy(true);
+    try {
+      const d = await api.scanModelDir(scanPath.trim());
+      setScanFiles(d.files);
+      if (d.files.length === 0) message.info("该目录下没有找到 .onnx 文件");
+    } catch (e) {
+      const err = e as { response?: { data?: { detail?: string } }; message: string };
+      message.error(`扫描失败: ${err.response?.data?.detail ?? err.message}`);
+    } finally {
+      setScanBusy(false);
+    }
+  }, [scanPath]);
+
   const startStatusPolling = useCallback(
     (until: (s: api.ModelStatus) => boolean) => {
       if (pollRef.current) window.clearInterval(pollRef.current);
@@ -138,19 +208,22 @@ export default function ModelPanel() {
     }
   }, [loaded]);
 
-  const onLoad = useCallback(async () => {
-    if (!selectedCfg) return;
+  const onLoad = useCallback(async (cfg?: string) => {
+    const target = cfg ?? selectedCfg;
+    if (!target) return;
     setLoading(true);
     setProgress(null);
     setStatusMsg("开始加载模型...");
     startStatusPolling((s) => !s.loading && s.loaded !== null);
     // fire and poll; the POST resolves when loading finished
     api
-      .loadModel(selectedCfg)
+      .loadModel(target)
       .then(async () => {
         const s = await api.getModelStatus();
         setLoaded(s.loaded);
+        setSelectedCfg(s.loaded?.config_file ?? target);
         setOutputMode(s.loaded?.default_output_mode ?? "rectangle");
+        refreshLocalFiles(); // a download may have completed
         message.success("模型加载完成");
       })
       .catch((e) => {
@@ -161,7 +234,32 @@ export default function ModelPanel() {
         setProgress(null);
         if (pollRef.current) window.clearInterval(pollRef.current);
       });
-  }, [selectedCfg, startStatusPolling]);
+  }, [selectedCfg, startStatusPolling, refreshLocalFiles]);
+
+  const onRegisterLocal = useCallback(async () => {
+    if (!localTemplate || !localPath.trim()) return;
+    setLocalBusy(true);
+    try {
+      const r = await api.registerLocalModel({
+        template_config_file: localTemplate,
+        local_path: localPath.trim(),
+        display_name: localName.trim() || undefined,
+      });
+      message.success(`已注册本地权重: ${r.display_name}`);
+      setLocalOpen(false);
+      setLocalPath("");
+      setLocalName("");
+      await refreshModels();
+      await refreshLocalFiles();
+      setSelectedCfg(r.config_file);
+      onLoad(r.config_file);
+    } catch (e) {
+      const err = e as { response?: { data?: { detail?: string } }; message: string };
+      message.error(`注册失败: ${err.response?.data?.detail ?? err.message}`);
+    } finally {
+      setLocalBusy(false);
+    }
+  }, [localTemplate, localPath, localName, refreshModels, refreshLocalFiles, onLoad]);
 
   const onUnload = useCallback(async () => {
     await api.unloadModel();
@@ -337,10 +435,79 @@ export default function ModelPanel() {
           value: m.config_file,
           label: `${m.display_name} (${m.type})`,
         }))}
+        optionRender={(info) => {
+          const cfg = String(info.data.value);
+          const lf = localFiles[cfg];
+          const m = models.find((x) => x.config_file === cfg);
+          return (
+            <span>
+              {info.data.label}
+              {lf?.downloaded && (
+                <Tag color="green" style={{ marginLeft: 6 }}>
+                  已下载
+                </Tag>
+              )}
+              {m?.is_custom_model && <Tag style={{ marginLeft: 4 }}>自定义</Tag>}
+            </span>
+          );
+        }}
         disabled={loading}
         size="small"
         dropdownMatchSelectWidth={360}
       />
+      <div style={{ marginTop: 4, textAlign: "right" }}>
+        {selectedCfg && models.find((m) => m.config_file === selectedCfg)?.is_custom_model && (
+          <Popconfirm
+            title="从列表移除该自定义模型？"
+            description="不会删除权重文件本身"
+            okText="移除"
+            cancelText="取消"
+            onConfirm={async () => {
+              try {
+                await api.deleteCustomModel(selectedCfg, true);
+                message.success("已移除自定义模型");
+                if (loaded?.config_file === selectedCfg) {
+                  await api.unloadModel();
+                  setLoaded(null);
+                }
+                setSelectedCfg(undefined);
+                await refreshModels();
+              } catch (e) {
+                const err = e as { response?: { data?: { detail?: string } }; message: string };
+                message.error(`移除失败: ${err.response?.data?.detail ?? err.message}`);
+              }
+            }}
+          >
+            <Button type="link" size="small" danger style={{ padding: 0, fontSize: 12 }}>
+              移除
+            </Button>
+          </Popconfirm>
+        )}
+        <Button
+          type="link"
+          size="small"
+          style={{ padding: 0, fontSize: 12 }}
+          icon={<DatabaseOutlined />}
+          onClick={() => {
+            refreshLocalFiles();
+            setLibOpen(true);
+          }}
+        >
+          模型库
+        </Button>
+        <Button
+          type="link"
+          size="small"
+          style={{ padding: 0, fontSize: 12 }}
+          icon={<FolderOpenOutlined />}
+          onClick={() => {
+            setLocalTemplate(selectedCfg);
+            setLocalOpen(true);
+          }}
+        >
+          使用本地权重文件…
+        </Button>
+      </div>
 
       {availableDevices.length > 1 && (
         <div style={{ marginTop: 8 }}>
@@ -368,7 +535,7 @@ export default function ModelPanel() {
           <Button
             size="small"
             type="primary"
-            onClick={onLoad}
+            onClick={() => onLoad()}
             loading={loading}
             disabled={!selectedCfg}
           >
@@ -619,6 +786,236 @@ export default function ModelPanel() {
           </div>
         </div>
       </Modal>
+
+      <Modal
+        open={localOpen}
+        title="使用本地权重文件"
+        okText="注册并加载"
+        cancelText="取消"
+        confirmLoading={localBusy}
+        onCancel={() => setLocalOpen(false)}
+        onOk={onRegisterLocal}
+        okButtonProps={{ disabled: !localTemplate || !localPath.trim() }}
+        width={440}
+      >
+        <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 8 }}>
+          <div style={{ fontSize: 12, color: "#71717a" }}>
+            已手动下载好的 .onnx 权重可直接注册使用，跳过自动下载。模型配置（输入尺寸 / 阈值 / 类别）继承所选模板模型。
+          </div>
+          <div>
+            <div style={{ marginBottom: 4 }}>模板模型</div>
+            <Select
+              style={{ width: "100%" }}
+              showSearch
+              optionFilterProp="label"
+              placeholder="选择与该权重结构一致的模型"
+              value={localTemplate}
+              onChange={setLocalTemplate}
+              options={models.map((m) => ({
+                value: m.config_file,
+                label: `${m.display_name} (${m.type})`,
+              }))}
+            />
+          </div>
+          <div>
+            <div style={{ marginBottom: 4 }}>本地权重文件（.onnx）</div>
+            <Space.Compact style={{ width: "100%" }}>
+              <Input
+                placeholder="例如 D:/models/yolov8n.onnx"
+                value={localPath}
+                onChange={(e) => setLocalPath(e.target.value)}
+              />
+              <Button icon={<FolderOpenOutlined />} onClick={() => setLocalBrowseOpen(true)}>
+                浏览
+              </Button>
+            </Space.Compact>
+          </div>
+          <div>
+            <div style={{ marginBottom: 4 }}>显示名称（可选）</div>
+            <Input
+              placeholder="默认为「模板名(本地 文件名)」"
+              value={localName}
+              onChange={(e) => setLocalName(e.target.value)}
+              maxLength={60}
+            />
+          </div>
+        </div>
+      </Modal>
+
+      <DirBrowserModal
+        open={localBrowseOpen}
+        title="选择 ONNX 权重文件"
+        fileExtensions={[".onnx"]}
+        onSelect={(p) => {
+          setLocalPath(p);
+          setLocalBrowseOpen(false);
+        }}
+        onCancel={() => setLocalBrowseOpen(false)}
+      />
+
+      <Modal
+        open={libOpen}
+        title="模型库"
+        footer={null}
+        onCancel={() => setLibOpen(false)}
+        width={640}
+      >
+        {(() => {
+          const downloaded = Object.values(localFiles).filter((i) => i.downloaded);
+          const brokenCustom = Object.values(localFiles).filter(
+            (i) => i.is_custom_model && !i.downloaded
+          );
+          const fmtMB = (n: number) => `${(n / 1024 / 1024).toFixed(1)} MB`;
+          return (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <div style={{ fontSize: 12, color: "#71717a" }}>
+                缓存目录:{localFilesRoot} · 已下载 {downloaded.length} 个模型,共占用{" "}
+                {fmtMB(localFilesTotal)}。选择模型点击「加载模型」时会自动下载缺失的权重。
+              </div>
+
+              {downloaded.length === 0 ? (
+                <div style={{ fontSize: 12, color: "#a1a1aa" }}>暂无已下载模型</div>
+              ) : (
+                <div style={{ maxHeight: 260, overflow: "auto" }}>
+                  {downloaded.map((it) => (
+                    <div
+                      key={it.config_file}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                        padding: "6px 0",
+                        borderBottom: "1px solid #f4f4f5",
+                      }}
+                    >
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <span style={{ fontSize: 13 }}>{it.display_name}</span>{" "}
+                        <Tag style={{ fontSize: 11 }}>{it.type}</Tag>
+                        {it.is_custom_model && <Tag style={{ fontSize: 11 }}>自定义</Tag>}
+                        <div
+                          style={{
+                            fontSize: 11,
+                            color: "#a1a1aa",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                          title={it.path ?? undefined}
+                        >
+                          {it.path}
+                        </div>
+                      </div>
+                      <span style={{ fontSize: 12, color: "#71717a" }}>
+                        {fmtMB(it.size_bytes)}
+                      </span>
+                      {loaded?.config_file === it.config_file ? (
+                        <Tag color="green" style={{ marginRight: 0 }}>
+                          已加载
+                        </Tag>
+                      ) : (
+                        <Tooltip title="直接加载该模型">
+                          <Button
+                            size="small"
+                            type="primary"
+                            ghost
+                            disabled={loading}
+                            onClick={() => {
+                              setLibOpen(false);
+                              setSelectedCfg(it.config_file);
+                              onLoad(it.config_file);
+                            }}
+                          >
+                            加载
+                          </Button>
+                        </Tooltip>
+                      )}
+                      {!it.is_custom_model && (
+                        <Popconfirm
+                          title="删除该模型缓存?"
+                          description="下次加载时会重新下载"
+                          okText="删除"
+                          cancelText="取消"
+                          onConfirm={() => onDeleteCache(it.config_file)}
+                        >
+                          <Button size="small" type="text" danger icon={<DeleteOutlined />} />
+                        </Popconfirm>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {brokenCustom.length > 0 && (
+                <div style={{ fontSize: 12, color: "#d97706" }}>
+                  {brokenCustom.length} 个自定义模型的权重文件已不在原路径,请重新注册或移除。
+                </div>
+              )}
+
+              <div style={{ borderTop: "1px solid #f0f0f0", paddingTop: 12 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>
+                  扫描目录发现权重
+                </div>
+                <Space.Compact style={{ width: "100%" }}>
+                  <Input
+                    placeholder="选择或输入目录,发现其中的 .onnx 文件"
+                    value={scanPath}
+                    onChange={(e) => setScanPath(e.target.value)}
+                    onPressEnter={onScanDir}
+                  />
+                  <Button icon={<FolderOpenOutlined />} onClick={() => setLibBrowseOpen(true)}>
+                    浏览
+                  </Button>
+                  <Button type="primary" onClick={onScanDir} loading={scanBusy}>
+                    扫描
+                  </Button>
+                </Space.Compact>
+                {scanFiles && scanFiles.length > 0 && (
+                  <div style={{ maxHeight: 180, overflow: "auto", marginTop: 8 }}>
+                    {scanFiles.map((f) => (
+                      <div
+                        key={f.path}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8,
+                          padding: "4px 0",
+                          borderBottom: "1px solid #f4f4f5",
+                        }}
+                      >
+                        <span style={{ flex: 1, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis" }} title={f.path}>
+                          {f.name}
+                        </span>
+                        <span style={{ fontSize: 11, color: "#a1a1aa" }}>{fmtMB(f.size_bytes)}</span>
+                        <Button
+                          size="small"
+                          type="link"
+                          onClick={() => {
+                            setLocalPath(f.path);
+                            setLibOpen(false);
+                            setLocalOpen(true);
+                          }}
+                        >
+                          注册
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })()}
+      </Modal>
+
+      <DirBrowserModal
+        open={libBrowseOpen}
+        title="选择要扫描的目录"
+        onSelect={(p) => {
+          setScanPath(p);
+          setLibBrowseOpen(false);
+        }}
+        onCancel={() => setLibBrowseOpen(false)}
+      />
     </div>
   );
 }

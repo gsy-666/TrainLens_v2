@@ -183,6 +183,73 @@ export async function getModelStatus(): Promise<ModelStatus> {
   return r.data;
 }
 
+export interface RegisterLocalModelResult {
+  registered: boolean;
+  config_file: string;
+  display_name: string;
+  model_type: string;
+}
+
+export async function registerLocalModel(payload: {
+  template_config_file: string;
+  local_path: string;
+  display_name?: string;
+}): Promise<RegisterLocalModelResult> {
+  const r = await api.post("/models/register-local", payload);
+  return r.data;
+}
+
+export async function deleteCustomModel(
+  configFile: string,
+  deleteFile = false
+): Promise<{ deleted: boolean; deleted_file: boolean }> {
+  const r = await api.delete("/models/custom", {
+    params: { config_file: configFile, delete_file: deleteFile },
+  });
+  return r.data;
+}
+
+export interface LocalModelFileInfo {
+  config_file: string;
+  name: string;
+  display_name: string;
+  type: string;
+  is_custom_model: boolean;
+  downloaded: boolean;
+  path: string | null;
+  size_bytes: number;
+}
+
+export interface LocalModelFilesReport {
+  root: string;
+  items: LocalModelFileInfo[];
+  total_bytes: number;
+}
+
+export async function getLocalModelFiles(): Promise<LocalModelFilesReport> {
+  const r = await api.get("/models/local-files");
+  return r.data;
+}
+
+export async function deleteModelCache(
+  configFile: string
+): Promise<{ deleted: boolean; freed_bytes: number }> {
+  const r = await api.delete("/models/cache", { params: { config_file: configFile } });
+  return r.data;
+}
+
+export interface ScannedModelFile {
+  path: string;
+  name: string;
+  size_bytes: number;
+  modified_at: string;
+}
+
+export async function scanModelDir(path: string): Promise<{ files: ScannedModelFile[] }> {
+  const r = await api.get("/models/scan-dir", { params: { path } });
+  return r.data;
+}
+
 export interface PredictResult {
   shapes: Shape[];
   replace: boolean;

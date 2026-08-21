@@ -7,12 +7,14 @@ pool, and surface progress through plain attributes that the API layer
 can poll.
 """
 
+import os
 import os.path as osp
 import threading
+import time
 from typing import Any, Dict, List, Optional
 
 import anylabeling.config as anylabeling_config
-from anylabeling.config import get_work_directory
+from anylabeling.config import get_config, get_work_directory, save_config
 from anylabeling.services.auto_labeling import _AUTO_LABELING_MARKS_MODELS
 from anylabeling.services.auto_labeling.model_manager import ModelManager
 from anylabeling.services.auto_labeling.types import AutoLabelingResult
@@ -184,3 +186,34 @@ def get_model_service() -> WebModelService:
     if _service is None:
         _service = WebModelService()
     return _service
+
+
+def register_custom_model_config(
+    manager: Any, model_config: Dict[str, Any], config_file: Any
+) -> None:
+    """Append the model to the user's custom_models list and reload.
+
+    Mirrors ModelManager.load_custom_model's persistence logic but skips its
+    ``_CUSTOM_MODELS`` whitelist check (which rejects e.g. ``yolov8_seg``).
+    Idempotent: entries are deduplicated by config_file.
+    """
+    entry = dict(model_config)
+    entry["config_file"] = str(config_file)
+    entry["last_used"] = time.time()
+
+    config = get_config()
+    custom_models = config.get("custom_models") or []
+    norm = os.path.normpath(str(config_file))
+    for i, existing in enumerate(custom_models):
+        if os.path.normpath(str(existing.get("config_file", ""))) == norm:
+            custom_models[i] = entry
+            break
+    else:
+        max_num = getattr(manager, "MAX_NUM_CUSTOM_MODELS", None)
+        if max_num and len(custom_models) >= max_num:
+            custom_models.sort(key=lambda x: x.get("last_used", 0), reverse=True)
+            custom_models.pop()
+        custom_models.insert(0, entry)
+    config["custom_models"] = custom_models
+    save_config(config)
+    manager.load_model_configs()

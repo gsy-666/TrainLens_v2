@@ -17,7 +17,9 @@
 - 快捷键：`A/D` 切换、`Ctrl+S` 保存、`V/R/P/O/C/L/T/S/U` 切换工具、`Del` 删除、`Esc` 取消、`F` 适应窗口
 
 ### AI 自动标注
-- **190+ 内置模型**（YOLO 系列 / SAM / Grounding-DINO / PPOCR 等），模型自动下载并显示进度
+- **190+ 内置模型**（YOLO 系列 / SAM / Grounding-DINO / PPOCR 等），选中即自动下载（带进度条），已下载自动跳过
+- **模型库扫描**：下拉直接标记「已下载 / 自定义」，模型库弹窗查看本机已有模型与磁盘占用、删除缓存释放空间、扫描任意目录发现散落 .onnx 一键注册
+- **本地权重注册**：本机已有的 .onnx 可通过「使用本地权重文件」选个模板模型直接注册加载，无需下载
 - 单图推理、批量预标注、置信度 / IoU 阈值调节、文本提示（Grounding 类模型）
 - **视频 MOT 跟踪**（bytetrack / botsort / tracktrack 类模型），跨帧一致的跟踪 ID（group_id）
 - **一键撤回**：批量预标注和跟踪覆盖写入的标注都可以一键恢复；之后被手动修改的文件自动跳过
@@ -67,7 +69,8 @@ bash start_web.sh --host 0.0.0.0            # 或 start_web.bat --host 0.0.0.0
 ```
 
 - 启动器会**自动生成访问令牌**并打印在控制台（`--token XXX` 可指定固定令牌，或用环境变量 `XANYLABELING_WEB_TOKEN`）
-- 模型下载走代理：加 `--proxy http://127.0.0.1:7890`（下载慢时也可手动把 onnx 放到 `~/xanylabeling_data/models/<模型名>/`，加载器自动跳过下载）
+- 模型下载走代理：加 `--proxy http://127.0.0.1:7890`（下载慢时也可手动把 onnx 放到 `~/anylabeling_data/models/<模型名>/`，加载器自动跳过下载；也可用模型面板的「使用本地权重文件」直接注册本机已有的 .onnx）
+- 模型缓存目录自定义：设置环境变量 `XANYLABELING_MODELS_DIR`（例如 D 盘）后，自动下载的模型改为存到该目录
 - 本地浏览器打开 `http://<服务器IP>:8000`，页面会要求输入令牌，输入即可使用
 - 令牌对全部 API 生效（含图片流和文件下载），本地回环访问免令牌
 - **安全提示**：HTTP 下令牌为明文传输，请只在可信网络/内网使用；暴露在公网时建议改用 SSH 隧道（零改动、全程加密）：
@@ -120,6 +123,8 @@ web/
 | `GET/PUT/DELETE /api/labels` | 标注读写（桌面 Labelme 格式） |
 | `GET /api/fs/list` | 本地目录浏览 |
 | `GET/POST /api/models/*` · `POST /api/predict[/batch]` | 模型加载 / 推理 |
+| `POST /api/models/register-local` · `DELETE /api/models/custom` | 注册 / 移除本地 .onnx 权重 |
+| `GET /api/models/local-files` · `DELETE /api/models/cache` · `GET /api/models/scan-dir` | 模型库扫描 / 缓存清理 / 目录发现 |
 | `POST /api/predict/batch/undo` | 撤回批量标注 |
 | `POST /api/video/open` · `GET /api/video/frame` · `PUT /api/video/labels` · `POST /api/video/track` | 视频标注与 MOT 跟踪 |
 | `POST /api/export` · `GET /api/export/download` | 数据集导出 / ZIP 下载 |
