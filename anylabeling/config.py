@@ -41,6 +41,8 @@ def get_work_directory() -> str:
 
 
 def update_dict(target_dict, new_dict, validate_item=None):
+    if not new_dict:
+        return  # empty/corrupt config file parses to None — keep defaults
     for key, value in new_dict.items():
         if validate_item:
             validate_item(key, value)
