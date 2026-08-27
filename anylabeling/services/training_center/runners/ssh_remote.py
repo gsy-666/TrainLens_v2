@@ -345,7 +345,17 @@ class SSHRemoteRunner(TrainingRunner):
             remote_worker = posixpath.join(self._remote_job_dir, "training_worker.py")
             # Worker CLI contract: --payload <json_file_path>
             remote_payload = posixpath.join(self._remote_job_dir, "config", "job_config.json")
-            command = (
+            # Optional download proxy on the remote host (e.g. for GitHub
+            # weight downloads from mainland networks)
+            proxy = (getattr(self._profile, "proxy", "") or "").strip()
+            env_prefix = ""
+            if proxy:
+                q = _shquote(proxy)
+                env_prefix = (
+                    f"HTTP_PROXY={q} HTTPS_PROXY={q} "
+                    f"http_proxy={q} https_proxy={q} "
+                )
+            command = env_prefix + (
                 f"{_shquote(remote_py)} {_shquote(remote_worker)} "
                 f"--payload {_shquote(remote_payload)}"
             )
@@ -584,6 +594,13 @@ class SSHRemoteRunner(TrainingRunner):
 
     # ── download ──
 
+    def _local_download_base(self, job_id: str) -> str:
+        """Local directory the remote run's artifacts are downloaded into."""
+        return os.path.join(
+            os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+            "TrainLens", "remote_runs", job_id,
+        )
+
     def _download_results(self, job_id: str, remote_save_dir: str = "") -> str:
         """Download artifacts from remote to local store.
 
@@ -592,10 +609,7 @@ class SSHRemoteRunner(TrainingRunner):
         if not remote_save_dir:
             remote_save_dir = posixpath.join(self._remote_job_dir, "runs")
 
-        local_base = os.path.join(
-            os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
-            "TrainLens", "remote_runs", job_id,
-        )
+        local_base = self._local_download_base(job_id)
         os.makedirs(local_base, exist_ok=True)
 
         sftp = self._sftp

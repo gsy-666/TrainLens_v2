@@ -534,3 +534,25 @@ def test_update_profile_same_endpoint_keeps_fingerprint(client, store):
     r = client.put("/api/remote/profiles/p1", json=_payload(name="renamed"))
     assert r.status_code == 200
     assert store.get("p1").known_host_fingerprint == "aa:bb:cc:dd"
+
+
+# ---- proxy field round-trip + worker command env prefix ---------------------------
+
+
+def test_proxy_field_round_trip(client, store):
+    r = client.post("/api/remote/profiles", json=_payload(proxy="http://127.0.0.1:7890"))
+    assert r.status_code == 200
+    pid = r.json()["profile"]["profile_id"]
+    assert store.get(pid).proxy == "http://127.0.0.1:7890"
+    listed = client.get("/api/remote/profiles").json()["profiles"]
+    assert listed[0]["proxy"] == "http://127.0.0.1:7890"
+
+    r2 = client.put(f"/api/remote/profiles/{pid}", json=_payload(proxy=""))
+    assert r2.status_code == 200
+    assert store.get(pid).proxy == ""
+
+
+def test_proxy_defaults_empty_for_legacy_payload(client, store):
+    r = client.post("/api/remote/profiles", json=_payload())
+    assert r.status_code == 200
+    assert r.json()["profile"]["proxy"] == ""

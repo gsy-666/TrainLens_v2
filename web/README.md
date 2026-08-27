@@ -32,6 +32,7 @@
 ### 训练与监控
 - **标注 → 训练闭环**：训练中心可一键把当前标注目录（Labelme JSON）转换为 YOLO 训练集（自动提取类别、分层抽样划分 train/val、生成 data.yaml），并自动填入训练表单，直接开训
 - **数据集检查可视**：类别×形状统计、类别实例分布图、5 种任务有效图片数（自动推荐任务类型）、少样本/类别不均衡/数据量不足告警
+- **数据集健康检查**：一键体检——重复/相似图（dHash 聚类）、模糊图（Laplacian 方差）、过暗/过亮图、标注异常（框越界/过大/过小/退化形状），点击问题图直接跳回标注页修正
 - **训练中心**：Ultralytics 引导式训练，环境/数据集预检查（`POST /api/training/preflight`）、新手三档预设、实时日志、loss / mAP / 学习率曲线、ETA 预计剩余时间、历史记录（与桌面版共享存储）
 - **远程服务器训练**：SSH 服务器档案管理（密钥/密码认证、host-key 确认）、远端环境诊断（GPU / torch / ultralytics / 磁盘）、自动选择 CPU/GPU、数据集自动上传、训练产物自动回传，日志曲线与本地任务同界面
 - **产物转化**：best.pt / last.pt 在线预览曲线图、下载 / ZIP 打包、导出 ONNX 等格式（按环境动态检测可用性）、**一键注册为标注模型**——训练完直接在标注页加载试用，验证效果后继续标注
@@ -40,7 +41,16 @@
 - **新手引导**：标注页与训练中心内置分步高亮 Tour，首次进入自动弹出，可随时点"?"重看
 - **运行监控**：自定义脚本工作区扫描（脚本/环境检测）、启动/停止、stdout/stderr 实时流、进程 CPU/内存 + 系统 + GPU 资源曲线
 
-## 快速开始（一键启动）
+## 快速开始（从零到打开页面）
+
+### 1. 准备环境（只做一次）
+
+| 依赖 | 用途 | 安装 |
+|---|---|---|
+| **Python ≥ 3.11** | 后端 + 训练 | 仓库根目录执行 `pip install -e .`（建议先在根目录建虚拟环境：`python -m venv .venv`） |
+| **Node.js ≥ 18** | 仅**首次**构建前端用一次 | https://nodejs.org ；没有 Node 见下方常见问题 |
+
+### 2. 一键启动
 
 **Windows**：双击 `start_web.bat`
 **Linux / macOS**：`bash start_web.sh`
@@ -48,13 +58,41 @@
 脚本自动完成：检查后端依赖 → 首次构建前端 → 启动服务 → 打开浏览器。
 
 - 访问 **http://127.0.0.1:8000**（单进程，API 与页面同源）
-- 前提：项目 Python 环境（仓库 `.venv` 或已安装项目依赖的 Python）；首次构建前端需 Node.js
-- `Ctrl+C` 停止
-- 再次启动会自动恢复上次打开的图片/视频目录（会话恢复）
+- `Ctrl+C` 停止；再次启动自动恢复上次打开的图片/视频目录
+
+### 手动启动（等价命令，便于排查）
+
+```bash
+# 首次：构建前端（生成 frontend/dist，之后不用再构建）
+cd web/frontend && npm install && npm run build
+
+# 启动（仓库 .venv 存在时直接用它的 python）
+cd web/backend && python start.py
+```
+
+### 启动参数
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--host` | `127.0.0.1` | 绑非回环地址（如 `0.0.0.0`）时强制启用访问令牌 |
+| `--port` | `8000` | 端口被占用时换一个，如 `--port 8080` |
+| `--token` | 自动生成 | 远程访问令牌；也可用环境变量 `XANYLABELING_WEB_TOKEN` |
+| `--proxy` | 无 | 模型下载走 HTTP(S) 代理，如 `--proxy http://127.0.0.1:7890` |
+
+环境变量：`XANYLABELING_WEB_TOKEN`（访问令牌）、`XANYLABELING_MODELS_DIR`（模型缓存目录，默认 `~/anylabeling_data/models`）。
+
+### 常见问题
+
+- **端口被占用** → `--port 8080` 换个端口
+- **模型下载慢/失败** → 启动加 `--proxy`；或手动把 onnx 放到 `<模型缓存目录>/<模型名>/`（加载器自动跳过下载）；或在标注页模型面板用「使用本地权重文件」直接注册本机已有的 .onnx
+- **没有 Node.js** → 前端只需构建一次：在任何有 Node 的机器上 `npm install && npm run build`，把 `frontend/dist/` 拷回来即可，之后启动不再需要 Node
+- **GPU 训练** → 训练环境需安装带 CUDA 的 PyTorch（CPU 环境也能训，只是慢）；也可以在训练中心直接连一台远程 GPU 服务器（见下文「远程训练」）
 
 ## 远程训练（SSH 下发到 GPU 服务器）
 
 浏览器跑在本机、训练在远程服务器上执行的场景（与下面"远程访问"是两个独立功能，可叠加）：
+
+> 📖 **完整图文教程与常见问题：[REMOTE_TRAINING.md](REMOTE_TRAINING.md)**
 
 1. 训练中心 → 执行位置 → 远程服务器 → 管理服务器，新增档案：主机 / 端口 / 用户名 / 认证方式（SSH 密钥或密码）/ 远端工作目录 / 远端 Python 路径（需已安装 torch + ultralytics 的环境）
 2. 首次连接按提示确认 host-key 指纹；"检测服务器"自动体检远端 GPU、torch、ultralytics 版本并按结果自动选择 CPU/GPU
@@ -99,7 +137,7 @@ web/
 ├── start_dev.bat                  # 开发模式（:8000 + :5173）
 ├── backend/app/
 │   ├── main.py                    # FastAPI 入口，CORS，托管 frontend/dist
-│   ├── routers/                   # files / labels / models / predict / export / upload / video / training / dataset / quickstart / monitor / fs / system / remote
+│   ├── routers/                   # files / labels / models / predict / export / upload / video / training / dataset / health / quickstart / playground / active_learning / monitor / fs / system / remote
 │   ├── model_service.py           # 复用桌面版 ModelManager（ONNX 推理）
 │   ├── training_service.py        # 复用 training_center（JobManager / MetricStore / HistoryStore / Preflight）
 │   ├── web_runner.py              # 去 Qt 的本地训练 runner（subprocess + threading）
@@ -129,6 +167,7 @@ web/
 | `POST /api/video/open` · `GET /api/video/frame` · `PUT /api/video/labels` · `POST /api/video/track` | 视频标注与 MOT 跟踪 |
 | `POST /api/export` · `GET /api/export/download` | 数据集导出 / ZIP 下载 |
 | `POST /api/dataset/prepare` · `GET /api/dataset/stats` | 训练集生成 / 数据集检查统计 |
+| `POST /api/dataset/health/scan` · `GET .../report` | 数据集健康检查（重复/模糊/亮度/标注异常） |
 | `POST /api/training/quickstart` | 零配置一键训练（自动推断任务/设备/模型） |
 | `POST /api/training/preflight` · `POST /api/training/guided/start` · `GET /api/training/{events,metrics,history,status}` | 预检查 / 训练任务 |
 | `GET /api/training/history/{id}/artifacts` · `POST .../artifacts/export` · `POST .../artifacts/register-model` | 训练产物查看 / 导出 / 注册为标注模型 |
@@ -143,4 +182,4 @@ web/
 
 - 标注文件格式与桌面版**逐字段一致**（含矩形四点、rotation direction、cuboid3d 元数据），双向可互开
 - 训练历史与桌面版共享同一存储目录
-- 桌面版代码零改动，Web 版全部位于 `web/` 目录
+- Web 版全部位于 `web/` 目录；对桌面版共享服务仅有少量 Qt 安全的增量（history 的 classify 指标列、ssh_remote 的读流钩子、yolov8 输出挂置信度、模型缓存目录环境变量），桌面端行为不变

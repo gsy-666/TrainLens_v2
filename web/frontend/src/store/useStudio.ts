@@ -43,6 +43,7 @@ interface StudioState {
   closeVideo: () => Promise<void>;
   closeSession: () => void; // back to the welcome page
   selectImage: (index: number) => Promise<void>;
+  selectImageByName: (name: string) => Promise<boolean>; // false = 当前目录没有该图
   saveCurrent: () => Promise<boolean>;
   nextImage: () => Promise<void>;
   prevImage: () => Promise<void>;
@@ -265,6 +266,17 @@ export const useStudio = create<StudioState>((set, get) => {
         console.error("load labels failed", e);
         set({ shapes: [], flags: {}, checked: false, otherData: {}, dirty: false });
       }
+    },
+
+    selectImageByName: async (name) => {
+      const { images } = get();
+      const base = name.split(/[/\\]/).pop() ?? name;
+      const idx = images.findIndex(
+        (im) => im.filename === name || (im.filename.split(/[/\\]/).pop() ?? "") === base
+      );
+      if (idx < 0) return false;
+      await get().selectImage(idx);
+      return true;
     },
 
     saveCurrent: async () => {

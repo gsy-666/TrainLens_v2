@@ -64,6 +64,7 @@ from .routers import (  # noqa: E402
     export,
     files,
     fs,
+    health,
     labels,
     models,
     monitor,
@@ -105,6 +106,7 @@ app.include_router(training.router, prefix="/api", tags=["training"])
 app.include_router(remote.router, prefix="/api", tags=["remote"])
 app.include_router(monitor.router, prefix="/api", tags=["monitor"])
 app.include_router(dataset.router, prefix="/api", tags=["dataset"])
+app.include_router(health.router, prefix="/api", tags=["health"])
 app.include_router(system.router, prefix="/api", tags=["system"])
 app.include_router(quickstart.router, prefix="/api", tags=["quickstart"])
 app.include_router(playground.router, prefix="/api", tags=["playground"])

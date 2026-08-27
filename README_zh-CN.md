@@ -19,6 +19,52 @@
 
 ![](https://user-images.githubusercontent.com/18329471/234640541-a6a65fbc-d7a5-4ec3-9b65-55305b01a7aa.png)
 
+---
+
+## 🚀 快速开始（TrainLens Web 一站式训练中心）
+
+浏览器里完成 **标注 → 数据集检查 → 训练 → 训练可视化 → 产物转化 → 远程服务器训练** 的完整闭环，开箱即用。
+
+### 一键启动（推荐）
+
+- **Windows**：双击 `web/start_web.bat`
+- **Linux / macOS**：`bash web/start_web.sh`
+
+脚本自动完成：检查后端依赖 → 首次构建前端 → 启动服务 → 打开浏览器。
+
+- 访问 **http://127.0.0.1:8000**（单进程，API 与页面同源）
+- 前提：已安装项目 Python 依赖（`pip install -e .`，仓库 `.venv` 会被自动识别）；**首次**构建前端需 Node.js（之后启动不再需要）
+- `Ctrl+C` 停止；再次启动自动恢复上次打开的图片/视频目录
+
+### 部署到云服务器（远程访问）
+
+```bash
+bash web/start_web.sh --host 0.0.0.0        # 自动生成访问令牌并打印在控制台
+```
+
+本地浏览器打开 `http://<服务器IP>:8000`，输入令牌即可。公网环境建议改用 SSH 隧道（全程加密）：
+`ssh -L 8000:127.0.0.1:8000 user@服务器`，然后本地访问 http://127.0.0.1:8000。
+
+### 连接远程 GPU 服务器训练（本机浏览器，算力在远端）
+
+训练中心 → 执行位置 → 远程服务器 → 管理服务器：填主机/账号/远端 Python 路径 → 检测服务器（自动识别远端 CPU/GPU）→ 启动训练。数据集自动上传、日志曲线实时回流、产物自动回传。
+
+### 开发模式
+
+**Windows**：双击 `web/start_dev.bat`（后端热重载 + 前端 Vite 热更新，访问 http://localhost:5173）
+
+### 桌面版（Qt GUI）
+
+```bash
+pip install -e .
+xanylabeling            # 或: python anylabeling/app.py
+```
+
+> Web 版与桌面版标注 JSON 逐字段兼容、训练历史共享，可打开同一份数据集无缝协作。
+> 完整文档（功能清单 / API / 环境变量 / 代理下载）见 **[web/README.md](web/README.md)**。
+
+---
+
 <video src="https://github.com/user-attachments/assets/25957cae-4dbd-494c-9923-e959d985674e" width="100%" controls>
 </video>
 

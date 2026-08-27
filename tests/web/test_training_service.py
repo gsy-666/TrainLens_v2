@@ -265,3 +265,24 @@ def test_start_reserved_remote_crash_fails_reserved_job(monkeypatch):
     svc = _build_service(monkeypatch, _JM())
     svc._start_reserved_remote("j1", {"data": "x"})  # must not raise
     assert failed == [("j1", "runner type mismatch")]
+
+
+def test_events_strip_ansi_codes(monkeypatch):
+    """Console payloads must reach the web log panel without ANSI escapes."""
+    svc = _build_service(monkeypatch, SimpleNamespace(get_current_job=lambda: None))
+    from anylabeling.services.training_center.event_protocol import (
+        TrainingEventType,
+    )
+
+    event = SimpleNamespace(
+        event_type=TrainingEventType.CONSOLE_OUTPUT,
+        job_id="j1",
+        to_dict=lambda: {
+            "event_type": "console_output",
+            "job_id": "j1",
+            "payload": {"message": "\x1b[1m/root/train path\x1b[0m tail"},
+        },
+    )
+    svc._on_event(event)
+    items = svc.events_since(0)["events"]
+    assert items[-1]["payload"]["message"] == "/root/train path tail"

@@ -9,6 +9,7 @@ polls incrementally.
 import datetime
 import logging
 import math
+import re
 import sys
 import threading
 import time
@@ -74,6 +75,19 @@ class WebTrainingService:
         self.jm.subscribe_events(self._on_event)
 
     # ---- events ---------------------------------------------------------------
+    _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07")
+
+    @classmethod
+    def _strip_ansi(cls, obj):
+        """Remove ANSI escape sequences from log-ish payload text."""
+        if isinstance(obj, str):
+            return cls._ANSI_RE.sub("", obj)
+        if isinstance(obj, dict):
+            return {k: cls._strip_ansi(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [cls._strip_ansi(v) for v in obj]
+        return obj
+
     def _on_event(self, event):
         with self.lock:
             self.seq += 1
@@ -85,7 +99,7 @@ class WebTrainingService:
                     "job_id": event.job_id,
                     "payload": getattr(event, "payload", {}),
                 }
-            self.events.append({"seq": self.seq, **payload})
+            self.events.append({"seq": self.seq, **self._strip_ansi(payload)})
             if event.event_type == TrainingEventType.EPOCH_METRICS:
                 self._update_eta(event)
                 self._feed_remote_metrics(event)

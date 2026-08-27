@@ -6,6 +6,7 @@ constructible and drivable without a QApplication."""
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections import deque
@@ -466,3 +467,19 @@ def test_preparing_stop_releases_runner_and_next_remote_job_starts(remote_env):
     assert _wait_for(lambda: runner._active_job_id == "")
     stopped = [e for e in events if e.to_dict()["event_type"] == "stopped"]
     assert stopped
+
+
+# ---- artifact download destination honors the job's local output dir ----------
+
+
+def test_local_download_base_prefers_job_output_dir(tmp_path):
+    runner = WebSSHRemoteRunner()
+    runner._active_output_dir = str(tmp_path / "my_run")
+    assert runner._local_download_base("job-x") == str(tmp_path / "my_run")
+
+
+def test_local_download_base_falls_back_to_remote_runs():
+    runner = WebSSHRemoteRunner()
+    runner._active_output_dir = ""
+    base = runner._local_download_base("job-x")
+    assert base.endswith(os.path.join("remote_runs", "job-x"))

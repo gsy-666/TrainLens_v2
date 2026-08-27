@@ -1,6 +1,6 @@
 import { Button, Space } from "antd";
 import { ExperimentOutlined, MonitorOutlined } from "@ant-design/icons";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import LabelStudio from "./pages/LabelStudio";
 import TrainingCenter from "./pages/TrainingCenter";
 import RunMonitor from "./pages/RunMonitor";
@@ -8,16 +8,58 @@ import Welcome from "./pages/Welcome";
 import TokenGate from "./pages/TokenGate";
 import { useStudio } from "./store/useStudio";
 
+type View = "label" | "training" | "monitor";
+
 export default function App() {
   const dir = useStudio((s) => s.dir);
   const video = useStudio((s) => s.video);
-  const [view, setView] = useState<"label" | "training" | "monitor">("label");
+  const [view, setView] = useState<View>("label");
   const [needsAuth, setNeedsAuth] = useState(false);
+  const inSession = Boolean(dir || video);
 
   useEffect(() => {
     const onUnauthorized = () => setNeedsAuth(true);
     window.addEventListener("xaw:unauthorized", onUnauthorized);
     return () => window.removeEventListener("xaw:unauthorized", onUnauthorized);
+  }, []);
+
+  // ---- browser history wiring -------------------------------------------------
+  // The SPA switches pages with internal state only; without pushing history
+  // entries, the browser Back button would leave the app entirely. Mirror every
+  // navigation into window.history so Back returns to the previous page
+  // (label studio -> training center -> ... -> welcome).
+  const navRef = useRef<string | null>(null);
+  useEffect(() => {
+    const key = inSession ? view : "welcome";
+    if (navRef.current === null) {
+      // mark the entry the app landed on
+      window.history.replaceState({ view: key }, "");
+      navRef.current = key;
+      return;
+    }
+    if (navRef.current !== key) {
+      navRef.current = key;
+      window.history.pushState({ view: key }, "");
+    }
+  }, [view, inSession]);
+
+  useEffect(() => {
+    const onPop = (e: PopStateEvent) => {
+      const v = (e.state as { view?: string } | null)?.view;
+      const st = useStudio.getState();
+      const hasSession = Boolean(st.dir || st.video);
+      if ((v === "training" || v === "monitor" || v === "label") && hasSession) {
+        setView(v);
+        navRef.current = v;
+      } else {
+        // popped past the app root (or an entry that needs a session): Welcome
+        st.closeSession();
+        setView("label");
+        navRef.current = "welcome";
+      }
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
   }, []);
 
   if (needsAuth) {

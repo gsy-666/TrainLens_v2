@@ -52,6 +52,7 @@ class RemoteProfile:
     # Remote environment
     remote_workspace: str = ""
     remote_python: str = ""
+    proxy: str = ""  # optional HTTP(S) proxy for remote downloads
 
     # Security
     known_host_fingerprint: str = ""

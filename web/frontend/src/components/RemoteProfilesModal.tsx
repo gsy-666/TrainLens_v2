@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   Button,
+  Collapse,
   Input,
   InputNumber,
   List,
@@ -10,12 +11,14 @@ import {
   Radio,
   Space,
   Tag,
+  Typography,
 } from "antd";
 import {
   ApiOutlined,
   DeleteOutlined,
   EditOutlined,
   PlusOutlined,
+  QuestionCircleOutlined,
 } from "@ant-design/icons";
 import * as api from "../api/client";
 
@@ -34,6 +37,7 @@ interface FormState {
   private_key_path: string;
   remote_workspace: string;
   remote_python: string;
+  proxy: string;
 }
 
 const EMPTY_FORM: FormState = {
@@ -45,6 +49,7 @@ const EMPTY_FORM: FormState = {
   private_key_path: "",
   remote_workspace: "/data/trainlens",
   remote_python: "python3",
+  proxy: "",
 };
 
 export default function RemoteProfilesModal({ open, onClose, onProfilesChanged }: Props) {
@@ -168,6 +173,7 @@ export default function RemoteProfilesModal({ open, onClose, onProfilesChanged }
       private_key_path: p.private_key_path,
       remote_workspace: p.remote_workspace,
       remote_python: p.remote_python,
+      proxy: p.proxy ?? "",
     });
     setFormPassword("");
     setEditing(p.profile_id);
@@ -223,6 +229,46 @@ export default function RemoteProfilesModal({ open, onClose, onProfilesChanged }
     >
       {editing === null ? (
         <>
+          <Collapse
+            size="small"
+            style={{ marginBottom: 12 }}
+            items={[
+              {
+                key: "guide",
+                label: (
+                  <span style={{ fontSize: 12 }}>
+                    <QuestionCircleOutlined /> 第一次连接服务器？查看三步指引
+                  </span>
+                ),
+                children: (
+                  <div style={{ fontSize: 12, color: "#52525b", lineHeight: 1.9 }}>
+                    <div>
+                      <b>① 打通网络</b>：服务器开启 sshd；云服务器还需在安全组放行 22
+                      端口到你的本机出口 IP（浏览器打开 ifconfig.me 查看；家用宽带 IP
+                      会变化，变了改一下规则）。
+                    </div>
+                    <div>
+                      <b>② 配置登录</b>：密钥（推荐）——本机执行{" "}
+                      <Typography.Text code copyable style={{ fontSize: 11 }}>
+                        ssh-keygen -t ed25519 -f ~/.ssh/trainlens_server -N ""
+                      </Typography.Text>{" "}
+                      生成密钥，再把生成的 .pub 公钥<b>完整</b>追加到服务器的
+                      ~/.ssh/authorized_keys（目录权限 700、文件 600）；下方「私钥文件」填
+                      ~/.ssh/trainlens_server。或选密码认证（密码仅本次会话使用，不保存）。
+                    </div>
+                    <div>
+                      <b>③ 远端环境</b>：Python 里装好 torch + ultralytics（建议 venv，无 GPU
+                      装 CPU 版即可），下方「远程 Python」填该环境的解释器路径。
+                    </div>
+                    <div style={{ color: "#71717a" }}>
+                      填好点「测试连接」：首次会要求确认主机指纹（防中间人）；「检测服务器」会自动识别远端
+                      CPU/GPU。完整图文教程和常见问题见仓库 web/REMOTE_TRAINING.md。
+                    </div>
+                  </div>
+                ),
+              },
+            ]}
+          />
           <div style={{ marginBottom: 12, display: "flex", justifyContent: "space-between" }}>
             <span style={{ fontSize: 12, color: "#999" }}>
               密码认证的登录密码永不保存，仅在测试连接 / 启动训练时填写。
@@ -373,6 +419,14 @@ export default function RemoteProfilesModal({ open, onClose, onProfilesChanged }
               value={form.remote_python}
               onChange={(e) => setForm({ ...form, remote_python: e.target.value })}
               placeholder="python3 或 /opt/conda/envs/train/bin/python"
+            />
+          </div>
+          <div>
+            <div style={{ marginBottom: 4 }}>下载代理（可选，远端下载预训练权重时生效）</div>
+            <Input
+              value={form.proxy}
+              onChange={(e) => setForm({ ...form, proxy: e.target.value })}
+              placeholder="如 http://127.0.0.1:7890，留空表示不走代理"
             />
           </div>
           <Space style={{ marginTop: 4 }}>

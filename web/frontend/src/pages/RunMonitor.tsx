@@ -7,6 +7,7 @@ import {
   message,
   Select,
   Space,
+  Splitter,
   Tag,
 } from "antd";
 import {
@@ -20,6 +21,9 @@ import {
 import * as api from "../api/client";
 import DirBrowserModal from "../components/DirBrowserModal";
 import LineChart from "../components/LineChart";
+import { readPanelWidth, savePanelWidth } from "../utils/panelStorage";
+
+const RM_LEFT_WIDTH_KEY = "xaw_rm_left_width";
 
 interface Props {
   onBack: () => void;
@@ -37,6 +41,8 @@ export default function RunMonitor({ onBack }: Props) {
   const [run, setRun] = useState<api.RunInfo | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [samples, setSamples] = useState<api.ResourceSample[]>([]);
+  // 左栏宽度记忆：defaultSize 只在挂载时读一次，拖拽过程由 Splitter 内部维护（非受控）
+  const [leftDefault] = useState(() => readPanelWidth(RM_LEFT_WIDTH_KEY, 380));
 
   const seqRef = useRef(0);
   const logBoxRef = useRef<HTMLDivElement>(null);
@@ -173,9 +179,13 @@ export default function RunMonitor({ onBack }: Props) {
         )}
       </div>
 
-      <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
+      <Splitter
+        style={{ flex: 1, minHeight: 0 }}
+        onResize={(sizes) => savePanelWidth(RM_LEFT_WIDTH_KEY, sizes[0])}
+      >
         {/* 左：配置 */}
-        <div style={{ width: 380, overflow: "auto", padding: 12 }}>
+        <Splitter.Panel defaultSize={leftDefault} min={300} max={640}>
+        <div style={{ height: "100%", overflow: "auto", padding: 12 }}>
           <Card size="small" title="工作区" style={{ marginBottom: 12 }}>
             <Space.Compact style={{ width: "100%" }}>
               <Input
@@ -218,7 +228,7 @@ export default function RunMonitor({ onBack }: Props) {
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               <div>
                 <div style={{ marginBottom: 4 }}>脚本路径</div>
-                <Input value={script} onChange={(e) => setScript(e.target.value)} disabled={running} />
+                <Input value={script} onChange={(e) => setScript(e.target.value)} disabled={running} title={script} />
               </div>
               <div>
                 <div style={{ marginBottom: 4 }}>Python 解释器</div>
@@ -232,6 +242,7 @@ export default function RunMonitor({ onBack }: Props) {
                   options={(wsInfo?.detected_environments ?? []).map((e) => ({
                     value: e.python_path,
                     label: `${e.env_type} · ${e.python_path}`,
+                    title: `${e.env_type} · ${e.python_path}`,
                   }))}
                 />
                 <Input
@@ -265,9 +276,11 @@ export default function RunMonitor({ onBack }: Props) {
             </div>
           </Card>
         </div>
+        </Splitter.Panel>
 
         {/* 右：日志 + 资源 */}
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, padding: 12, gap: 12, overflow: "auto" }}>
+        <Splitter.Panel>
+        <div style={{ height: "100%", display: "flex", flexDirection: "column", minWidth: 0, padding: 12, gap: 12, overflow: "auto" }}>
           <Card size="small" title="控制台输出" styles={{ body: { padding: 0 } }}>
             <div
               ref={logBoxRef}
@@ -301,7 +314,8 @@ export default function RunMonitor({ onBack }: Props) {
             )}
           </div>
         </div>
-      </div>
+        </Splitter.Panel>
+      </Splitter>
 
       <DirBrowserModal
         open={browseOpen}

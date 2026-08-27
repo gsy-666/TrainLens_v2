@@ -80,6 +80,9 @@ class WebSSHRemoteRunner(SSHRemoteRunner):
         connect in that case.
         """
         self._stop_event.clear()
+        # Honor the job's local output directory as the artifact download
+        # destination (falls back to the default remote_runs cache).
+        self._active_output_dir = str(getattr(job, "output_directory", "") or "")
         status = getattr(job, "status", None)
         if status is not None and status.is_terminal():
             _log.info(
@@ -88,6 +91,13 @@ class WebSSHRemoteRunner(SSHRemoteRunner):
             )
             return False, f"job stopped before remote start ({status})"
         return super().start(job, config)
+
+    def _local_download_base(self, job_id: str) -> str:
+        """Download artifacts into the job's configured output directory."""
+        base = getattr(self, "_active_output_dir", "") or ""
+        if base:
+            return base
+        return super()._local_download_base(job_id)
 
     def _check_stop_requested(self):
         if self._stop_event.is_set():

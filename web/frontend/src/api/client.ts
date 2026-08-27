@@ -648,6 +648,7 @@ export interface RemoteProfile {
   private_key_path: string;
   remote_workspace: string;
   remote_python: string;
+  proxy?: string;
   known_host_fingerprint: string;
   created_at?: string;
   updated_at?: string;
@@ -662,6 +663,7 @@ export interface RemoteProfilePayload {
   private_key_path?: string;
   remote_workspace: string;
   remote_python: string;
+  proxy?: string;
 }
 
 export interface RemoteTestResult {
@@ -918,6 +920,69 @@ export async function prepareDataset(
   payload: PrepareDatasetPayload
 ): Promise<PrepareDatasetResult> {
   const r = await api.post("/dataset/prepare", payload);
+  return r.data;
+}
+
+// ---- dataset health check -------------------------------------------------------
+
+export interface HealthScanStartResult {
+  started: boolean;
+  total: number;
+}
+
+export interface HealthScanStatus {
+  running: boolean;
+  processed: number;
+  total: number;
+  done: boolean;
+  error: string | null;
+  error_count: number;
+}
+
+export interface HealthShapeIssue {
+  label: string;
+  issue: string; // out_of_bounds / oversized / tiny / degenerate
+  detail: string;
+}
+
+export interface DatasetHealthSummary {
+  total_images: number;
+  duplicate_groups: number;
+  duplicate_images: number;
+  blurry: number;
+  dark: number;
+  bright: number;
+  shape_issue_images: number;
+}
+
+// 报告不存在时后端只返回 { updated_at: null }，其余字段全部缺省
+export interface DatasetHealthReport {
+  summary?: DatasetHealthSummary;
+  duplicate_groups?: string[][];
+  blurry?: { name: string; score: number }[];
+  dark?: { name: string; brightness: number }[];
+  bright?: { name: string; brightness: number }[];
+  shape_issues?: { name: string; issues: HealthShapeIssue[] }[];
+  updated_at: string | null;
+}
+
+export async function startHealthScan(): Promise<HealthScanStartResult> {
+  const r = await api.post("/dataset/health/scan", {});
+  return r.data;
+}
+
+export async function getHealthScanStatus(): Promise<HealthScanStatus> {
+  const r = await api.get("/dataset/health/scan/status");
+  return r.data;
+}
+
+export async function stopHealthScan(): Promise<{ stopping: boolean }> {
+  const r = await api.post("/dataset/health/scan/stop");
+  return r.data;
+}
+
+export async function getDatasetHealthReport(): Promise<DatasetHealthReport> {
+  const r = await api.get("/dataset/health/report");
   return r.data;
 }
 

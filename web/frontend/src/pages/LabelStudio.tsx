@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Layout, message } from "antd";
+import { Layout, message, Splitter } from "antd";
 import Toolbar from "../components/Toolbar";
 import FileList from "../components/FileList";
 import LabelList from "../components/LabelList";
@@ -11,7 +11,11 @@ import ModelPanel from "../components/ModelPanel";
 import GuidedTour, { useGuidedTour, type GuidedTourStep } from "../components/GuidedTour";
 import * as api from "../api/client";
 import { useStudio } from "../store/useStudio";
+import { readPanelWidth, savePanelWidth } from "../utils/panelStorage";
 import type { Point, Shape, ShapeType } from "../types";
+
+const LS_LEFT_WIDTH_KEY = "xaw_ls_left_width";
+const LS_RIGHT_WIDTH_KEY = "xaw_ls_right_width";
 
 const TOUR_STEPS: GuidedTourStep[] = [
   {
@@ -73,6 +77,9 @@ export default function LabelStudio() {
   const [draft, setDraft] = useState<{ points: Point[]; type: ShapeType } | null>(null);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const tour = useGuidedTour("xaw_tour_label_seen");
+  // 左右栏宽度记忆：defaultSize 只在挂载时读一次，拖拽过程由 Splitter 内部维护（非受控）
+  const [leftDefault] = useState(() => readPanelWidth(LS_LEFT_WIDTH_KEY, 220));
+  const [rightDefault] = useState(() => readPanelWidth(LS_RIGHT_WIDTH_KEY, 280));
 
   const handleSelectDir = useCallback(
     async (path: string) => {
@@ -309,41 +316,62 @@ export default function LabelStudio() {
         onOpenTour={tour.openTour}
       />
       <Layout>
-        <Layout.Sider width={220} theme="light" style={{ borderRight: "1px solid #f0f0f0" }}>
-          <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-            <div id="tour-file-list" style={{ flex: 1, minHeight: 0 }}>
-              <FileList />
-            </div>
-            <div id="tour-model-panel">
-              <ModelPanel />
-            </div>
-          </div>
-        </Layout.Sider>
-        <Layout.Content style={{ position: "relative" }}>
-          {currentIndex >= 0 ? (
-            <CanvasEditor onFinishDraft={handleFinishDraft} onSamPrompt={handleSamPrompt} />
-          ) : (
+        <Splitter
+          style={{ height: "100%" }}
+          onResize={(sizes) => {
+            savePanelWidth(LS_LEFT_WIDTH_KEY, sizes[0]);
+            savePanelWidth(LS_RIGHT_WIDTH_KEY, sizes[2]);
+          }}
+        >
+          <Splitter.Panel defaultSize={leftDefault} min={160} max={480}>
             <div
               style={{
-                height: "100%",
                 display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                color: "#999",
+                flexDirection: "column",
+                height: "100%",
+                background: "#fff",
+                borderRight: "1px solid #f0f0f0",
               }}
             >
-              请选择或打开一个图片目录
+              <div id="tour-file-list" style={{ flex: 1, minHeight: 0 }}>
+                <FileList />
+              </div>
+              <div id="tour-model-panel">
+                <ModelPanel />
+              </div>
             </div>
-          )}
-        </Layout.Content>
-        <Layout.Sider
-          id="tour-label-list"
-          width={280}
-          theme="light"
-          style={{ borderLeft: "1px solid #f0f0f0" }}
-        >
-          <LabelList onEditLabel={(i) => setEditingIndex(i)} />
-        </Layout.Sider>
+          </Splitter.Panel>
+          {/* 画布面板：不设 defaultSize，自动吃掉剩余宽度。
+              注意不能给它 resizable={false}——antd Splitter 里一条拖拽柄要求
+              相邻两个面板都可调，中间设 false 会把左右两条柄一起锁死 */}
+          <Splitter.Panel min={200}>
+            <div style={{ position: "relative", height: "100%" }}>
+              {currentIndex >= 0 ? (
+                <CanvasEditor onFinishDraft={handleFinishDraft} onSamPrompt={handleSamPrompt} />
+              ) : (
+                <div
+                  style={{
+                    height: "100%",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    color: "#999",
+                  }}
+                >
+                  请选择或打开一个图片目录
+                </div>
+              )}
+            </div>
+          </Splitter.Panel>
+          <Splitter.Panel defaultSize={rightDefault} min={220} max={560}>
+            <div
+              id="tour-label-list"
+              style={{ height: "100%", background: "#fff", borderLeft: "1px solid #f0f0f0" }}
+            >
+              <LabelList onEditLabel={(i) => setEditingIndex(i)} />
+            </div>
+          </Splitter.Panel>
+        </Splitter>
       </Layout>
 
       <GuidedTour steps={TOUR_STEPS} open={tour.open} onClose={tour.closeTour} />

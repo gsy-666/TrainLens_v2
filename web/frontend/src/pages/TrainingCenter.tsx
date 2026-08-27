@@ -4,6 +4,7 @@ import {
   Button,
   Card,
   Collapse,
+  Divider,
   Input,
   InputNumber,
   List,
@@ -13,6 +14,7 @@ import {
   Select,
   Slider,
   Space,
+  Splitter,
   Steps,
   Table,
   Tag,
@@ -31,11 +33,16 @@ import {
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import * as api from "../api/client";
+import DatasetHealth from "../components/DatasetHealth";
 import DirBrowserModal from "../components/DirBrowserModal";
 import GuidedTour, { useGuidedTour, type GuidedTourStep } from "../components/GuidedTour";
 import LineChart from "../components/LineChart";
 import ModelPlayground from "../components/ModelPlayground";
 import RemoteProfilesModal from "../components/RemoteProfilesModal";
+import { useStudio } from "../store/useStudio";
+import { readPanelWidth, savePanelWidth } from "../utils/panelStorage";
+
+const TC_LEFT_WIDTH_KEY = "xaw_tc_left_width";
 
 const SEV_STYLE: Record<string, { color: string; icon: React.ReactNode }> = {
   pass: { color: "#52c41a", icon: <CheckCircleFilled /> },
@@ -135,6 +142,9 @@ export default function TrainingCenter({ onBack }: Props) {
   const [quickstarting, setQuickstarting] = useState(false);
   const [starting, setStarting] = useState(false);
   const tour = useGuidedTour("xaw_tour_training_seen");
+  const studioDir = useStudio((s) => s.dir);
+  // 左栏宽度记忆：defaultSize 只在挂载时读一次，拖拽过程由 Splitter 内部维护（非受控）
+  const [leftDefault] = useState(() => readPanelWidth(TC_LEFT_WIDTH_KEY, 380));
 
   // remote execution
   const [execMode, setExecMode] = useState<"local" | "remote_ssh">("local");
@@ -535,13 +545,42 @@ export default function TrainingCenter({ onBack }: Props) {
     setStarting(true);
     setIssues(null);
     try {
-      const pre = await api.trainingPreflight(formPayload());
+      let payload = formPayload();
+      // 数据集 YAML 为空时的默认动作：标注页开着目录就从当前标注自动生成，
+      // 免去小白先理解"什么是 data.yaml"这一步。
+      if (!String(payload.data ?? "").trim()) {
+        if (!studioDir) {
+          message.warning(
+            "还没有数据集：请先在标注页打开图片目录，或点「从当前标注数据集一键生成」"
+          );
+          return;
+        }
+        const prepTaskMap: Record<string, string> = {
+          detect: "Detect", segment: "Segment", obb: "OBB",
+          classify: "Classify", pose: "Pose",
+        };
+        const hide = message.loading(
+          "数据集 YAML 为空，正在从当前标注目录自动生成训练集…", 0
+        );
+        try {
+          const r = await api.prepareDataset({
+            task_type: prepTaskMap[task] ?? "Detect",
+            dataset_ratio: 0.9,
+          });
+          setData(r.data_yaml);
+          payload = { ...payload, data: r.data_yaml };
+          message.success("已自动生成训练集并填入，继续启动");
+        } finally {
+          hide();
+        }
+      }
+      const pre = await api.trainingPreflight(payload);
       if (!pre.can_start) {
         setIssues(pre.issues);
         message.warning("预检查发现需要处理的问题，已阻止启动");
         return;
       }
-      const s = await api.guidedStart(formPayload());
+      const s = await api.guidedStart(payload);
       setStatus(s);
       setLogs([]);
       setMetrics([]);
@@ -553,7 +592,7 @@ export default function TrainingCenter({ onBack }: Props) {
     } finally {
       setStarting(false);
     }
-  }, [formPayload, execMode, remoteProfileId]);
+  }, [formPayload, execMode, remoteProfileId, studioDir, task]);
 
   const onStop = useCallback(async () => {
     await api.trainingStop();
@@ -639,9 +678,13 @@ export default function TrainingCenter({ onBack }: Props) {
         />
       </div>
 
-      <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
+      <Splitter
+        style={{ flex: 1, minHeight: 0 }}
+        onResize={(sizes) => savePanelWidth(TC_LEFT_WIDTH_KEY, sizes[0])}
+      >
         {/* 左：新建任务 */}
-        <div style={{ width: 380, overflow: "auto", padding: 12 }}>
+        <Splitter.Panel defaultSize={leftDefault} min={300} max={640}>
+        <div style={{ height: "100%", overflow: "auto", padding: 12 }}>
           {noDataset && (
             <Alert
               type="info"
@@ -747,6 +790,8 @@ export default function TrainingCenter({ onBack }: Props) {
                   : "正在统计当前标注数据集…"}
               </div>
             )}
+            <Divider style={{ margin: "12px 0" }} />
+            <DatasetHealth dir={studioDir} onBack={onBack} />
           </Card>
 
           <Card id="tour-train-exec" size="small" title="执行位置" style={{ marginBottom: 12 }}>
@@ -774,6 +819,10 @@ export default function TrainingCenter({ onBack }: Props) {
             />
             {execMode === "remote_ssh" && (
               <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 10 }}>
+                <div style={{ fontSize: 12, color: "#71717a", lineHeight: 1.7 }}>
+                  数据集与权重在启动时从<b>本机自动上传</b>到服务器执行，训练结束后产物自动下载回本机的输出目录。
+                  当前为全量上传，数据集大时请耐心等待日志里的上传阶段。
+                </div>
                 <div>
                   <div style={{ marginBottom: 4 }}>服务器档案</div>
                   <Space.Compact style={{ width: "100%" }}>
@@ -796,6 +845,8 @@ export default function TrainingCenter({ onBack }: Props) {
                       options={remoteProfiles.map((p) => ({
                         value: p.profile_id,
                         label: `${p.name}（${p.username}@${p.host}:${p.port}）`,
+                        // 超长档案名下拉与悬停时可见全文
+                        title: `${p.name}（${p.username}@${p.host}:${p.port}）`,
                       }))}
                     />
                     <Button onClick={() => setProfilesOpen(true)} disabled={running}>
@@ -841,6 +892,10 @@ export default function TrainingCenter({ onBack }: Props) {
                               : it.status === "WARNING"
                                 ? "#faad14"
                                 : "#52c41a",
+                          // 诊断消息可能含长 uname / 路径等无空格串，允许断行而不是溢出裁掉
+                          whiteSpace: "normal",
+                          wordBreak: "break-word",
+                          overflowWrap: "anywhere",
                         }}
                       >
                         {it.status === "PASS" ? "✓" : it.status === "WARNING" ? "⚠" : "✗"}{" "}
@@ -884,7 +939,7 @@ export default function TrainingCenter({ onBack }: Props) {
               <div>
                 <div style={{ marginBottom: 4 }}>数据集 YAML</div>
                 <Space.Compact style={{ width: "100%" }}>
-                  <Input value={data} onChange={(e) => setData(e.target.value)} disabled={running} placeholder="data.yaml 路径" />
+                  <Input value={data} onChange={(e) => setData(e.target.value)} disabled={running} placeholder="data.yaml 路径" title={data} />
                   <Button icon={<FolderOpenOutlined />} onClick={() => setBrowse("data")} disabled={running} />
                 </Space.Compact>
                 <Button
@@ -912,6 +967,7 @@ export default function TrainingCenter({ onBack }: Props) {
                     }}
                     disabled={running}
                     placeholder="runs 输出根目录"
+                    title={project}
                   />
                   <Button icon={<FolderOpenOutlined />} onClick={() => setBrowse("project")} disabled={running} />
                 </Space.Compact>
@@ -1088,9 +1144,11 @@ export default function TrainingCenter({ onBack }: Props) {
             </Card>
           )}
         </div>
+        </Splitter.Panel>
 
         {/* 右：模型试用 + 日志 + 指标 + 历史 */}
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, padding: 12, gap: 12, overflow: "auto" }}>
+        <Splitter.Panel>
+        <div style={{ height: "100%", display: "flex", flexDirection: "column", minWidth: 0, padding: 12, gap: 12, overflow: "auto" }}>
           <Collapse
             size="small"
             style={{ background: "#fff" }}
@@ -1193,7 +1251,8 @@ export default function TrainingCenter({ onBack }: Props) {
             />
           </Card>
         </div>
-      </div>
+        </Splitter.Panel>
+      </Splitter>
 
       <Modal
         open={!!artifactJob}

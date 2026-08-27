@@ -31,6 +31,7 @@ class RemoteProfilePayload(BaseModel):
     private_key_path: str = ""
     remote_workspace: str
     remote_python: str
+    proxy: str = ""  # optional HTTP(S) proxy for remote downloads
 
 
 class PasswordPayload(BaseModel):
@@ -74,6 +75,7 @@ def _apply_payload(profile: RemoteProfile, req: RemoteProfilePayload) -> None:
     profile.private_key_path = req.private_key_path.strip()
     profile.remote_workspace = req.remote_workspace.strip()
     profile.remote_python = req.remote_python.strip()
+    profile.proxy = req.proxy.strip()
 
 
 # ---- profile CRUD -------------------------------------------------------------
@@ -142,6 +144,11 @@ def _test_connection(profile: RemoteProfile, password: str):
 
     if ok:
         fingerprint = msg if ":" in msg else holder["presented"]
+        # First successful contact: pin the fingerprint so later connections
+        # (including training runs) are verified against it.
+        if fingerprint and not saved:
+            profile.known_host_fingerprint = fingerprint
+            get_profile_store().save(profile)
         return {"ok": True, "need_host_key_confirm": False, "fingerprint": fingerprint}
 
     presented = holder["presented"]
