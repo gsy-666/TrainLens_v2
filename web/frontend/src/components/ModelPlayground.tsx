@@ -4,9 +4,18 @@ import { CheckCircleFilled, InboxOutlined } from "@ant-design/icons";
 import * as api from "../api/client";
 import type { Shape } from "../types";
 
-/** 把任意 shape 归一成可绘制的点列（矩形/旋转框/多边形直接用 points，其余取包围盒四角）。 */
+/** 把任意 shape 归一成可绘制的点列（矩形两点角先扩成四角；多边形/旋转框直接用 points；其余取包围盒四角）。 */
 function shapeOutline(s: Shape): [number, number][] {
   if (s.points.length === 0) return [];
+  if (s.shape_type === "rectangle" && s.points.length === 2) {
+    const [[x1, y1], [x2, y2]] = s.points;
+    return [
+      [x1, y1],
+      [x2, y1],
+      [x2, y2],
+      [x1, y2],
+    ];
+  }
   if (
     (s.shape_type === "rectangle" || s.shape_type === "rotation" || s.shape_type === "polygon") &&
     s.points.length >= 2
@@ -220,7 +229,14 @@ export default function ModelPlayground() {
               ref={imgRef}
               src={previewUrl}
               alt="预览"
-              style={{ maxWidth: "100%", display: "block", border: "1px solid #f0f0f0", borderRadius: 4 }}
+              style={{
+                maxWidth: "100%",
+                maxHeight: 480,
+                objectFit: "contain",
+                display: "block",
+                border: "1px solid #f0f0f0",
+                borderRadius: 4,
+              }}
               onLoad={(e) => {
                 const img = e.currentTarget;
                 setNaturalSize({ w: img.naturalWidth, h: img.naturalHeight });
