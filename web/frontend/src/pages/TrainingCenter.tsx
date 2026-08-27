@@ -174,6 +174,8 @@ export default function TrainingCenter({ onBack }: Props) {
   const [exportingPath, setExportingPath] = useState<string | null>(null);
   const [exportFormat, setExportFormat] = useState("onnx");
   const [registeringPath, setRegisteringPath] = useState<string | null>(null);
+  // Playground 折叠面板受控展开(产物「试用」成功后自动展开)
+  const [playgroundOpen, setPlaygroundOpen] = useState<string[]>([]);
   const [exportFormats, setExportFormats] = useState<api.TrainingExportFormat[] | null>(null);
 
   const seqRef = useRef(0);
@@ -434,8 +436,15 @@ export default function TrainingCenter({ onBack }: Props) {
       try {
         const r = await api.registerModelArtifact(artifactList.job_id, relPath);
         await api.loadModel(r.config_file);
-        message.success("模型已加载，返回标注页即可试用");
-        onBack();
+        // 试用 = 传图看效果:收起产物弹窗、展开 Playground 面板,
+        // 用户直接拖图即可,不用再绕到标注页。
+        setArtifactJob(null);
+        setArtifactList(null);
+        setArtifactError(null);
+        setArtifactDetails(null);
+        setArtifactPreview(null);
+        setPlaygroundOpen(["playground"]);
+        message.success("模型已加载,在「模型试用」里拖一张图片进去即可看到检测效果");
       } catch (e) {
         const err = e as { response?: { data?: { detail?: string } }; message: string };
         message.error(`试用失败: ${err.response?.data?.detail ?? err.message}`, 6);
@@ -444,7 +453,7 @@ export default function TrainingCenter({ onBack }: Props) {
         setRegisteringPath(null);
       }
     },
-    [artifactList, onBack]
+    [artifactList]
   );
 
   // export format availability (env-checked on the backend)
@@ -1152,6 +1161,8 @@ export default function TrainingCenter({ onBack }: Props) {
           <Collapse
             size="small"
             style={{ background: "#fff" }}
+            activeKey={playgroundOpen}
+            onChange={(keys) => setPlaygroundOpen(keys as string[])}
             items={[
               {
                 key: "playground",

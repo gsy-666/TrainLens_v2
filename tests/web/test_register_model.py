@@ -340,3 +340,26 @@ def test_register_remote_job_without_record_data_returns_400(env):
     r = _register(env, "weights/best.onnx")
     assert r.status_code == 400
     assert "args.yaml" in r.json()["detail"]
+
+
+def test_register_falls_back_to_model_embedded_names(env, monkeypatch):
+    """args.yaml/data.yaml unreadable + no record data (e.g. remote run whose
+    staged dataset was cleaned) → classes come from the model file itself."""
+    (env.output_dir / "args.yaml").write_text(
+        yaml.safe_dump({"data": "/nonexistent/remote/path/data.yaml", "imgsz": 640}),
+        encoding="utf-8",
+    )
+
+    def fake_export(job_id, rel_path, fmt, holder):
+        out = env.output_dir / "weights" / "best.onnx"
+        out.write_bytes(b"onnx-from-pt")
+        holder["output"] = str(out)
+        holder["names"] = ["cat", "dog"]
+        holder["imgsz"] = 640
+
+    monkeypatch.setattr(env.training, "_run_model_export", fake_export)
+
+    r = _register(env, "weights/best.pt")
+    assert r.status_code == 200, r.text
+    cfg = _read_generated_yaml(env, r.json())
+    assert cfg["classes"] == ["cat", "dog"]

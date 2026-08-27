@@ -286,3 +286,68 @@ def test_events_strip_ansi_codes(monkeypatch):
     svc._on_event(event)
     items = svc.events_since(0)["events"]
     assert items[-1]["payload"]["message"] == "/root/train path tail"
+
+
+# ---- remote staged-dataset cleanup -------------------------------------------------
+
+
+def _completed_event(job_id: str):
+    from anylabeling.services.training_center.event_protocol import (
+        TrainingEventType,
+    )
+
+    return _terminal_event(job_id, TrainingEventType.COMPLETED)
+
+
+def test_remote_terminal_cleans_staged_dataset(monkeypatch, tmp_path):
+    from anylabeling.services.auto_training.ultralytics import config as ul_cfg
+
+    root = tmp_path / "datasets"
+    ds = root / "detect" / "auto_dataset_x"
+    ds.mkdir(parents=True)
+    (ds / "data.yaml").write_text("names: [a]", encoding="utf-8")
+    monkeypatch.setattr(ul_cfg, "get_dataset_path", lambda: str(root))
+
+    job = SimpleNamespace(
+        job_id="j1", execution_mode="remote_ssh", data=str(ds / "data.yaml")
+    )
+    svc = _build_service(monkeypatch, SimpleNamespace(get_current_job=lambda: job))
+    svc._on_event(_completed_event("j1"))
+    assert not ds.exists()
+    assert any(
+        "已清理" in str(e.get("payload", {}).get("message", "")) for e in svc.events
+    )
+
+
+def test_remote_terminal_never_deletes_outside_root(monkeypatch, tmp_path):
+    from anylabeling.services.auto_training.ultralytics import config as ul_cfg
+
+    monkeypatch.setattr(
+        ul_cfg, "get_dataset_path", lambda: str(tmp_path / "datasets")
+    )
+    outside = tmp_path / "user_data" / "real"
+    outside.mkdir(parents=True)
+    (outside / "data.yaml").write_text("names: [a]", encoding="utf-8")
+    job = SimpleNamespace(
+        job_id="j1", execution_mode="remote_ssh", data=str(outside / "data.yaml")
+    )
+    svc = _build_service(monkeypatch, SimpleNamespace(get_current_job=lambda: job))
+    svc._on_event(_completed_event("j1"))
+    assert outside.exists()
+
+
+def test_local_terminal_keeps_dataset(monkeypatch, tmp_path):
+    from anylabeling.services.auto_training.ultralytics import config as ul_cfg
+
+    root = tmp_path / "datasets"
+    ds = root / "detect" / "auto_dataset_x"
+    ds.mkdir(parents=True)
+    (ds / "data.yaml").write_text("names: [a]", encoding="utf-8")
+    monkeypatch.setattr(ul_cfg, "get_dataset_path", lambda: str(root))
+
+    job = SimpleNamespace(
+        job_id="j1", execution_mode="local", data=str(ds / "data.yaml")
+    )
+    svc = _build_service(monkeypatch, SimpleNamespace(get_current_job=lambda: job))
+    svc._on_event(_completed_event("j1"))
+    assert ds.exists()

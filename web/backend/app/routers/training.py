@@ -171,17 +171,23 @@ def _job_record(job_id: str) -> Dict[str, Any]:
     for record in svc.history(500):
         if str(record.get("job_id")) == job_id:
             return record
-    raise HTTPException(status_code=404, detail=f"Training job not found: {job_id}")
+    raise HTTPException(status_code=404, detail=f"找不到该训练任务的历史记录: {job_id}")
 
 
 def _job_output_dir(job_id: str) -> Path:
     record = _job_record(job_id)
     out = record.get("output_directory") or record.get("output_dir") or record.get("workspace")
     if not out:
-        raise HTTPException(status_code=404, detail=f"Output directory not found for job: {job_id}")
+        raise HTTPException(
+            status_code=404,
+            detail=f"该任务没有产物目录（任务可能未成功完成）: {job_id}",
+        )
     path = Path(str(out)).expanduser().resolve()
     if not path.is_dir():
-        raise HTTPException(status_code=404, detail=f"Output directory not found for job: {job_id}")
+        raise HTTPException(
+            status_code=404,
+            detail=f"产物目录不存在或已被清理: {path}",
+        )
     return path
 
 
@@ -255,6 +261,46 @@ class ExportModelRequest(BaseModel):
 _SUPPORTED_EXPORT_FORMATS = ("onnx", "engine", "openvino", "coreml", "tflite", "torchscript")
 
 
+def _read_model_meta(model_file: Path) -> Dict[str, Any]:
+    """Class names + imgsz embedded in a .pt/.onnx by ultralytics.
+
+    This is the most authoritative source — it is exactly what the model was
+    trained with — and the only one available for remote runs once the local
+    staged dataset has been cleaned up."""
+    from ultralytics import YOLO
+
+    model = YOLO(str(model_file))
+    names = getattr(model, "names", None) or {}
+    if isinstance(names, dict):
+        classes = [str(names[i]) for i in sorted(names)]
+    else:
+        classes = [str(n) for n in names]
+    imgsz = 640
+    try:
+        imgsz = int(getattr(model, "args", {}).get("imgsz") or 640)
+    except Exception:  # noqa
+        pass
+    return {"classes": classes, "imgsz": imgsz}
+
+
+def _onnx_input_size(onnx_path: Path) -> Optional[tuple[int, int]]:
+    """(width, height) the exported ONNX actually expects, or None.
+
+    This is the ground truth for the model config's input size — anything
+    else (training args, model.args defaults) can disagree with the export
+    and break cv2.dnn with shape assertion errors."""
+    try:
+        import onnxruntime as ort
+
+        sess = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+        shape = sess.get_inputs()[0].shape  # typically [1, 3, H, W]
+        if len(shape) == 4 and all(isinstance(d, int) and d > 0 for d in shape[2:4]):
+            return int(shape[3]), int(shape[2])
+    except Exception:  # noqa
+        pass
+    return None
+
+
 def _run_model_export(job_id: str, rel_path: str, fmt: str, holder: dict):
     try:
         from ultralytics import YOLO
@@ -264,6 +310,16 @@ def _run_model_export(job_id: str, rel_path: str, fmt: str, holder: dict):
         model = YOLO(str(target))
         out = model.export(format=fmt)
         holder["output"] = str(out)
+        try:
+            names = getattr(model, "names", None) or {}
+            holder["names"] = (
+                [str(names[i]) for i in sorted(names)]
+                if isinstance(names, dict)
+                else [str(n) for n in names]
+            )
+            holder["imgsz"] = int(getattr(model, "args", {}).get("imgsz") or 640)
+        except Exception:  # noqa — metadata is best-effort
+            pass
     except Exception as e:  # noqa
         holder["error"] = str(e)
 
@@ -450,8 +506,10 @@ def _build_model_yaml_config(
         imgsz = meta["imgsz"]
         config.update(
             {
-                "input_width": imgsz,
-                "input_height": imgsz,
+                # The exported ONNX's own input shape wins — a mismatch with
+                # the config breaks cv2.dnn with shape assertion errors.
+                "input_width": meta.get("input_width", imgsz),
+                "input_height": meta.get("input_height", imgsz),
                 "score_threshold": 0.25,
                 "nms_threshold": 0.45,
                 "confidence_threshold": 0.25,
@@ -488,12 +546,39 @@ async def training_artifact_register_model(job_id: str, req: RegisterModelReques
         onnx_path = Path(holder["output"]).resolve()
         if not onnx_path.is_file():
             raise HTTPException(status_code=500, detail=f"ONNX 导出产物不存在: {onnx_path}")
+        model_meta = (
+            {"classes": holder["names"], "imgsz": holder.get("imgsz", 640)}
+            if holder.get("names")
+            else None
+        )
     else:
         onnx_path = target
+        model_meta = None
 
     record = _job_record(job_id)
     task = _infer_register_task(record, target.name)
-    meta = _load_run_training_meta(base, record)
+    try:
+        meta = _load_run_training_meta(base, record)
+    except HTTPException as meta_error:
+        # args.yaml → data.yaml unavailable locally (e.g. remote runs whose
+        # staged dataset was cleaned up after the job) — fall back to the
+        # class names embedded in the model file itself.
+        if model_meta is None:
+            try:
+                model_meta = await asyncio.to_thread(_read_model_meta, onnx_path)
+            except Exception:  # noqa — unreadable/invalid model file
+                model_meta = None
+        if not model_meta or not model_meta.get("classes"):
+            raise meta_error
+        meta = model_meta
+
+    # The exported ONNX's own input shape is authoritative for the config's
+    # input size (training args / model.args defaults can disagree and break
+    # cv2.dnn inference with reshape assertion errors).
+    onnx_size = await asyncio.to_thread(_onnx_input_size, onnx_path)
+    if onnx_size:
+        meta["input_width"], meta["input_height"] = onnx_size
+
     model_config = _build_model_yaml_config(task, job_id, onnx_path, meta, req.display_name)
 
     config_file = onnx_path.parent / f"{model_config['name']}.yaml"

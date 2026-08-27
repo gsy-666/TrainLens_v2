@@ -102,7 +102,9 @@ export default function ModelPlayground() {
         setShapes(r.shapes ?? []);
         setResultModel(r.model?.display_name ?? null);
         if ((r.shapes ?? []).length === 0) {
-          message.info("未检测到目标，可尝试降低置信度阈值");
+          message.info(
+            "未检测到目标：模型只认识训练时学过的类别；也可尝试把置信度阈值调低一点"
+          );
         }
       } catch (e) {
         const err = e as { response?: { data?: { detail?: string } }; message: string };
@@ -113,6 +115,15 @@ export default function ModelPlayground() {
     },
     [conf]
   );
+
+  const onClear = useCallback(() => {
+    if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+    previewUrlRef.current = null;
+    setPreviewUrl(null);
+    setShapes([]);
+    setResultModel(null);
+    setNaturalSize(null);
+  }, []);
 
   const beforeUpload = useCallback(
     (file: File) => {
@@ -198,6 +209,12 @@ export default function ModelPlayground() {
 
       {previewUrl && (
         <>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ fontSize: 12, color: "#999" }}>试用图片</span>
+            <Button size="small" danger type="text" onClick={onClear}>
+              清除图片
+            </Button>
+          </div>
           <div style={{ position: "relative", alignSelf: "flex-start", maxWidth: "100%" }}>
             <img
               ref={imgRef}

@@ -10,6 +10,7 @@ import datetime
 import logging
 import math
 import re
+import shutil
 import sys
 import threading
 import time
@@ -112,6 +113,60 @@ class WebTrainingService:
                 # reporting the last estimate forever
                 self._epoch_marks.clear()
                 self._eta_seconds = None
+                self._cleanup_remote_staged_dataset(getattr(event, "job_id", ""))
+
+    def _cleanup_remote_staged_dataset(self, job_id: str) -> None:
+        """Delete the locally generated dataset of a finished remote job.
+
+        Remote jobs upload the entire dataset to the server, so the local
+        copy under the trainer datasets root is pure staging. Only directories
+        under that generated root are removed — user data elsewhere is never
+        touched. Caller must hold self.lock.
+        """
+        try:
+            data = ""
+            mode = ""
+            job = self.jm.get_current_job()
+            if job is not None and getattr(job, "job_id", None) == job_id:
+                mode = getattr(job, "execution_mode", "") or ""
+                data = getattr(job, "data", "") or ""
+            if not data:
+                for record in self.history(200):
+                    if str(record.get("job_id")) == job_id:
+                        mode = record.get("execution_mode", "") or ""
+                        data = record.get("data", "") or ""
+                        break
+            if (
+                normalize_execution_mode(mode or "local") != "remote_ssh"
+                or not data
+            ):
+                return
+
+            from anylabeling.services.auto_training.ultralytics.config import (
+                get_dataset_path,
+            )
+
+            root = Path(get_dataset_path()).resolve()
+            p = Path(data)
+            ds_dir = (
+                p.parent if p.suffix.lower() in (".yaml", ".yml") else p
+            ).resolve()
+            if root != ds_dir and root in ds_dir.parents and ds_dir.is_dir():
+                shutil.rmtree(ds_dir)
+                self.seq += 1
+                self.events.append(
+                    {
+                        "seq": self.seq,
+                        "event_type": "console_output",
+                        "job_id": job_id,
+                        "timestamp": datetime.datetime.now().isoformat(),
+                        "payload": {
+                            "message": f"已清理本机暂存的训练集目录: {ds_dir}"
+                        },
+                    }
+                )
+        except Exception:
+            _log.exception("Failed to clean remote-staged dataset")
 
     def _feed_remote_metrics(self, event) -> None:
         """Feed EPOCH_METRICS payloads into the MetricStore for remote jobs.

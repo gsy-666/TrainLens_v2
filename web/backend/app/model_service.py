@@ -116,8 +116,9 @@ class WebModelService:
             self.status_message = ""
         try:
             model_id = None
+            norm = osp.normpath(config_file)
             for i, cfg in enumerate(self.manager.model_configs):
-                if cfg.get("config_file") == config_file:
+                if osp.normpath(str(cfg.get("config_file", ""))) == norm:
                     model_id = i
                     break
             if model_id is None:
