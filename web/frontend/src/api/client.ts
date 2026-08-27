@@ -1039,6 +1039,11 @@ export async function getTrainingArtifacts(jobId: string): Promise<ArtifactListR
   return r.data;
 }
 
+export async function getTrainingHistoryMetrics(jobId: string): Promise<{ series: MetricSeries[] }> {
+  const r = await api.get(`/training/history/${encodeURIComponent(jobId)}/metrics`);
+  return r.data;
+}
+
 export function trainingArtifactDownloadUrl(jobId: string, path: string): string {
   return withToken(
     `/api/training/history/${encodeURIComponent(jobId)}/artifacts/download?path=${encodeURIComponent(path)}`

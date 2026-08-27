@@ -3,6 +3,10 @@
 interface Series {
   name: string;
   points: [number, number][];
+  /** fixed stroke color (multi-run compare assigns one color per job) */
+  color?: string;
+  /** svg stroke-dasharray, e.g. "6 3" — distinguishes metrics within a job */
+  dash?: string;
 }
 
 interface Props {
@@ -68,8 +72,9 @@ export default function LineChart({ series, width = 560, height = 220, title }: 
           <polyline
             key={s.name}
             fill="none"
-            stroke={COLORS[si % COLORS.length]}
+            stroke={s.color ?? COLORS[si % COLORS.length]}
             strokeWidth={1.5}
+            strokeDasharray={s.dash}
             points={s.points.map(([x, y]) => `${sx(x)},${sy(y)}`).join(" ")}
           />
         ))}
@@ -82,7 +87,7 @@ export default function LineChart({ series, width = 560, height = 220, title }: 
                 display: "inline-block",
                 width: 10,
                 height: 3,
-                background: COLORS[si % COLORS.length],
+                background: s.color ?? COLORS[si % COLORS.length],
                 marginRight: 4,
                 verticalAlign: "middle",
               }}

@@ -253,6 +253,30 @@ def training_artifact_download_all(job_id: str):
     return StreamingResponse(iter([buf.getvalue()]), media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="{job_id}_artifacts.zip"'})
 
 
+@router.get("/training/history/{job_id}/metrics")
+def training_history_metrics(job_id: str):
+    """Metric series parsed from a finished run's results.csv.
+
+    Same shape as /training/metrics so the frontend can reuse its chart
+    plumbing for multi-run comparison. results.csv lives at the run root
+    (weights go to the weights/ subdirectory). A run without results.csv
+    (never reached epoch 1) yields an empty series list.
+    """
+    from anylabeling.services.training_center.metrics import parse_results_csv
+
+    base = _job_output_dir(job_id)
+    csv_path = base / "results.csv"
+    if not csv_path.is_file():
+        return {"series": []}
+    data = parse_results_csv(csv_path, job_id)
+    return {
+        "series": [
+            {"name": s.name, "group": s.group, "points": s.points}
+            for s in data.to_series()
+        ]
+    }
+
+
 class ExportModelRequest(BaseModel):
     path: str  # artifact relative path, must be a .pt under weights/
     format: str = "onnx"  # onnx / engine / openvino / coreml / tflite / torchscript

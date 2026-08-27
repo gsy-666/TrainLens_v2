@@ -16,9 +16,11 @@ import {
   Space,
   Splitter,
   Steps,
+  Switch,
   Table,
   Tag,
   Tooltip,
+  Typography,
 } from "antd";
 import {
   ArrowLeftOutlined,
@@ -115,6 +117,114 @@ function formatEta(seconds: number): string {
   return `约 ${Math.floor(m / 60)} 小时 ${m % 60} 分钟`;
 }
 
+// ---- training-done notification (browser notification + beep) --------------
+const NOTIFY_DONE_KEY = "xaw_notify_done";
+
+const NOTIFY_STATUS_LABEL: Record<string, string> = {
+  completed: "训练完成",
+  failed: "训练失败",
+  stopped: "训练已停止",
+};
+
+/** Ask for browser notification permission once, at a user-relevant moment. */
+function requestNotifyPermission() {
+  try {
+    if (typeof Notification === "undefined") return;
+    if (Notification.permission === "default") void Notification.requestPermission();
+  } catch {
+    /* notifications unsupported */
+  }
+}
+
+function showDoneNotification(body: string) {
+  try {
+    if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+    new Notification("训练已结束", { body });
+  } catch {
+    /* notifications unsupported */
+  }
+}
+
+/** Short two-tone beep via Web Audio — no audio asset needed. */
+function playDoneBeep() {
+  try {
+    const Ctor =
+      window.AudioContext ??
+      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!Ctor) return;
+    const ctx = new Ctor();
+    const t0 = ctx.currentTime;
+    [880, 1174.66].forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = freq;
+      const start = t0 + i * 0.18;
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.exponentialRampToValueAtTime(0.15, start + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.16);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(start);
+      osc.stop(start + 0.18);
+    });
+    window.setTimeout(() => void ctx.close(), 800);
+  } catch {
+    /* audio unavailable (autoplay policy etc.) */
+  }
+}
+
+// ---- multi-run compare -------------------------------------------------------
+// one color per job; dash pattern distinguishes metrics within the same job
+const COMPARE_COLORS = [
+  "#1677ff",
+  "#52c41a",
+  "#fa8c16",
+  "#eb2f96",
+  "#722ed1",
+  "#13c2c2",
+  "#f5222d",
+  "#a0d911",
+];
+const COMPARE_DASHES = ["", "6 3", "2 2", "8 3 2 3"];
+
+// ---- deploy wizard -----------------------------------------------------------
+function joinOutputPath(outputDir: string, rel: string): string {
+  const sep = outputDir.includes("\\") ? "\\" : "/";
+  return outputDir.replace(/[/\\]+$/, "") + sep + rel.split("/").join(sep);
+}
+
+/** Ready-to-run inference sample with the real artifact path filled in. */
+function buildDeploySnippet(absPath: string, isOnnx: boolean): string {
+  if (isOnnx) {
+    return [
+      "# 先安装依赖: pip install onnxruntime numpy",
+      "import numpy as np",
+      "import onnxruntime as ort",
+      "",
+      `session = ort.InferenceSession(r"${absPath}", providers=["CPUExecutionProvider"])`,
+      "inp = session.get_inputs()[0]",
+      'print("模型输入:", inp.name, inp.shape)',
+      "",
+      "# 实际推理时把 dummy 换成你的图片预处理结果",
+      "# (缩放到输入尺寸、归一化到 0~1、转成 NCHW 的 float32 数组)",
+      "shape = [d if isinstance(d, int) else 1 for d in inp.shape]",
+      "dummy = np.zeros(shape, dtype=np.float32)",
+      "outputs = session.run(None, {inp.name: dummy})",
+      'print("模型输出:", [o.shape for o in outputs])',
+    ].join("\n");
+  }
+  return [
+    "# 先安装依赖: pip install ultralytics",
+    "from ultralytics import YOLO",
+    "",
+    `model = YOLO(r"${absPath}")  # 加载训练好的权重`,
+    "",
+    "# 对一张图片做推理（把路径换成你自己的图片）",
+    'results = model.predict(source="your_image.jpg", save=True)',
+    "results[0].show()  # 弹窗查看检测效果",
+  ].join("\n");
+}
+
 interface Props {
   onBack: () => void;
 }
@@ -177,6 +287,26 @@ export default function TrainingCenter({ onBack }: Props) {
   // Playground 折叠面板受控展开(产物「试用」成功后自动展开)
   const [playgroundOpen, setPlaygroundOpen] = useState<string[]>([]);
   const [exportFormats, setExportFormats] = useState<api.TrainingExportFormat[] | null>(null);
+
+  // 训练完成通知：默认开，localStorage 记忆；ref 供轮询闭包读最新值
+  const [notifyDone, setNotifyDone] = useState(
+    () => localStorage.getItem(NOTIFY_DONE_KEY) !== "0"
+  );
+  const notifyDoneRef = useRef(notifyDone);
+  // 上一次 poll 到的 running，用于 true→false 跳变检测（只在页面开着期间发生
+  // 的结束才通知，历史回放天然不会触发）
+  const prevRunningRef = useRef(false);
+
+  // 多 run 对比
+  const [compareIds, setCompareIds] = useState<string[]>([]);
+  const [compareOpen, setCompareOpen] = useState(false);
+  const [compareLoading, setCompareLoading] = useState(false);
+  const [compareData, setCompareData] = useState<
+    { jobId: string; label: string; series: api.MetricSeries[] }[]
+  >([]);
+
+  // 部署向导
+  const [deployArtifact, setDeployArtifact] = useState<api.ArtifactInfo | null>(null);
 
   const seqRef = useRef(0);
   const logBoxRef = useRef<HTMLDivElement>(null);
@@ -339,6 +469,32 @@ export default function TrainingCenter({ onBack }: Props) {
       try {
         const s = await api.getTrainingStatus();
         setStatus(s);
+        // running 跳变检测：基于每次 poll 到的最新值与 ref（轮询 effect 只挂载
+        // 一次，直接读 state 会拿到闭包里的旧值）。
+        // false→true：本页观察到训练开始，借此时机申请浏览器通知权限；
+        // true→false 且 job 到终态：本次会话内的训练结束，触发通知。
+        const wasRunning = prevRunningRef.current;
+        prevRunningRef.current = !!s.running;
+        if (!wasRunning && s.running && notifyDoneRef.current) {
+          requestNotifyPermission();
+        }
+        const jobStatus = s.job ? String(s.job.status) : "";
+        if (
+          wasRunning &&
+          !s.running &&
+          s.job &&
+          TERMINAL_STATUS.has(jobStatus) &&
+          notifyDoneRef.current
+        ) {
+          const text = `${NOTIFY_STATUS_LABEL[jobStatus] ?? jobStatus} · ${
+            s.job.display_name || s.job.job_id
+          }`;
+          if (jobStatus === "completed") message.success(text, 5);
+          else if (jobStatus === "failed") message.error(text, 5);
+          else message.info(text, 5);
+          playDoneBeep();
+          showDoneNotification(text);
+        }
         if (s.running || (s.job && !s.job.ended_at)) {
           const m = await api.getTrainingMetrics();
           setMetrics(m.series);
@@ -607,6 +763,73 @@ export default function TrainingCenter({ onBack }: Props) {
     await api.trainingStop();
     message.info("已请求停止");
   }, []);
+
+  // ---- 完成通知开关 -------------------------------------------------------------
+  const onNotifyDoneChange = useCallback((checked: boolean) => {
+    setNotifyDone(checked);
+    notifyDoneRef.current = checked;
+    localStorage.setItem(NOTIFY_DONE_KEY, checked ? "1" : "0");
+    if (checked) requestNotifyPermission();
+  }, []);
+
+  // ---- 多 run 对比 ---------------------------------------------------------------
+  // 终态且有产物目录的任务才可选（没有输出目录的任务也拉不到 results.csv）
+  const isComparable = useCallback(
+    (r: Record<string, unknown>) =>
+      TERMINAL_STATUS.has(String(r.status ?? "")) &&
+      !!(r.output_directory || r.output_dir),
+    []
+  );
+
+  const openCompare = useCallback(async () => {
+    setCompareOpen(true);
+    setCompareLoading(true);
+    try {
+      const jobs = await Promise.all(
+        compareIds.map(async (id) => {
+          const rec = history.find((h) => String(h.job_id) === id);
+          const expName = String(rec?.display_name ?? "") || String(rec?.name ?? "") || id;
+          // 实验名 + job 短 id（uuid 尾段），同名实验也能区分
+          const label = `${expName} · ${id.slice(-6)}`;
+          try {
+            const d = await api.getTrainingHistoryMetrics(id);
+            return { jobId: id, label, series: d.series };
+          } catch {
+            return { jobId: id, label, series: [] as api.MetricSeries[] };
+          }
+        })
+      );
+      setCompareData(jobs);
+    } finally {
+      setCompareLoading(false);
+    }
+  }, [compareIds, history]);
+
+  // 同 group 的曲线叠加在一张图上：每个 job 一个颜色，同一 job 内的多个指标
+  // 用虚线样式区分（图例文字为「实验名 · 指标名」）
+  const compareGroupSeries = (group: string) =>
+    compareData.flatMap((job, ji) =>
+      job.series
+        .filter((s) => s.group === group)
+        .map((s, mi) => ({
+          name: `${job.label} · ${s.name}`,
+          points: s.points,
+          color: COMPARE_COLORS[ji % COMPARE_COLORS.length],
+          dash: COMPARE_DASHES[mi % COMPARE_DASHES.length] || undefined,
+        }))
+    );
+
+  // ---- 部署向导 -------------------------------------------------------------------
+  const deployInfo =
+    deployArtifact && artifactList
+      ? {
+          isOnnx: deployArtifact.name.endsWith(".onnx"),
+          absPath: joinOutputPath(artifactList.output_dir, deployArtifact.relative_path),
+        }
+      : null;
+  const deploySnippet = deployInfo
+    ? buildDeploySnippet(deployInfo.absPath, deployInfo.isOnnx)
+    : "";
 
   const onPrepareDataset = useCallback(async () => {
     setPreparing(true);
@@ -1181,11 +1404,21 @@ export default function TrainingCenter({ onBack }: Props) {
             title="实时日志"
             styles={{ body: { padding: 0 } }}
             extra={
-              running && status?.eta_seconds != null && status.eta_seconds > 0 ? (
-                <span style={{ fontSize: 12, color: "#888", fontWeight: 400 }}>
-                  预计剩余 {formatEta(status.eta_seconds)}
-                </span>
-              ) : null
+              <Space size={12}>
+                <Tooltip title="训练结束（完成/失败/停止）时播放提示音并弹出浏览器通知">
+                  <Space size={4}>
+                    <Switch size="small" checked={notifyDone} onChange={onNotifyDoneChange} />
+                    <span style={{ fontSize: 12, color: "#888", fontWeight: 400 }}>
+                      完成时通知我
+                    </span>
+                  </Space>
+                </Tooltip>
+                {running && status?.eta_seconds != null && status.eta_seconds > 0 ? (
+                  <span style={{ fontSize: 12, color: "#888", fontWeight: 400 }}>
+                    预计剩余 {formatEta(status.eta_seconds)}
+                  </span>
+                ) : null}
+              </Space>
             }
           >
             <div
@@ -1217,12 +1450,30 @@ export default function TrainingCenter({ onBack }: Props) {
             ))}
           </div>
 
-          <Card id="tour-train-history" size="small" title="历史记录">
+          <Card
+            id="tour-train-history"
+            size="small"
+            title="历史记录"
+            extra={
+              <Button
+                size="small"
+                disabled={compareIds.length < 2}
+                onClick={openCompare}
+              >
+                对比选中{compareIds.length >= 2 ? `（${compareIds.length}）` : ""}
+              </Button>
+            }
+          >
             <Table
               size="small"
               rowKey={(r) => String(r.job_id)}
               dataSource={history}
               pagination={{ pageSize: 8, size: "small" }}
+              rowSelection={{
+                selectedRowKeys: compareIds,
+                onChange: (keys) => setCompareIds(keys.map(String)),
+                getCheckboxProps: (r) => ({ disabled: !isComparable(r) }),
+              }}
               columns={[
                 { title: "ID", dataIndex: "job_id", ellipsis: true },
                 {
@@ -1346,6 +1597,13 @@ export default function TrainingCenter({ onBack }: Props) {
                             >
                               试用
                             </Button>,
+                            <Button
+                              key="deploy"
+                              size="small"
+                              onClick={() => setDeployArtifact(a)}
+                            >
+                              部署
+                            </Button>,
                           ]
                         : []),
                       <Button
@@ -1404,6 +1662,95 @@ export default function TrainingCenter({ onBack }: Props) {
           </>
         ) : (
           <div>暂无产物</div>
+        )}
+      </Modal>
+
+      <Modal
+        open={compareOpen}
+        title={`训练对比（${compareData.length || compareIds.length} 个任务）`}
+        onCancel={() => setCompareOpen(false)}
+        footer={null}
+        width={920}
+      >
+        {compareLoading ? (
+          <div>加载中…</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            {metricGroups.map((g) => (
+              <LineChart
+                key={g.key}
+                title={g.title}
+                series={compareGroupSeries(g.key)}
+                width={860}
+                height={240}
+              />
+            ))}
+            {compareData.every((j) => j.series.length === 0) && (
+              <div style={{ fontSize: 12, color: "#999" }}>
+                所选任务都没有可对比的指标：任务需跑到至少第 1 个 epoch 并生成 results.csv
+                （远程任务的产物在结束时回传到本机后才能对比）。
+              </div>
+            )}
+          </div>
+        )}
+      </Modal>
+
+      <Modal
+        open={!!deployArtifact}
+        title={deployArtifact ? `部署：${deployArtifact.name}` : "部署"}
+        onCancel={() => setDeployArtifact(null)}
+        footer={null}
+        width={700}
+      >
+        {deployInfo && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <div style={{ fontSize: 13, color: "#555", lineHeight: 1.8 }}>
+              {deployInfo.isOnnx
+                ? "这是 ONNX 模型文件：跨平台、不依赖 PyTorch，装个 onnxruntime 就能跑推理。"
+                : "这是 PyTorch 权重文件（.pt）：ultralytics 官方格式，直接推理或继续训练都可以。"}
+              远程服务器训练的产物在任务结束时已自动回传到本机，下面的路径就是本机文件，可直接使用。
+            </div>
+            <div>
+              <div style={{ marginBottom: 4, fontWeight: 600 }}>文件路径</div>
+              <Typography.Text
+                copyable
+                code
+                style={{ wordBreak: "break-all", whiteSpace: "normal" }}
+              >
+                {deployInfo.absPath}
+              </Typography.Text>
+            </div>
+            <div>
+              <div style={{ marginBottom: 4, fontWeight: 600 }}>
+                示例推理代码（先安装依赖：
+                {deployInfo.isOnnx ? "pip install onnxruntime numpy" : "pip install ultralytics"}）
+              </div>
+              <div style={{ position: "relative" }}>
+                <pre
+                  style={{
+                    background: "#141414",
+                    color: "#d4d4d4",
+                    padding: 12,
+                    borderRadius: 6,
+                    fontSize: 12,
+                    lineHeight: 1.6,
+                    overflow: "auto",
+                    margin: 0,
+                  }}
+                >
+                  {deploySnippet}
+                </pre>
+                <Typography.Text
+                  copyable={{ text: deploySnippet, tooltips: ["复制代码", "已复制"] }}
+                  style={{ position: "absolute", top: 6, right: 8 }}
+                />
+              </div>
+            </div>
+            <div style={{ fontSize: 12, color: "#999", lineHeight: 1.8 }}>
+              代码里的路径已填好真实路径，复制后可直接运行；想放到其他机器上用，
+              把文件拷过去并改一下代码里的路径即可。
+            </div>
+          </div>
         )}
       </Modal>
 
